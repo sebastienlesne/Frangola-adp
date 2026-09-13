@@ -3,7 +3,7 @@ import { storage } from "./storage";
 import {
   Shield, Users, Building2, Upload, FileText, CheckCircle2, Clock,
   Bell, LogOut, Download, Plus, ArrowLeft, Copy, Check, AlertCircle,
-  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target
+  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus
 } from "lucide-react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
@@ -69,10 +69,26 @@ function uid() {
 function genCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
+function generateRecoveryCodes(count = 8) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    const raw = Math.random().toString(36).slice(2, 10).toUpperCase().padEnd(8, "X");
+    codes.push({ code: `${raw.slice(0, 4)}-${raw.slice(4, 8)}`, used: false });
+  }
+  return codes;
+}
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+function fileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -87,8 +103,11 @@ function fmtSize(bytes) {
 function fmtEuro(n) {
   return (n || 0).toLocaleString("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 }
+function up(s) {
+  return (s || "").toUpperCase();
+}
 function clientName(d) {
-  const full = `${d.clientLastName || ""} ${d.clientFirstName || ""}`.trim();
+  const full = `${(d.clientLastName || "").toUpperCase()} ${d.clientFirstName || ""}`.trim();
   return full || "(Sans nom)";
 }
 
@@ -138,7 +157,7 @@ function downloadJson(filename, obj) {
   URL.revokeObjectURL(url);
 }
 function exportDossiersCsv(dossiers, partners) {
-  const partnerName = (id) => { const p = partners.find(p => p.id === id); return p ? (p.firstName ? `${p.firstName} ${p.name}` : p.name) : "—"; };
+  const partnerName = (id) => { const p = partners.find(p => p.id === id); return p ? (p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)) : "—"; };
   const rows = [
     ["Client Nom", "Client Prénom", "Client Téléphone", "Partenaire", "Statut", "Déposé le", "Dernière mise à jour", "CA généré (€)", "Rétrocession (€)", "Mode de paiement", "Date de paiement", "Notes"],
     ...dossiers.map(d => [d.clientLastName, d.clientFirstName, d.clientPhone || "", partnerName(d.partnerId), d.status, fmtDate(d.createdAt), fmtDate(d.updatedAt || d.createdAt), d.caAmount ?? "", d.commissionAmount ?? "", d.paymentMethod || "", d.paymentDate || "", d.notes || ""]),
@@ -300,13 +319,14 @@ export default function App() {
   const [busy, setBusy] = useState(false);
 
   const [loadError, setLoadError] = useState(false);
+  useEffect(() => { if (data) setColorDataRef(data); }, [data]);
   useEffect(() => {
     (async () => {
       const initial = {
         settings: {
-          admin: { email: "contact@frangola.fr", password: null, totpSecret: null, totpEnabled: false },
+          admin: { email: "contact@frangola.fr", password: null, totpSecret: null, totpEnabled: false, color: "#2F448B" },
         },
-        mandataires: [],
+        mandataires: [], reseaux: [],
         partners: [], dossiers: [],
       };
       try {
@@ -316,6 +336,7 @@ export default function App() {
           let changed = false;
           if (!loaded.settings) loaded.settings = {};
           if (!loaded.mandataires) { loaded.mandataires = []; changed = true; }
+          if (!loaded.reseaux) { loaded.reseaux = []; changed = true; }
 
           // Migration from the old multi-admin array format.
           if (loaded.settings.admins && !loaded.settings.admin) {
@@ -333,6 +354,7 @@ export default function App() {
             changed = true;
           }
           if (!loaded.settings.admin) { loaded.settings.admin = initial.settings.admin; changed = true; }
+          if (!loaded.settings.admin.color) { loaded.settings.admin.color = "#2F448B"; changed = true; }
 
           if (changed) await storage.set("adp:data", JSON.stringify(loaded), true);
           setData(loaded);
@@ -423,6 +445,43 @@ export default function App() {
       await saveData({ ...data, partners });
       return true;
     } finally { setBusy(false); }
+  }
+
+  async function uploadMandataireRib(mandataireId, file) {
+    if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
+    setBusy(true);
+    try {
+      const b64 = await fileToBase64(file);
+      const fileKey = "adp:file:" + uid();
+      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      const mandataires = data.mandataires.map(m => m.id === mandataireId
+        ? { ...m, ribFile: { name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() } }
+        : m);
+      await saveData({ ...data, mandataires });
+      return true;
+    } finally { setBusy(false); }
+  }
+
+  async function uploadReseauLogo(reseauName, file) {
+    const name = reseauName.trim();
+    if (!name) return false;
+    if (file.size > 1024 * 1024) { setGlobalError(`"${file.name}" dépasse 1 Mo — utilise une image plus légère pour un logo.`); return false; }
+    setBusy(true);
+    try {
+      const dataUrl = await fileToDataURL(file);
+      const existing = data.reseaux.find(r => r.name.trim().toLowerCase() === name.toLowerCase());
+      const reseaux = existing
+        ? data.reseaux.map(r => r === existing ? { ...r, logoData: dataUrl, uploadedAt: Date.now() } : r)
+        : [...data.reseaux, { id: uid(), name, logoData: dataUrl, uploadedAt: Date.now() }];
+      await saveData({ ...data, reseaux });
+      return true;
+    } finally { setBusy(false); }
+  }
+
+  async function removeReseauLogo(reseauName) {
+    const name = reseauName.trim().toLowerCase();
+    const reseaux = data.reseaux.filter(r => r.name.trim().toLowerCase() !== name);
+    await saveData({ ...data, reseaux });
   }
 
   async function deletePartner(id) {
@@ -560,7 +619,25 @@ export default function App() {
         </div>
       )}
 
-      {view === "landing" && <Landing onSelect={setView} />}
+      {view === "landing" && (
+        <Landing
+          onSelect={(target) => {
+            // Détection propre au bac à sable Claude (jamais présente sur le vrai site déployé).
+            const isTestSandbox = typeof window !== "undefined" && !!window["storage"];
+            if (isTestSandbox && target === "adminLogin") {
+              setCurrentAdmin(true); setView("adminDash"); return;
+            }
+            if (isTestSandbox && target === "partnerLogin") {
+              const testPartner = data.partners.find(p => !p.deleted) || {
+                id: "test-partner", name: "Test", firstName: "Partenaire", company: "Démo",
+                email: "test@demo.fr", active: true, createdAt: Date.now(),
+              };
+              setCurrentPartner(testPartner); setView("partnerDash"); return;
+            }
+            setView(target);
+          }}
+        />
+      )}
       {view === "partnerLogin" && (
         <EmailPasswordLoginFlow
           title="Espace partenaire"
@@ -600,6 +677,7 @@ export default function App() {
           mandataire={data.mandataires.find(m => m.id === currentMandataire.id) || currentMandataire}
           data={data}
           onLogout={logout}
+          onUploadRib={uploadMandataireRib}
         />
       )}
       {view === "adminDash" && (
@@ -616,6 +694,8 @@ export default function App() {
           onAddMandataire={addMandataire}
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
+          onUploadReseauLogo={uploadReseauLogo}
+          onRemoveReseauLogo={removeReseauLogo}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
           onDuplicateDossier={duplicateDossier}
@@ -630,6 +710,7 @@ export default function App() {
 }
 
 function Landing({ onSelect }) {
+  const [showLegal, setShowLegal] = useState(false);
   return (
     <div className="min-h-screen flex flex-col">
       <header className="px-6 py-5 flex items-center justify-between fa-bg-offwhite">
@@ -646,13 +727,13 @@ function Landing({ onSelect }) {
       <section className="fa-bg-teal px-6 py-16">
         <div className="max-w-3xl mx-auto text-center">
           <span className="inline-block text-xs font-bold uppercase tracking-widest fa-navy fa-bg-gold px-3 py-1.5 rounded-full mb-6">
-            Espace collaboratif Frangola Assure
+            Assurance de prêt
           </span>
           <h1 className="font-display text-3xl md:text-4xl font-semibold fa-navy mb-4 leading-tight">
-            Le lien direct entre vous et Frangola Assure<br className="hidden md:block" /> pour vos dossiers d'assurance de prêt
+            Le lien direct entre vous et <span style={{ color: "#FCD947" }}>Frangola Assure</span>
           </h1>
           <p className="text-white/90 max-w-xl mx-auto mb-10">
-            Déposez les pièces d'un dossier, suivez son avancement en temps réel, et retrouvez votre bordereau de commission — tout dans un espace qui vous est propre.
+            Déposez, suivez, avancez — tout depuis votre espace personnel.
           </p>
           <div className="max-w-sm mx-auto">
             <button onClick={() => onSelect("partnerLogin")}
@@ -670,10 +751,10 @@ function Landing({ onSelect }) {
           <h2 className="font-display text-2xl md:text-3xl font-semibold fa-navy mb-10">Comment ça marche ?</h2>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-8 text-left">
             {[
-              { n: "1", t: "Vous déposez", d: "Offre de prêt, tableau d'amortissement, carte d'identité — dans votre espace." },
-              { n: "2", t: "Frangola vérifie", d: "Alerte immédiate, étude du dossier et suivi de chaque étape." },
-              { n: "3", t: "Vous suivez", d: "Avancement visible en temps réel, jusqu'à la souscription." },
-              { n: "4", t: "Vous encaissez", d: "Le bordereau de commission est déposé dans votre espace." },
+              { n: "1", t: "Vous déposez", d: "Les informations nécessaires à la bonne prise en charge du prospect." },
+              { n: "2", t: "Frangola vérifie", d: "Le dossier est contrôlé et le prospect contacté sous 24h." },
+              { n: "3", t: "Vous suivez", d: "Du devis à la signature du contrat, suivez chaque étape en temps réel." },
+              { n: "4", t: "Vous encaissez", d: "Le bordereau est déposé dans votre espace pour percevoir votre commission." },
             ].map(step => (
               <div key={step.n} className="bg-white rounded-2xl p-6 shadow-sm">
                 <div className="fa-bg-gold w-9 h-9 rounded-full flex items-center justify-center font-display font-bold fa-navy mb-4">{step.n}</div>
@@ -685,7 +766,43 @@ function Landing({ onSelect }) {
         </div>
       </section>
 
-      <footer className="text-center text-xs text-gray-400 py-6 fa-bg-offwhite">FRANGOLA ADP — Frangola Assure, courtier en assurance</footer>
+      <footer className="text-center text-xs text-gray-400 py-6 fa-bg-offwhite">
+        FRANGOLA ADP — Frangola Assure, courtier en assurance
+        {" · "}
+        <button onClick={() => setShowLegal(true)} className="underline underline-offset-2 hover:fa-teal-text">Mentions légales</button>
+      </footer>
+
+      {showLegal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-6 z-50" onClick={() => setShowLegal(false)}>
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-display text-lg font-semibold fa-navy">Mentions légales</h2>
+              <button onClick={() => setShowLegal(false)} className="text-gray-400 hover:text-red-600"><X size={18} /></button>
+            </div>
+            <div className="text-sm text-gray-600 space-y-3">
+              <p><strong className="fa-navy">Éditeur.</strong> FRANGOLA, EURL au capital de 1 000 €, 6 bis Boulevard Berthelot, Bureau 3, 34000 Montpellier — RCS Montpellier, SIRET 108 672 452 00019, TVA FR77108672452. Directeur de la publication : Sébastien Lesne, gérant. Contact : contact@frangola.fr — 07 62 56 15 00.</p>
+              <p><strong className="fa-navy">Activité réglementée.</strong> FRANGOLA est courtier en assurance immatriculé à l'ORIAS sous le n° 26010830 (orias.fr), sans détention ni maniement de fonds de tiers. Assurance Responsabilité Civile Professionnelle souscrite auprès de Hiscox S.A. (contrat n° HXFRIA000000423), par l'intermédiaire de +Simple.fr. Activité contrôlée par l'ACPR — 4 Place de Budapest, CS 92459, 75436 Paris Cedex 09.</p>
+              <p><strong className="fa-navy">Hébergement.</strong> Hostinger International Ltd., 61 Lordou Vironos Street, 6023 Larnaca, Chypre — hostinger.fr/contact.</p>
+              <p><strong className="fa-navy">Données personnelles.</strong> Les données saisies dans cet espace sont traitées conformément au RGPD, dans le cadre strict de l'activité de courtage. Droit d'accès, de rectification ou de suppression : contact@frangola.fr.</p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PasswordField({ value, onChange, onKeyDown, placeholder, autoFocus, className }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative">
+      <input value={value} onChange={onChange} onKeyDown={onKeyDown}
+        type={visible ? "text" : "password"} placeholder={placeholder} autoFocus={autoFocus}
+        className={`${className} pr-10`} />
+      <button type="button" onClick={() => setVisible(v => !v)}
+        className="absolute right-0 top-0 h-full px-3 flex items-center text-gray-400 hover:text-gray-600" tabIndex={-1}>
+        {visible ? <EyeOff size={16} /> : <Eye size={16} />}
+      </button>
     </div>
   );
 }
@@ -701,6 +818,9 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
   const [password2, setPassword2] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [generatedRecoveryCodes, setGeneratedRecoveryCodes] = useState([]);
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
+  const [recoveryCodeInput, setRecoveryCodeInput] = useState("");
 
   function submitEmail() {
     const trimmed = email.trim().toLowerCase();
@@ -729,8 +849,15 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
     try {
       if (accountType === "admin") {
         await onUpdateAdmin({ password });
-        setPendingSecret(randomBase32Secret());
-        setStep("totpSetup");
+        if (admin.totpEnabled && admin.totpSecret) {
+          // Password reset on an account that already has TOTP configured — don't
+          // make them reconfigure their authenticator app, just let them in.
+          await onUpdateAdmin({ lastLoginAt: Date.now() });
+          onAdminSuccess();
+        } else {
+          setPendingSecret(randomBase32Secret());
+          setStep("totpSetup");
+        }
       } else {
         await onUpdateMandataire(mandataire.id, { password, lastLoginAt: Date.now() });
         onMandataireSuccess({ ...mandataire, password, lastLoginAt: Date.now() });
@@ -754,21 +881,59 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
     }
   }
 
+  function startForgotPassword() {
+    setError(""); setCode(""); setPassword(""); setPassword2("");
+    if (accountType === "admin" && admin.totpEnabled && admin.totpSecret) {
+      setStep("forgotAdminTotp");
+    } else {
+      // No second factor available (mandataire, or admin without TOTP yet) — direct reset.
+      setStep("createPassword");
+    }
+  }
+
+  async function confirmForgotAdminTotp() {
+    setBusy(true); setError("");
+    try {
+      if (useRecoveryCode) {
+        const match = (admin.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
+        if (!match) { setError("Code de récupération invalide ou déjà utilisé."); setBusy(false); return; }
+        const updatedCodes = admin.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
+        await onUpdateAdmin({ recoveryCodes: updatedCodes });
+        setStep("createPassword");
+        return;
+      }
+      const ok = await verifyTotp(admin.totpSecret, code);
+      if (!ok) { setError("Code incorrect."); setBusy(false); return; }
+      setStep("createPassword");
+    } finally { setBusy(false); }
+  }
+
   async function confirmSetup() {
     setBusy(true); setError("");
     try {
       const ok = await verifyTotp(pendingSecret, code);
       if (!ok) { setError("Code incorrect — vérifie l'heure de ton téléphone et réessaie."); setBusy(false); return; }
-      await onUpdateAdmin({ totpSecret: pendingSecret, totpEnabled: true });
-      onAdminSuccess();
+      const codes = generateRecoveryCodes();
+      await onUpdateAdmin({ totpSecret: pendingSecret, totpEnabled: true, lastLoginAt: Date.now(), recoveryCodes: codes });
+      setGeneratedRecoveryCodes(codes);
+      setStep("showRecoveryCodes");
     } finally { setBusy(false); }
   }
 
   async function confirmVerify() {
     setBusy(true); setError("");
     try {
+      if (useRecoveryCode) {
+        const match = (admin.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
+        if (!match) { setError("Code de récupération invalide ou déjà utilisé."); setBusy(false); return; }
+        const updatedCodes = admin.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
+        await onUpdateAdmin({ recoveryCodes: updatedCodes, lastLoginAt: Date.now() });
+        onAdminSuccess();
+        return;
+      }
       const ok = await verifyTotp(admin.totpSecret, code);
       if (!ok) { setError("Code incorrect."); setBusy(false); return; }
+      await onUpdateAdmin({ lastLoginAt: Date.now() });
       onAdminSuccess();
     } finally { setBusy(false); }
   }
@@ -798,12 +963,12 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
 
         {step === "createPassword" && (
           <>
-            <p className="text-sm text-gray-500 mb-5">Première connexion — créez votre mot de passe.</p>
-            <input value={password} onChange={e => setPassword(e.target.value)} type="password"
+            <p className="text-sm text-gray-500 mb-5">{(accountType === "admin" ? admin.password : mandataire?.password) ? "Réinitialisez votre mot de passe." : "Première connexion — créez votre mot de passe."}</p>
+            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
               placeholder="Nouveau mot de passe (6 caractères min.)" autoFocus
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            <input value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
-              type="password" placeholder="Confirmer le mot de passe"
+            <PasswordField value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
+              placeholder="Confirmer le mot de passe"
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
             <button onClick={submitCreatePassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
@@ -815,13 +980,46 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
         {step === "password" && (
           <>
             <p className="text-sm text-gray-500 mb-5">Entrez votre mot de passe.</p>
-            <input value={password} onChange={e => setPassword(e.target.value)}
+            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
               onKeyDown={e => e.key === "Enter" && submitPassword()}
-              type="password" placeholder="Mot de passe" autoFocus
+              placeholder="Mot de passe" autoFocus
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
             <button onClick={submitPassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
               {busy ? "Vérification…" : "Continuer"}
+            </button>
+            <button onClick={startForgotPassword} className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
+              Mot de passe oublié ?
+            </button>
+          </>
+        )}
+
+        {step === "forgotAdminTotp" && (
+          <>
+            <p className="text-sm text-gray-500 mb-5">
+              {useRecoveryCode
+                ? "Entrez l'un de vos codes de récupération (à usage unique)."
+                : "Pour réinitialiser votre mot de passe, confirmez avec le code de votre application d'authentification."}
+            </p>
+            {useRecoveryCode ? (
+              <input value={recoveryCodeInput} onChange={e => setRecoveryCodeInput(e.target.value.toUpperCase())}
+                onKeyDown={e => e.key === "Enter" && confirmForgotAdminTotp()}
+                placeholder="XXXX-XXXX" autoFocus
+                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            ) : (
+              <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                onKeyDown={e => e.key === "Enter" && confirmForgotAdminTotp()}
+                placeholder="000000" inputMode="numeric" autoFocus
+                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            )}
+            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            <button onClick={confirmForgotAdminTotp} disabled={busy || (useRecoveryCode ? recoveryCodeInput.trim().length < 9 : code.length !== 6)}
+              className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+              {busy ? "Vérification…" : "Confirmer et réinitialiser"}
+            </button>
+            <button onClick={() => { setUseRecoveryCode(v => !v); setError(""); setCode(""); setRecoveryCodeInput(""); }}
+              className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
+              {useRecoveryCode ? "J'ai accès à mon Authenticator" : "Je n'ai plus accès à mon Authenticator"}
             </button>
           </>
         )}
@@ -850,17 +1048,48 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
           </>
         )}
 
+        {step === "showRecoveryCodes" && (
+          <>
+            <p className="text-sm fa-navy font-semibold mb-1">⚠️ Notez ces codes maintenant</p>
+            <p className="text-sm text-gray-500 mb-4">
+              Ils permettent de récupérer l'accès si vous perdez votre téléphone. Chaque code ne fonctionne qu'une seule fois.
+              Ils ne seront plus jamais affichés après cet écran — gardez-les en lieu sûr (imprimés, ou dans un gestionnaire de mots de passe).
+            </p>
+            <div className="grid grid-cols-2 gap-2 bg-gray-50 rounded-lg p-4 mb-4">
+              {generatedRecoveryCodes.map(rc => (
+                <div key={rc.code} className="font-mono text-sm fa-navy text-center">{rc.code}</div>
+              ))}
+            </div>
+            <button onClick={onAdminSuccess} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">
+              J'ai noté mes codes — continuer
+            </button>
+          </>
+        )}
+
         {step === "totpVerify" && (
           <>
-            <p className="text-sm text-gray-500 mb-5">Entre le code de ton application d'authentification.</p>
-            <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              onKeyDown={e => e.key === "Enter" && confirmVerify()}
-              placeholder="000000" inputMode="numeric" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            <p className="text-sm text-gray-500 mb-5">
+              {useRecoveryCode ? "Entrez l'un de vos codes de récupération (à usage unique)." : "Entre le code de ton application d'authentification."}
+            </p>
+            {useRecoveryCode ? (
+              <input value={recoveryCodeInput} onChange={e => setRecoveryCodeInput(e.target.value.toUpperCase())}
+                onKeyDown={e => e.key === "Enter" && confirmVerify()}
+                placeholder="XXXX-XXXX" autoFocus
+                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            ) : (
+              <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                onKeyDown={e => e.key === "Enter" && confirmVerify()}
+                placeholder="000000" inputMode="numeric" autoFocus
+                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            )}
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={confirmVerify} disabled={busy || code.length !== 6}
+            <button onClick={confirmVerify} disabled={busy || (useRecoveryCode ? recoveryCodeInput.trim().length < 9 : code.length !== 6)}
               className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
               {busy ? "Vérification…" : "Accéder"}
+            </button>
+            <button onClick={() => { setUseRecoveryCode(v => !v); setError(""); setCode(""); setRecoveryCodeInput(""); }}
+              className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
+              {useRecoveryCode ? "J'ai accès à mon Authenticator" : "Je n'ai plus accès à mon Authenticator"}
             </button>
           </>
         )}
@@ -931,12 +1160,12 @@ function EmailPasswordLoginFlow({ title, accounts, onUpdateAccount, onBack, onSu
 
         {step === "createPassword" && (
           <>
-            <p className="text-sm text-gray-500 mb-5">Première connexion — créez votre mot de passe.</p>
-            <input value={password} onChange={e => setPassword(e.target.value)} type="password"
+            <p className="text-sm text-gray-500 mb-5">{account?.password ? "Réinitialisez votre mot de passe." : "Première connexion — créez votre mot de passe."}</p>
+            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
               placeholder="Nouveau mot de passe (6 caractères min.)" autoFocus
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            <input value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
-              type="password" placeholder="Confirmer le mot de passe"
+            <PasswordField value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
+              placeholder="Confirmer le mot de passe"
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
             <button onClick={submitCreatePassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
@@ -948,13 +1177,17 @@ function EmailPasswordLoginFlow({ title, accounts, onUpdateAccount, onBack, onSu
         {step === "password" && (
           <>
             <p className="text-sm text-gray-500 mb-5">Bonjour {account?.firstName || account?.name} — entrez votre mot de passe.</p>
-            <input value={password} onChange={e => setPassword(e.target.value)}
+            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
               onKeyDown={e => e.key === "Enter" && submitPassword()}
-              type="password" placeholder="Mot de passe" autoFocus
+              placeholder="Mot de passe" autoFocus
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
             <button onClick={submitPassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
               {busy ? "Vérification…" : "Accéder"}
+            </button>
+            <button onClick={() => { setError(""); setPassword(""); setPassword2(""); setStep("createPassword"); }}
+              className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
+              Mot de passe oublié ?
             </button>
           </>
         )}
@@ -1049,8 +1282,16 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
         <Logo size="text-lg" />
         <div className="flex items-center gap-4">
           <div className="text-right hidden sm:block">
-            <div className="text-sm font-medium fa-navy">
-              {partner.name} {partner.firstName}{partner.company && ` - ${partner.company}`}
+            <div className="text-sm fa-navy flex items-center gap-2 justify-end">
+              <span className="font-bold">{up(partner.name)} {partner.firstName}</span>
+              {partner.company && (
+                <span className="flex items-center gap-1.5 font-medium">
+                  - {partner.company}
+                  {reseauLogoFor(partner.company) && (
+                    <img src={reseauLogoFor(partner.company).data} alt="" className="w-8 h-8 rounded object-contain" />
+                  )}
+                </span>
+              )}
             </div>
           </div>
           <button onClick={onLogout} className="text-gray-400 hover:text-red-600"><LogOut size={18} /></button>
@@ -1155,7 +1396,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
             <div key={d.id} className="bg-white border border-gray-200 rounded-2xl p-3.5 sm:p-5 shadow-sm">
               <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
                 <div>
-                  <div className="font-semibold fa-navy">{clientName(d)}</div>
+                  <div className="font-bold fa-navy">{clientName(d)}</div>
                   <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.clientPhone && ` · ${d.clientPhone}`}</div>
                 </div>
                 <StatusBadge status={d.status} />
@@ -1374,7 +1615,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                     {paid.sort((a, b) => (b.paymentDate ? new Date(b.paymentDate).getTime() : b.updatedAt) - (a.paymentDate ? new Date(a.paymentDate).getTime() : a.updatedAt)).map(d => (
                       <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
                         <div>
-                          <div className="text-sm fa-navy font-medium">{clientName(d)}</div>
+                          <div className="text-sm fa-navy font-bold">{clientName(d)}</div>
                           <div className="text-xs text-gray-400">
                             {d.paymentDate ? fmtDate(new Date(d.paymentDate).getTime()) : "—"}{d.paymentMethod && ` · ${d.paymentMethod}`}
                           </div>
@@ -1456,8 +1697,15 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
 }
 
 const MANDATAIRE_PALETTE = ["#545454", "#8B5CF6", "#0EA5E9", "#F97316", "#059669", "#DC2626", "#DB2777", "#CA8A04"];
+let _colorDataRef = null;
+function setColorDataRef(d) { _colorDataRef = d; }
 function commercialColor(name) {
   if (!name) return "#999";
+  if (_colorDataRef) {
+    if (name === "Sébastien" && _colorDataRef.settings?.admin?.color) return _colorDataRef.settings.admin.color;
+    const found = _colorDataRef.mandataires?.find(mm => mm.name === name);
+    if (found?.color) return found.color;
+  }
   if (name === "Sébastien") return "#2F448B";
   if (name === "Nelson") return "#545454";
   let hash = 0;
@@ -1465,6 +1713,19 @@ function commercialColor(name) {
   return MANDATAIRE_PALETTE[hash % MANDATAIRE_PALETTE.length];
 }
 const COMMERCIAL_COLORS = new Proxy({}, { get: (_, name) => commercialColor(name) });
+function commercialLabel(name) {
+  if (!name) return name;
+  if (_colorDataRef) {
+    const found = _colorDataRef.mandataires?.find(m => m.name === name);
+    if (found?.firstName) return found.firstName;
+  }
+  return name;
+}
+function reseauLogoFor(companyName) {
+  if (!companyName || !_colorDataRef?.reseaux) return null;
+  const found = _colorDataRef.reseaux.find(r => r.name.trim().toLowerCase() === companyName.trim().toLowerCase());
+  return found?.logoData ? { data: found.logoData } : null;
+}
 async function lookupVilleFromCodePostal(codePostal) {
   if (!/^\d{5}$/.test(codePostal)) return null;
   try {
@@ -1483,7 +1744,18 @@ const DEPARTEMENTS = [
   "2A", "2B", "971", "972", "973", "974", "976",
 ].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-function MandataireDashboard({ mandataire, data, onLogout }) {
+function MandataireDashboard({ mandataire, data, onLogout, onUploadRib }) {
+  const [ribFile, setRibFile] = useState(null);
+  const [ribBusy, setRibBusy] = useState(false);
+  async function submitRib() {
+    if (!ribFile) return;
+    setRibBusy(true);
+    try {
+      const ok = await onUploadRib(mandataire.id, ribFile);
+      if (ok) setRibFile(null);
+    } finally { setRibBusy(false); }
+  }
+
   const myPartners = data.partners.filter(p => !p.deleted && p.commercial === mandataire.name);
   const myDossiers = data.dossiers.filter(d => myPartners.some(p => p.id === d.partnerId));
   const paid = myDossiers.filter(d => d.status === "Payé");
@@ -1510,14 +1782,14 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
       <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
-          <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[mandataire.name] }}>{mandataire.name}</span>
+          <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[mandataire.name] }}>{commercialLabel(mandataire.name)}</span>
           <button onClick={onLogout} className="text-gray-400 hover:text-red-600"><LogOut size={18} /></button>
         </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-8 space-y-6">
         <div>
-          <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {mandataire.firstName || mandataire.name} 👋</h1>
+          <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {mandataire.firstName || up(mandataire.name)} 👋</h1>
           <p className="text-sm text-gray-500">Voici votre production — visible uniquement par vous et Frangola.</p>
         </div>
 
@@ -1563,19 +1835,50 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
             <div className="space-y-2">
               {partnerStats.map(ps => (
                 <div key={ps.partner.id} className="flex items-center justify-between text-sm fa-bg-offwhite rounded-lg px-3 py-2.5">
-                  <span className="fa-navy font-medium">{ps.partner.firstName ? `${ps.partner.firstName} ${ps.partner.name}` : ps.partner.name}</span>
+                  <span className="fa-navy font-bold">{ps.partner.firstName ? `${ps.partner.firstName} ${up(ps.partner.name)}` : up(ps.partner.name)}</span>
                   <span className="text-gray-500 text-xs">{ps.count} dossier{ps.count !== 1 ? "s" : ""} · CA {fmtEuro(ps.ca)}</span>
                 </div>
               ))}
             </div>
           )}
         </div>
+
+        <div className="bg-white border border-gray-200 rounded-2xl p-6">
+          <div className="font-display font-semibold fa-navy mb-1">🏦 RIB pour le versement de votre part</div>
+          <p className="text-sm text-gray-500 mb-4">Déposez votre RIB pour que Frangola Assure puisse vous verser votre commission.</p>
+
+          {mandataire.ribFile && (
+            <div className="flex items-center justify-between flex-wrap gap-2 bg-teal-50 border border-teal-200 rounded-lg px-4 py-3 mb-4">
+              <span className="text-sm fa-navy">✅ RIB fourni le {fmtDate(mandataire.ribFile.uploadedAt)}</span>
+              <button onClick={() => downloadStoredFile(mandataire.ribFile.key, mandataire.ribFile.name)}
+                className="text-xs fa-teal-text hover:underline font-medium">Voir le fichier</button>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center gap-2">
+              {ribFile ? ribFile.name : (mandataire.ribFile ? "Remplacer mon RIB" : "Choisir un fichier (PDF ou image)")}
+              <input type="file" accept="application/pdf,image/*" className="hidden" onChange={e => setRibFile(e.target.files?.[0] || null)} />
+            </label>
+            {ribFile && (
+              <button type="button" onClick={() => setRibFile(null)} className="fa-tap text-gray-400 hover:text-red-600" title="Retirer le fichier">
+                <X size={16} />
+              </button>
+            )}
+            {ribFile && (
+              <button onClick={submitRib} disabled={ribBusy}
+                className="fa-bg-teal disabled:opacity-50 text-sm font-medium px-4 py-2 rounded-lg transition">
+                {ribBusy ? "Envoi…" : "Envoyer le RIB"}
+              </button>
+            )}
+          </div>
+        </div>
       </main>
     </div>
   );
 }
 
-function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onPermanentlyDeletePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, busy }) {
+function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onPermanentlyDeletePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.map(m => m.name)];
   const [tab, setTab] = useState("accueil");
   const [newPartnerName, setNewPartnerName] = useState("");
@@ -1602,12 +1905,26 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   const [statsPeriod, setStatsPeriod] = useState("jour");
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
   const [showAddMandataireForm, setShowAddMandataireForm] = useState(false);
+  const [editingMandataireId, setEditingMandataireId] = useState(null);
+  const [editMandataireForm, setEditMandataireForm] = useState({});
+  const [viewingMandataireId, setViewingMandataireId] = useState(null);
+  function startEditMandataire(m) {
+    setEditingMandataireId(m.id);
+    setEditMandataireForm({ name: m.name || "", firstName: m.firstName || "", email: m.email || "", color: m.color || commercialColor(m.name) });
+  }
+  async function saveEditMandataire(id) {
+    await onUpdateMandataire(id, editMandataireForm);
+    setEditingMandataireId(null);
+  }
   const [newMandataireName, setNewMandataireName] = useState("");
   const [newMandataireFirstName, setNewMandataireFirstName] = useState("");
   const [newMandataireEmail, setNewMandataireEmail] = useState("");
+  const [newMandataireColor, setNewMandataireColor] = useState("#545454");
   const [dossierSearch, setDossierSearch] = useState("");
   const [dossierFilter, setDossierFilter] = useState("tous");
   const [commercialFilter, setCommercialFilter] = useState("tous");
+  const [statsDepartementFilter, setStatsDepartementFilter] = useState("tous");
+  const [statsReseauFilter, setStatsReseauFilter] = useState("tous");
   const [notesOpenId, setNotesOpenId] = useState(null);
   const [notesDraft, setNotesDraft] = useState("");
   const [messageOpenId, setMessageOpenId] = useState(null);
@@ -1788,7 +2105,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
       <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
-          <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">Frangola</strong></span>
+          <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">Sébastien</strong></span>
           <button onClick={() => downloadJson(`frangola-adp-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`, data)}
             title="Sauvegarder toutes les données (JSON)"
             className="text-gray-400 hover:fa-teal-text transition">
@@ -1878,7 +2195,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                     {priorityItems.slice(0, 6).map(({ d, reasons }) => (
                       <button key={d.id} onClick={() => { setTab("dossiers"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); }}
                         className="w-full text-left text-sm bg-white hover:bg-red-100/50 border border-red-100 rounded-lg px-3 py-2 transition flex items-center justify-between gap-2 flex-wrap">
-                        <span className="fa-navy font-medium">{clientName(d)}</span>
+                        <span className="fa-navy font-bold">{clientName(d)}</span>
                         <span className="text-red-700 text-xs">{reasons.join(" · ")}</span>
                       </button>
                     ))}
@@ -1897,12 +2214,12 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 <div className="font-display font-semibold fa-navy mb-3">Dernières connexions</div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS["Sébastien"] }}>Frangola</span>
+                    <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS["Sébastien"] }}>Sébastien</span>
                     <span className="text-gray-500 text-xs">{data.settings.admin.lastLoginAt ? `${fmtDate(data.settings.admin.lastLoginAt)} à ${new Date(data.settings.admin.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
                   </div>
                   {data.mandataires.map(m => (
                     <div key={m.id} className="flex items-center justify-between text-sm">
-                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{m.name}</span>
+                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{commercialLabel(m.name)}</span>
                       <span className="text-gray-500 text-xs">{m.lastLoginAt ? `${fmtDate(m.lastLoginAt)} à ${new Date(m.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
                     </div>
                   ))}
@@ -1933,7 +2250,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                     {priorityItems.map(({ d, reasons }) => (
                       <button key={d.id} onClick={() => setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`)}
                         className="w-full text-left text-sm bg-white hover:bg-red-100/50 border border-red-100 rounded-lg px-3 py-2 transition flex items-center justify-between gap-2 flex-wrap">
-                        <span className="fa-navy font-medium">{clientName(d)}</span>
+                        <span className="fa-navy font-bold">{clientName(d)}</span>
                         <span className="text-red-700 text-xs">{reasons.join(" · ")}</span>
                       </button>
                     ))}
@@ -1979,7 +2296,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 style={commercialFilter !== "tous" ? { backgroundColor: COMMERCIAL_COLORS[commercialFilter], color: "#fff" } : {}}
                 className="text-sm font-medium border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
                 <option value="tous">Tous les commerciaux</option>
-                {COMMERCIAUX.map(c => <option key={c} value={c}>{c}</option>)}
+                {COMMERCIAUX.map(c => <option key={c} value={c}>{commercialLabel(c)}</option>)}
               </select>
               <button onClick={() => exportDossiersCsv(data.dossiers, data.partners)}
                 className="text-sm font-medium bg-white border border-gray-200 hover:border-teal-300 fa-teal-text px-4 py-2.5 rounded-lg transition whitespace-nowrap">
@@ -2053,10 +2370,10 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                                   {isCollapsed ? <Folder className="fa-teal-text" size={20} /> : <FolderOpen className="fa-teal-text" size={20} />}
                                   <div className="text-left">
                                     <div className="font-display font-semibold fa-navy flex items-center gap-2">
-                                      {p.firstName ? `${p.firstName} ${p.name}` : p.name}
+                                      <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
                                       {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                                     </div>
-                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{p.commercial || "—"}</span> · {partnerDossiers.length} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
+                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {partnerDossiers.length} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2.5">
@@ -2091,7 +2408,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                                           </div>
                                         ) : (
                                           <div>
-                                            <div className="font-semibold fa-navy flex items-center gap-2 flex-wrap">
+                                            <div className="font-bold fa-navy flex items-center gap-2 flex-wrap">
                                               {clientName(d)}
                                               <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
                                               <button onClick={() => onDuplicateDossier(d.id)} className="fa-tap text-xs text-gray-400 hover:fa-teal-text font-normal">Dupliquer</button>
@@ -2370,8 +2687,29 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <input value={newPartnerFirstName} onChange={e => setNewPartnerFirstName(e.target.value)} placeholder="Prénom"
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                <input value={newPartnerCompany} onChange={e => setNewPartnerCompany(e.target.value)} placeholder="Agence / société"
-                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                <div className="flex items-center gap-2">
+                  <input value={newPartnerCompany} onChange={e => setNewPartnerCompany(e.target.value)} placeholder="Agence / société (réseau)"
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  {newPartnerCompany.trim() && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <label className="fa-tap flex items-center gap-1 text-xs border border-gray-300 rounded-lg px-2 py-1.5 cursor-pointer bg-white hover:border-teal-400 transition" title="Logo du réseau">
+                        {reseauLogoFor(newPartnerCompany) ? (
+                          <img src={reseauLogoFor(newPartnerCompany).data} alt="" className="w-9 h-9 rounded object-contain" />
+                        ) : (
+                          <ImagePlus size={18} className="text-gray-400" />
+                        )}
+                        <input type="file" accept="image/*" className="hidden"
+                          onChange={e => e.target.files?.[0] && onUploadReseauLogo(newPartnerCompany, e.target.files[0])} />
+                      </label>
+                      {reseauLogoFor(newPartnerCompany) && (
+                        <button type="button" onClick={() => onRemoveReseauLogo(newPartnerCompany)}
+                          className="fa-tap text-gray-400 hover:text-red-600" title="Retirer ce logo">
+                          <X size={16} />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <input value={newPartnerPostalCode} onChange={e => setNewPartnerPostalCode(e.target.value.replace(/\D/g, "").slice(0, 5))} placeholder="Code postal" inputMode="numeric"
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <input value={newPartnerVille} onChange={e => setNewPartnerVille(e.target.value)} placeholder="Ville (auto)"
@@ -2386,7 +2724,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 <select value={newPartnerCommercial} onChange={e => setNewPartnerCommercial(e.target.value)}
                   style={{ backgroundColor: COMMERCIAL_COLORS[newPartnerCommercial], color: "#fff" }}
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-teal-500">
-                  {COMMERCIAUX.map(c => <option key={c} value={c} style={{ backgroundColor: COMMERCIAL_COLORS[c], color: "#fff" }}>{c}</option>)}
+                  {COMMERCIAUX.map(c => <option key={c} value={c} style={{ backgroundColor: COMMERCIAL_COLORS[c], color: "#fff" }}>{commercialLabel(c)}</option>)}
                 </select>
               </div>
               <div className="flex gap-2 items-start flex-wrap">
@@ -2415,8 +2753,29 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                         <input value={editForm.firstName} onChange={e => setEditForm(f => ({ ...f, firstName: e.target.value }))} placeholder="Prénom"
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                        <input value={editForm.company} onChange={e => setEditForm(f => ({ ...f, company: e.target.value }))} placeholder="Agence / société"
-                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        <div className="flex items-center gap-2">
+                          <input value={editForm.company} onChange={e => setEditForm(f => ({ ...f, company: e.target.value }))} placeholder="Agence / société (réseau)"
+                            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                          {editForm.company.trim() && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <label className="fa-tap flex items-center gap-1 text-xs border border-gray-300 rounded-lg px-2 py-1.5 cursor-pointer bg-white hover:border-teal-400 transition" title="Logo du réseau">
+                                {reseauLogoFor(editForm.company) ? (
+                                  <img src={reseauLogoFor(editForm.company).data} alt="" className="w-9 h-9 rounded object-contain" />
+                                ) : (
+                                  <ImagePlus size={18} className="text-gray-400" />
+                                )}
+                                <input type="file" accept="image/*" className="hidden"
+                                  onChange={e => e.target.files?.[0] && onUploadReseauLogo(editForm.company, e.target.files[0])} />
+                              </label>
+                              {reseauLogoFor(editForm.company) && (
+                                <button type="button" onClick={() => onRemoveReseauLogo(editForm.company)}
+                                  className="fa-tap text-gray-400 hover:text-red-600" title="Retirer ce logo">
+                                  <X size={16} />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                         <input value={editForm.postalCode} onChange={e => setEditForm(f => ({ ...f, postalCode: e.target.value.replace(/\D/g, "").slice(0, 5) }))} placeholder="Code postal" inputMode="numeric"
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                         <input value={editForm.ville} onChange={e => setEditForm(f => ({ ...f, ville: e.target.value }))} placeholder="Ville (auto)"
@@ -2431,7 +2790,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                         <select value={editForm.commercial} onChange={e => setEditForm(f => ({ ...f, commercial: e.target.value }))}
                           style={{ backgroundColor: COMMERCIAL_COLORS[editForm.commercial], color: "#fff" }}
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-teal-500">
-                          {COMMERCIAUX.map(c => <option key={c} value={c} style={{ backgroundColor: COMMERCIAL_COLORS[c], color: "#fff" }}>{c}</option>)}
+                          {COMMERCIAUX.map(c => <option key={c} value={c} style={{ backgroundColor: COMMERCIAL_COLORS[c], color: "#fff" }}>{commercialLabel(c)}</option>)}
                         </select>
                       </div>
                       <div className="flex gap-2">
@@ -2443,7 +2802,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div>
                         <div className="font-medium fa-navy flex items-center gap-2">
-                          {p.firstName ? `${p.firstName} ${p.name}` : p.name}
+                          <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
                           {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                           {p.active !== false && daysSinceLastDossier(p) > INACTIVITY_DAYS && (
                             <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full">
@@ -2452,7 +2811,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           )}
                         </div>
                         <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">
-                          {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{p.commercial || "—"}</span> · depuis le {fmtDate(p.createdAt)}
+                          {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
                         </div>
                         {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
                       </div>
@@ -2525,7 +2884,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                             {pDossiers.length === 0 && <div className="text-sm text-gray-400">Aucun dossier pour ce partenaire.</div>}
                             {pDossiers.sort((a, b) => b.createdAt - a.createdAt).map(d => (
                               <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-                                <span className="text-sm fa-navy font-medium">{clientName(d)}</span>
+                                <span className="text-sm fa-navy font-bold">{clientName(d)}</span>
                                 <div className="flex items-center gap-2 text-xs text-gray-500">
                                   <StatusBadge status={d.status} />
                                   <span>{fmtDate(d.createdAt)}</span>
@@ -2587,7 +2946,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             {data.partners.filter(p => p.deleted).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0)).map(p => (
               <div key={p.id} className="bg-white border border-gray-200 rounded-xl px-5 py-4 flex items-center justify-between flex-wrap gap-2 opacity-80">
                 <div>
-                  <div className="font-medium fa-navy">{p.firstName ? `${p.firstName} ${p.name}` : p.name}</div>
+                  <div className="font-medium fa-navy"><span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span></div>
                   <div className="text-xs text-gray-400">
                     {p.company || "—"} {p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
                   </div>
@@ -2606,18 +2965,30 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
         )}
 
         {tab === "stats" && (() => {
-          const activePartners = data.partners.filter(p => !p.deleted && p.active !== false);
-          const inactivePartners = data.partners.filter(p => !p.deleted && p.active === false);
-          const deletedPartners = data.partners.filter(p => p.deleted);
-          const totalEver = data.partners.length || 1;
+          const allDepartements = [...new Set(data.partners.map(p => p.departement).filter(Boolean))].sort();
+          const allReseaux = [...new Set(data.partners.map(p => p.company).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+          const scopedPartnerIds = new Set(
+            data.partners
+              .filter(p => statsDepartementFilter === "tous" || p.departement === statsDepartementFilter)
+              .filter(p => statsReseauFilter === "tous" || p.company === statsReseauFilter)
+              .map(p => p.id)
+          );
+          const scopedFilterActive = statsDepartementFilter !== "tous" || statsReseauFilter !== "tous";
+          const partners = scopedFilterActive ? data.partners.filter(p => scopedPartnerIds.has(p.id)) : data.partners;
+          const dossiers = scopedFilterActive ? data.dossiers.filter(d => scopedPartnerIds.has(d.partnerId)) : data.dossiers;
+
+          const activePartners = partners.filter(p => !p.deleted && p.active !== false);
+          const inactivePartners = partners.filter(p => !p.deleted && p.active === false);
+          const deletedPartners = partners.filter(p => p.deleted);
+          const totalEver = partners.length || 1;
           const pct = (n) => Math.round((n / totalEver) * 100);
 
-          const totalDossiers = data.dossiers.length;
+          const totalDossiers = dossiers.length;
           const statusCounts = ADMIN_STATUS_OPTIONS.map(s => ({
-            status: s, count: data.dossiers.filter(d => d.status === s).length,
+            status: s, count: dossiers.filter(d => d.status === s).length,
           }));
-          const koCount = data.dossiers.filter(d => d.status === "KO").length;
-          const paidCount = data.dossiers.filter(d => d.status === "Payé").length;
+          const koCount = dossiers.filter(d => d.status === "KO").length;
+          const paidCount = dossiers.filter(d => d.status === "Payé").length;
           const transformDenom = totalDossiers - koCount;
           const transformRate = transformDenom > 0 ? Math.round((paidCount / transformDenom) * 100) : 0;
           const koRate = totalDossiers ? Math.round((koCount / totalDossiers) * 100) : 0;
@@ -2649,12 +3020,12 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
           const buckets = buildBuckets(statsPeriod);
           const chartData = buckets.map(b => ({
             name: b.label,
-            Dossiers: data.dossiers.filter(d => d.createdAt >= b.start && d.createdAt < b.end).length,
+            Dossiers: dossiers.filter(d => d.createdAt >= b.start && d.createdAt < b.end).length,
           }));
 
-          const partnerCommercial = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
+          const partnerCommercial = (d) => partners.find(p => p.id === d.partnerId)?.commercial || null;
           const WON = ["Payé"];
-          const wonDossiers = data.dossiers.filter(d => WON.includes(d.status));
+          const wonDossiers = dossiers.filter(d => WON.includes(d.status));
 
           const totalCa = wonDossiers.reduce((s, d) => s + (d.caAmount || 0), 0);
           const avgCaPerDossier = wonDossiers.length ? totalCa / wonDossiers.length : 0;
@@ -2673,30 +3044,30 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
           const prevMonthPaid = wonDossiers.filter(d => paidAt(d) >= prevMonthStart && paidAt(d) < curMonthStart);
           const curMonthCa = curMonthPaid.reduce((s, d) => s + (d.caAmount || 0), 0);
           const prevMonthCa = prevMonthPaid.reduce((s, d) => s + (d.caAmount || 0), 0);
-          const curMonthDossiers = data.dossiers.filter(d => d.createdAt >= curMonthStart).length;
-          const prevMonthDossiers = data.dossiers.filter(d => d.createdAt >= prevMonthStart && d.createdAt < curMonthStart).length;
+          const curMonthDossiers = dossiers.filter(d => d.createdAt >= curMonthStart).length;
+          const prevMonthDossiers = dossiers.filter(d => d.createdAt >= prevMonthStart && d.createdAt < curMonthStart).length;
           const pctChange = (cur, prev) => prev === 0 ? (cur > 0 ? 100 : 0) : Math.round(((cur - prev) / prev) * 100);
           const caChange = pctChange(curMonthCa, prevMonthCa);
           const dossiersChange = pctChange(curMonthDossiers, prevMonthDossiers);
 
           const commercialStats = COMMERCIAUX.map(c => {
-            const partnersOfC = data.partners.filter(p => !p.deleted && p.commercial === c);
+            const partnersOfC = partners.filter(p => !p.deleted && p.commercial === c);
             const dossiersOfC = wonDossiers.filter(d => partnersOfC.some(p => p.id === d.partnerId));
             const ca = dossiersOfC.reduce((s, d) => s + (d.caAmount || 0), 0);
             const commission = dossiersOfC.reduce((s, d) => s + (d.commissionAmount || 0), 0);
             const caReel = ca - commission;
             const mandataireCut = caReel / 2;
             const margeFinale = caReel - mandataireCut;
-            return { commercial: c, partners: partnersOfC.length, dossiers: data.dossiers.filter(d => partnersOfC.some(p => p.id === d.partnerId)).length, ca, commission, mandataireCut, margeFinale };
+            return { commercial: c, partners: partnersOfC.length, dossiers: dossiers.filter(d => partnersOfC.some(p => p.id === d.partnerId)).length, ca, commission, mandataireCut, margeFinale };
           });
 
-          const topPartners = data.partners.filter(p => !p.deleted)
-            .map(p => ({ partner: p, count: data.dossiers.filter(d => d.partnerId === p.id).length }))
+          const topPartners = partners.filter(p => !p.deleted)
+            .map(p => ({ partner: p, count: dossiers.filter(d => d.partnerId === p.id).length }))
             .filter(x => x.count > 0)
             .sort((a, b) => b.count - a.count)
             .slice(0, 5);
 
-          const topPartnersByRevenue = data.partners.filter(p => !p.deleted)
+          const topPartnersByRevenue = partners.filter(p => !p.deleted)
             .map(p => {
               const pd = wonDossiers.filter(d => d.partnerId === p.id);
               return { partner: p, ca: pd.reduce((s, d) => s + (d.caAmount || 0), 0), commission: pd.reduce((s, d) => s + (d.commissionAmount || 0), 0) };
@@ -2712,6 +3083,25 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
 
           return (
             <div className="space-y-8">
+              <div className="flex flex-wrap items-center gap-2">
+                <select value={statsDepartementFilter} onChange={e => setStatsDepartementFilter(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                  <option value="tous">Tous les départements</option>
+                  {allDepartements.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <select value={statsReseauFilter} onChange={e => setStatsReseauFilter(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                  <option value="tous">Tous les réseaux</option>
+                  {allReseaux.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                {scopedFilterActive && (
+                  <button onClick={() => { setStatsDepartementFilter("tous"); setStatsReseauFilter("tous"); }}
+                    className="text-xs text-gray-400 hover:text-red-600 underline underline-offset-2">
+                    Réinitialiser les filtres
+                  </button>
+                )}
+              </div>
+
               <div className="grid sm:grid-cols-2 gap-4">
                 <div className="bg-white border border-gray-200 rounded-2xl p-5 flex items-center justify-between">
                   <div>
@@ -2738,7 +3128,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 <div className="grid sm:grid-cols-4 gap-4">
                   <div className="bg-white border border-gray-200 rounded-2xl p-5">
                     <div className="text-xs text-gray-400 mb-1">Total partenaires</div>
-                    <div className="font-display text-2xl font-bold fa-navy">{totalEver === 1 && data.partners.length === 0 ? 0 : data.partners.length}</div>
+                    <div className="font-display text-2xl font-bold fa-navy">{totalEver === 1 && partners.length === 0 ? 0 : partners.length}</div>
                   </div>
                   <div className="bg-white border border-gray-200 rounded-2xl p-5">
                     <div className="text-xs text-gray-400 mb-1">Actifs</div>
@@ -2844,7 +3234,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   <div className="space-y-3">
                     {commercialStats.map(cs => (
                       <div key={cs.commercial} className="flex items-center justify-between text-sm">
-                        <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[cs.commercial] || "#999" }}>{cs.commercial}</span>
+                        <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[cs.commercial] || "#999" }}>{commercialLabel(cs.commercial)}</span>
                         <span className="text-gray-500">{cs.partners} partenaire{cs.partners !== 1 ? "s" : ""} · {cs.dossiers} dossier{cs.dossiers !== 1 ? "s" : ""}</span>
                       </div>
                     ))}
@@ -2874,7 +3264,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   <div className="space-y-2.5">
                     {topPartners.map((tp, i) => (
                       <div key={tp.partner.id} className="flex items-center justify-between text-sm">
-                        <span className="fa-navy">{i + 1}. {tp.partner.firstName ? `${tp.partner.firstName} ${tp.partner.name}` : tp.partner.name}</span>
+                        <span className="fa-navy font-bold">{i + 1}. {tp.partner.firstName ? `${tp.partner.firstName} ${up(tp.partner.name)}` : up(tp.partner.name)}</span>
                         <span className="fa-bg-gold fa-navy text-xs font-bold px-2.5 py-0.5 rounded-full">{tp.count}</span>
                       </div>
                     ))}
@@ -2888,7 +3278,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 <div className="space-y-2.5">
                   {topPartnersByRevenue.map((tp, i) => (
                     <div key={tp.partner.id} className="flex items-center justify-between text-sm">
-                      <span className="fa-navy">{i + 1}. {tp.partner.firstName ? `${tp.partner.firstName} ${tp.partner.name}` : tp.partner.name}</span>
+                      <span className="fa-navy font-bold">{i + 1}. {tp.partner.firstName ? `${tp.partner.firstName} ${up(tp.partner.name)}` : up(tp.partner.name)}</span>
                       <span className="text-gray-500 text-xs">CA {fmtEuro(tp.ca)} · Rétro {fmtEuro(tp.commission)}</span>
                     </div>
                   ))}
@@ -2906,7 +3296,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                         const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
                         monthBuckets.push({
                           name: new Date(now.getFullYear(), now.getMonth() - i, 1).toLocaleDateString("fr-FR", { month: "short", year: "2-digit" }),
-                          Partenaires: data.partners.filter(p => p.createdAt < end.getTime()).length,
+                          Partenaires: partners.filter(p => p.createdAt < end.getTime()).length,
                         });
                       }
                       return monthBuckets;
@@ -2945,11 +3335,19 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   <input value={newMandataireEmail} onChange={e => setNewMandataireEmail(e.target.value)} type="email" placeholder="Adresse email"
                     className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 </div>
+                <div className="flex items-center gap-3 mb-4">
+                  <label className="text-sm text-gray-500">Couleur d'affichage</label>
+                  <input type="color" value={newMandataireColor} onChange={e => setNewMandataireColor(e.target.value)}
+                    className="w-10 h-9 rounded-lg border border-gray-300 cursor-pointer p-0.5" />
+                  <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: newMandataireColor }}>
+                    {newMandataireName.trim() || "Aperçu"}
+                  </span>
+                </div>
                 <div className="flex gap-2">
                   <button onClick={async () => {
                     if (!newMandataireName.trim() || !newMandataireEmail.trim()) return;
-                    await onAddMandataire({ name: newMandataireName.trim(), firstName: newMandataireFirstName.trim(), email: newMandataireEmail.trim() });
-                    setNewMandataireName(""); setNewMandataireFirstName(""); setNewMandataireEmail(""); setShowAddMandataireForm(false);
+                    await onAddMandataire({ name: newMandataireName.trim(), firstName: newMandataireFirstName.trim(), email: newMandataireEmail.trim(), color: newMandataireColor });
+                    setNewMandataireName(""); setNewMandataireFirstName(""); setNewMandataireEmail(""); setNewMandataireColor("#545454"); setShowAddMandataireForm(false);
                   }} disabled={!newMandataireName.trim() || !newMandataireEmail.trim()}
                     className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
                     Créer l'accès
@@ -2963,24 +3361,84 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             <div className="space-y-3">
               {data.mandataires.length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun mandataire pour l'instant — Sébastien reste le commercial par défaut.</div>}
               {data.mandataires.map(m => (
-                <div key={m.id} className={`bg-white border rounded-xl px-5 py-4 flex items-center justify-between flex-wrap gap-2 ${m.active === false ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
-                  <div>
-                    <div className="font-medium fa-navy flex items-center gap-2">
-                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{m.name}</span>
-                      {m.firstName}
-                      {m.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
+                <div key={m.id} className={`bg-white border rounded-xl px-5 py-4 ${m.active === false ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
+                  {editingMandataireId === m.id ? (
+                    <div>
+                      <div className="grid sm:grid-cols-3 gap-3 mb-3">
+                        <input value={editMandataireForm.name} onChange={e => setEditMandataireForm(f => ({ ...f, name: e.target.value }))} placeholder="Nom"
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        <input value={editMandataireForm.firstName} onChange={e => setEditMandataireForm(f => ({ ...f, firstName: e.target.value }))} placeholder="Prénom"
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        <input value={editMandataireForm.email} onChange={e => setEditMandataireForm(f => ({ ...f, email: e.target.value }))} type="email" placeholder="Adresse email"
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                      </div>
+                      <div className="flex items-center gap-3 mb-3">
+                        <label className="text-sm text-gray-500">Couleur d'affichage</label>
+                        <input type="color" value={editMandataireForm.color} onChange={e => setEditMandataireForm(f => ({ ...f, color: e.target.value }))}
+                          className="w-10 h-9 rounded-lg border border-gray-300 cursor-pointer p-0.5" />
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={() => saveEditMandataire(m.id)} className="fa-bg-teal text-sm font-medium px-4 py-1.5 rounded-lg transition">Enregistrer</button>
+                        <button onClick={() => setEditingMandataireId(null)} className="text-sm text-gray-500 hover:text-gray-700 px-3">Annuler</button>
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-400">
-                      {m.email} · {m.password ? "Accès activé" : "En attente de 1ère connexion"} · {m.lastLoginAt ? `dernière connexion ${fmtDate(m.lastLoginAt)}` : "jamais connecté"}
+                  ) : (
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <div className="font-medium fa-navy flex items-center gap-2">
+                          <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{up(m.name)} {m.firstName}</span>
+                          {m.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
+                        </div>
+                        <div className="text-xs text-gray-400">
+                          {m.email} · {m.password ? "Accès activé" : "En attente de 1ère connexion"} · {m.lastLoginAt ? `dernière connexion ${fmtDate(m.lastLoginAt)}` : "jamais connecté"}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setViewingMandataireId(viewingMandataireId === m.id ? null : m.id)}
+                          className="text-sm fa-navy fa-bg-gold px-3 py-1.5 rounded-lg font-medium transition">
+                          {viewingMandataireId === m.id ? "Fermer" : "Voir"}
+                        </button>
+                        <button onClick={() => startEditMandataire(m)} className="text-sm fa-teal-text hover:underline px-2">Modifier</button>
+                        <button onClick={() => onUpdateMandataire(m.id, { active: m.active === false ? true : false })}
+                          className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${m.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
+                          {m.active === false ? "Réactiver" : "Désactiver"}
+                        </button>
+                        <button onClick={() => onDeleteMandataire(m.id)} className="text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => onUpdateMandataire(m.id, { active: m.active === false ? true : false })}
-                      className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${m.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
-                      {m.active === false ? "Réactiver" : "Désactiver"}
-                    </button>
-                    <button onClick={() => onDeleteMandataire(m.id)} className="text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
-                  </div>
+                  )}
+
+                  {viewingMandataireId === m.id && (() => {
+                    const mPartners = data.partners.filter(p => !p.deleted && p.commercial === m.name);
+                    const mDossiers = data.dossiers.filter(d => mPartners.some(p => p.id === d.partnerId));
+                    const mPaid = mDossiers.filter(d => d.status === "Payé");
+                    const mWon = mDossiers.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
+                    const mKo = mDossiers.filter(d => d.status === "KO");
+                    const mCa = mPaid.reduce((s, d) => s + (d.caAmount || 0), 0);
+                    const mCommission = mPaid.reduce((s, d) => s + (d.commissionAmount || 0), 0);
+                    const mPart = (mCa - mCommission) / 2;
+                    return (
+                      <div className="mt-4 pt-4 border-t border-gray-100">
+                        <div className="text-xs text-gray-400 mb-3">Aperçu de ce que {m.name} voit dans son espace :</div>
+                        <div className="grid sm:grid-cols-2 gap-3 mb-4">
+                          <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Sa part (mandataire, 50%)</div><div className="font-display text-lg font-bold fa-navy">{fmtEuro(mPart)}</div></div>
+                          <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">CA total généré (payé)</div><div className="font-display text-lg font-bold fa-navy">{fmtEuro(mCa)}</div></div>
+                        </div>
+                        <div className="grid sm:grid-cols-5 gap-3 mb-4">
+                          <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">Partenaires</div><div className="font-display font-bold fa-navy">{mPartners.length}</div></div>
+                          <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">Dossiers</div><div className="font-display font-bold fa-navy">{mDossiers.length}</div></div>
+                          <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">Gagnés</div><div className="font-display font-bold text-emerald-600">{mWon.length}</div></div>
+                          <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">KO</div><div className="font-display font-bold text-red-500">{mKo.length}</div></div>
+                          <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">RIB</div><div className="font-display text-sm font-bold fa-navy">{m.ribFile ? "Fourni" : "Aucun"}</div></div>
+                        </div>
+                        {m.ribFile && (
+                          <button onClick={() => downloadStoredFile(m.ribFile.key, m.ribFile.name)} className="text-xs fa-teal-text hover:underline">
+                            🏦 Voir le RIB déposé le {fmtDate(m.ribFile.uploadedAt)}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
