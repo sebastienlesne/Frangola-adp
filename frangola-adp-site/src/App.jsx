@@ -438,10 +438,6 @@ export default function App() {
     await saveData({ ...data, mandataires });
   }
 
-  async function resetBusinessData() {
-    await saveData({ ...data, partners: [], dossiers: [], mandataires: [], reseaux: [] });
-  }
-
   async function addPartner(fields) {
     const p = { id: uid(), ...fields, active: true, code: genCode(), createdAt: Date.now() };
     await saveData({ ...data, partners: [...data.partners, p] });
@@ -716,7 +712,6 @@ export default function App() {
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
-          onResetBusinessData={resetBusinessData}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
           onDuplicateDossier={duplicateDossier}
@@ -1855,7 +1850,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, onResetBusinessData, busy }) {
+function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -1885,13 +1880,11 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
   const [corbeilleSearch, setCorbeilleSearch] = useState("");
   const [corbeilleMandataireSearch, setCorbeilleMandataireSearch] = useState("");
-  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   const [confirmDeleteMandataireId, setConfirmDeleteMandataireId] = useState(null);
   async function confirmDeleteMandataire(id) {
     await onDeleteMandataire(id);
     setConfirmDeleteMandataireId(null);
   }
-  const [confirmResetText, setConfirmResetText] = useState("");
   const [showAddMandataireForm, setShowAddMandataireForm] = useState(false);
   const [editingMandataireId, setEditingMandataireId] = useState(null);
   const [editMandataireForm, setEditMandataireForm] = useState({});
@@ -2217,30 +2210,6 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
               <button onClick={() => setTab("dossiers")} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">
                 Voir tous les dossiers →
               </button>
-
-              <div className="border border-red-200 bg-red-50/50 rounded-2xl p-5 mt-4">
-                <div className="font-display font-semibold text-red-800 mb-1">Zone sensible</div>
-                <p className="text-sm text-red-700/80 mb-3">Efface définitivement tous les partenaires, dossiers, mandataires et réseaux — pour repartir de zéro avant un vrai lancement. Ton compte admin (mot de passe, Authenticator) n'est pas touché.</p>
-                {!confirmResetOpen ? (
-                  <button onClick={() => setConfirmResetOpen(true)} className="text-sm font-medium text-red-700 border border-red-300 hover:bg-red-100 px-4 py-2 rounded-lg transition">
-                    Réinitialiser toutes les données
-                  </button>
-                ) : (
-                  <div className="space-y-2">
-                    <p className="text-sm text-red-800">Tape <strong>RÉINITIALISER</strong> pour confirmer :</p>
-                    <input value={confirmResetText} onChange={e => setConfirmResetText(e.target.value)}
-                      className="border border-red-300 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-red-400" />
-                    <div className="flex gap-2">
-                      <button onClick={async () => { await onResetBusinessData(); setConfirmResetOpen(false); setConfirmResetText(""); }}
-                        disabled={confirmResetText !== "RÉINITIALISER"}
-                        className="text-sm font-medium bg-red-600 disabled:opacity-40 text-white px-4 py-2 rounded-lg transition">
-                        Confirmer la réinitialisation
-                      </button>
-                      <button onClick={() => { setConfirmResetOpen(false); setConfirmResetText(""); }} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
-                    </div>
-                  </div>
-                )}
-              </div>
             </div>
           );
         })()}
