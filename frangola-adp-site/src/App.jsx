@@ -343,7 +343,7 @@ export default function App() {
     if (session.type === "admin") {
       setCurrentAdmin(true); setView("adminDash");
     } else if (session.type === "mandataire") {
-      const m = data.mandataires.find(m => m.id === session.id);
+      const m = data.mandataires.find(m => m.id === session.id && !m.deleted);
       if (m && m.active !== false) { setCurrentMandataire(m); setView("mandataireDash"); }
       else clearStoredSession();
     } else if (session.type === "partner") {
@@ -429,8 +429,17 @@ export default function App() {
   }
 
   async function deleteMandataire(id) {
-    const mandataires = data.mandataires.filter(m => m.id !== id);
+    const mandataires = data.mandataires.map(m => m.id === id ? { ...m, deleted: true, deletedAt: Date.now() } : m);
     await saveData({ ...data, mandataires });
+  }
+
+  async function restoreMandataire(id) {
+    const mandataires = data.mandataires.map(m => m.id === id ? { ...m, deleted: false, deletedAt: null } : m);
+    await saveData({ ...data, mandataires });
+  }
+
+  async function resetBusinessData() {
+    await saveData({ ...data, partners: [], dossiers: [], mandataires: [], reseaux: [] });
   }
 
   async function addPartner(fields) {
@@ -704,8 +713,10 @@ export default function App() {
           onAddMandataire={addMandataire}
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
+          onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
+          onResetBusinessData={resetBusinessData}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
           onDuplicateDossier={duplicateDossier}
@@ -851,7 +862,7 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
       setStep(admin.password ? "password" : "createPassword");
       return;
     }
-    const found = mandataires.find(m => (m.email || "").toLowerCase() === trimmed);
+    const found = mandataires.find(m => !m.deleted && (m.email || "").toLowerCase() === trimmed);
     if (found) {
       if (found.active === false) { setError("Veuillez contacter Frangola."); return; }
       setAccountType("mandataire");
@@ -1844,8 +1855,8 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
-  const COMMERCIAUX = ["Sébastien", ...data.mandataires.map(m => m.name)];
+function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, onResetBusinessData, busy }) {
+  const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
   const [tab, setTab] = useState("accueil");
@@ -1873,6 +1884,14 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   const [statsPeriod, setStatsPeriod] = useState("jour");
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
   const [corbeilleSearch, setCorbeilleSearch] = useState("");
+  const [corbeilleMandataireSearch, setCorbeilleMandataireSearch] = useState("");
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  const [confirmDeleteMandataireId, setConfirmDeleteMandataireId] = useState(null);
+  async function confirmDeleteMandataire(id) {
+    await onDeleteMandataire(id);
+    setConfirmDeleteMandataireId(null);
+  }
+  const [confirmResetText, setConfirmResetText] = useState("");
   const [showAddMandataireForm, setShowAddMandataireForm] = useState(false);
   const [editingMandataireId, setEditingMandataireId] = useState(null);
   const [editMandataireForm, setEditMandataireForm] = useState({});
@@ -2198,6 +2217,30 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
               <button onClick={() => setTab("dossiers")} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">
                 Voir tous les dossiers →
               </button>
+
+              <div className="border border-red-200 bg-red-50/50 rounded-2xl p-5 mt-4">
+                <div className="font-display font-semibold text-red-800 mb-1">Zone sensible</div>
+                <p className="text-sm text-red-700/80 mb-3">Efface définitivement tous les partenaires, dossiers, mandataires et réseaux — pour repartir de zéro avant un vrai lancement. Ton compte admin (mot de passe, Authenticator) n'est pas touché.</p>
+                {!confirmResetOpen ? (
+                  <button onClick={() => setConfirmResetOpen(true)} className="text-sm font-medium text-red-700 border border-red-300 hover:bg-red-100 px-4 py-2 rounded-lg transition">
+                    Réinitialiser toutes les données
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-sm text-red-800">Tape <strong>RÉINITIALISER</strong> pour confirmer :</p>
+                    <input value={confirmResetText} onChange={e => setConfirmResetText(e.target.value)}
+                      className="border border-red-300 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-red-400" />
+                    <div className="flex gap-2">
+                      <button onClick={async () => { await onResetBusinessData(); setConfirmResetOpen(false); setConfirmResetText(""); }}
+                        disabled={confirmResetText !== "RÉINITIALISER"}
+                        className="text-sm font-medium bg-red-600 disabled:opacity-40 text-white px-4 py-2 rounded-lg transition">
+                        Confirmer la réinitialisation
+                      </button>
+                      <button onClick={() => { setConfirmResetOpen(false); setConfirmResetText(""); }} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           );
         })()}
@@ -2915,6 +2958,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             : deletedPartners;
           return (
             <div className="space-y-3">
+              <h2 className="font-display text-lg font-semibold fa-navy mb-3">Partenaires supprimés</h2>
               {deletedPartners.length > 0 && (
                 <div className="relative mb-2 max-w-sm">
                   <input value={corbeilleSearch} onChange={e => setCorbeilleSearch(e.target.value)}
@@ -2948,6 +2992,54 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   </button>
                 </div>
               ))}
+
+              <h2 className="font-display text-lg font-semibold fa-navy mt-8 mb-3">Mandataires supprimés</h2>
+              {(() => {
+                const deletedMandataires = data.mandataires.filter(m => m.deleted).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+                const qm = corbeilleMandataireSearch.trim().toLowerCase();
+                const filteredM = qm
+                  ? deletedMandataires.filter(m => `${m.name} ${m.firstName || ""}`.toLowerCase().includes(qm))
+                  : deletedMandataires;
+                return (
+                  <div className="space-y-3">
+                    {deletedMandataires.length > 0 && (
+                      <div className="relative mb-2 max-w-sm">
+                        <input value={corbeilleMandataireSearch} onChange={e => setCorbeilleMandataireSearch(e.target.value)}
+                          placeholder="Rechercher un mandataire supprimé…"
+                          className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
+                        {corbeilleMandataireSearch && (
+                          <button onClick={() => setCorbeilleMandataireSearch("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                            <X size={15} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {deletedMandataires.length === 0 && (
+                      <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">Aucun mandataire supprimé.</div>
+                    )}
+                    {deletedMandataires.length > 0 && filteredM.length === 0 && (
+                      <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">Aucun résultat pour "{corbeilleMandataireSearch}".</div>
+                    )}
+                    {filteredM.map(m => (
+                      <div key={m.id} className="bg-white border border-gray-200 rounded-xl px-5 py-4 flex items-center justify-between flex-wrap gap-2 opacity-80">
+                        <div>
+                          <div className="font-medium fa-navy">
+                            <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{up(m.name)} {m.firstName}</span>
+                          </div>
+                          <div className="text-xs text-gray-400 mt-1">
+                            {m.email} · supprimé le {m.deletedAt ? fmtDate(m.deletedAt) : "—"}
+                          </div>
+                        </div>
+                        <button onClick={() => onRestoreMandataire(m.id)}
+                          className="flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-3 py-1.5 rounded-full transition">
+                          <RotateCcw size={13} /> Restaurer
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           );
         })()}
@@ -3347,8 +3439,8 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             )}
 
             <div className="space-y-3">
-              {data.mandataires.length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun mandataire pour l'instant — Sébastien reste le commercial par défaut.</div>}
-              {data.mandataires.map(m => (
+              {data.mandataires.filter(m => !m.deleted).length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun mandataire pour l'instant — Sébastien reste le commercial par défaut.</div>}
+              {data.mandataires.filter(m => !m.deleted).map(m => (
                 <div key={m.id} className={`bg-white border rounded-xl px-5 py-4 ${m.active === false ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
                   {editingMandataireId === m.id ? (
                     <div>
@@ -3391,7 +3483,15 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${m.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
                           {m.active === false ? "Réactiver" : "Désactiver"}
                         </button>
-                        <button onClick={() => onDeleteMandataire(m.id)} className="text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
+                        {confirmDeleteMandataireId === m.id ? (
+                          <span className="flex items-center gap-1.5 text-xs">
+                            <span className="text-red-700">Confirmer ?</span>
+                            <button onClick={() => confirmDeleteMandataire(m.id)} className="font-semibold text-red-700 hover:underline">Oui</button>
+                            <button onClick={() => setConfirmDeleteMandataireId(null)} className="text-gray-500 hover:underline">Non</button>
+                          </span>
+                        ) : (
+                          <button onClick={() => setConfirmDeleteMandataireId(m.id)} className="fa-tap text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
+                        )}
                       </div>
                     </div>
                   )}
