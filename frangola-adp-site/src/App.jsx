@@ -87,6 +87,10 @@ function fmtSize(bytes) {
 function fmtEuro(n) {
   return (n || 0).toLocaleString("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 }
+function clientName(d) {
+  const full = `${d.clientLastName || ""} ${d.clientFirstName || ""}`.trim();
+  return full || "(Sans nom)";
+}
 
 async function loadFile(key) {
   try {
@@ -267,15 +271,20 @@ function FileDrop({ label, file, onChange, required }) {
       <label className="block text-sm font-medium fa-navy mb-1">
         {label} {required && <span className="text-amber-600">*</span>}
       </label>
-      <label
-        className={`w-full flex items-center gap-2 border-2 border-dashed rounded-xl px-4 py-3 text-sm transition cursor-pointer
-          ${file ? "border-teal-400 bg-teal-50 fa-teal-text" : "border-gray-300 hover:border-teal-400 text-gray-500"}`}
-      >
-        {file ? <FileCheck2 size={18} className="text-teal-600 shrink-0" /> : <Upload size={18} className="shrink-0" />}
-        <span className="truncate">{file ? file.name : "Choisir un fichier PDF"}</span>
-        <input type="file" accept="application/pdf" className="hidden"
-          onChange={(e) => onChange(e.target.files?.[0] || null)} />
-      </label>
+      <div className={`w-full flex items-center gap-2 border-2 border-dashed rounded-xl px-4 py-3 text-sm transition
+          ${file ? "border-teal-400 bg-teal-50 fa-teal-text" : "border-gray-300 hover:border-teal-400 text-gray-500"}`}>
+        <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+          {file ? <FileCheck2 size={18} className="text-teal-600 shrink-0" /> : <Upload size={18} className="shrink-0" />}
+          <span className="truncate">{file ? file.name : "Choisir un fichier PDF"}</span>
+          <input type="file" accept="application/pdf" className="hidden"
+            onChange={(e) => onChange(e.target.files?.[0] || null)} />
+        </label>
+        {file && (
+          <button type="button" onClick={() => onChange(null)} className="fa-tap text-teal-600 hover:text-red-600 shrink-0" title="Retirer le fichier">
+            <X size={16} />
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -284,48 +293,60 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [view, setView] = useState("landing");
-  const [codeInput, setCodeInput] = useState("");
-  const [loginError, setLoginError] = useState("");
   const [currentPartner, setCurrentPartner] = useState(null);
   const [currentAdmin, setCurrentAdmin] = useState(null);
+  const [currentMandataire, setCurrentMandataire] = useState(null);
   const [globalError, setGlobalError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const [loadError, setLoadError] = useState(false);
   useEffect(() => {
     (async () => {
       const initial = {
         settings: {
-          admins: [
-            { email: "sebastien@frangola-assure.fr", name: "Sébastien", authType: "password", password: "SEB2026" },
-            { email: "nelson@frangola-assure.fr", name: "Nelson", authType: "password", password: "NELSON2026" },
-            { email: "contact@frangola.fr", name: "Frangola (test)", authType: "password", password: "ISK23@" },
-          ],
+          admin: { email: "contact@frangola.fr", password: null, totpSecret: null, totpEnabled: false },
         },
+        mandataires: [],
         partners: [], dossiers: [],
       };
       try {
         const res = await storage.get("adp:data", true);
         if (res && res.value) {
           const loaded = JSON.parse(res.value);
-          if (!loaded.settings) loaded.settings = { admins: [] };
-          if (!loaded.settings.admins) loaded.settings.admins = [];
           let changed = false;
-          if (!loaded.settings.admins.some(a => a.email === "contact@frangola.fr")) {
-            loaded.settings.admins.push({ email: "contact@frangola.fr", name: "Frangola (test)", authType: "password", password: "ISK23@" });
+          if (!loaded.settings) loaded.settings = {};
+          if (!loaded.mandataires) { loaded.mandataires = []; changed = true; }
+
+          // Migration from the old multi-admin array format.
+          if (loaded.settings.admins && !loaded.settings.admin) {
+            const contactEntry = loaded.settings.admins.find(a => a.email === "contact@frangola.fr");
+            loaded.settings.admin = {
+              email: "contact@frangola.fr",
+              password: contactEntry?.password || null,
+              totpSecret: null, totpEnabled: false,
+            };
+            const nelsonEntry = loaded.settings.admins.find(a => a.email === "nelson@frangola-assure.fr");
+            if (nelsonEntry && !loaded.mandataires.some(m => m.name === "Nelson")) {
+              loaded.mandataires.push({ id: uid(), name: "Nelson", firstName: "", email: nelsonEntry.email, password: nelsonEntry.password || null, createdAt: Date.now() });
+            }
+            delete loaded.settings.admins;
             changed = true;
           }
-          loaded.settings.admins = loaded.settings.admins.map(a => {
-            if (a.email === "sebastien@frangola-assure.fr" && a.authType !== "password") { changed = true; return { ...a, authType: "password", password: a.password || "SEB2026" }; }
-            if (a.email === "nelson@frangola-assure.fr" && a.authType !== "password") { changed = true; return { ...a, authType: "password", password: a.password || "NELSON2026" }; }
-            return a;
-          });
+          if (!loaded.settings.admin) { loaded.settings.admin = initial.settings.admin; changed = true; }
+
           if (changed) await storage.set("adp:data", JSON.stringify(loaded), true);
           setData(loaded);
         }
-        else { await storage.set("adp:data", JSON.stringify(initial), true); setData(initial); }
+        else {
+          // Genuinely no data yet (first-ever run) — safe to initialize.
+          await storage.set("adp:data", JSON.stringify(initial), true);
+          setData(initial);
+        }
       } catch (e) {
-        try { await storage.set("adp:data", JSON.stringify(initial), true); } catch (_) {}
-        setData(initial);
+        // A real error occurred (network, permissions, parsing...). NEVER overwrite
+        // existing data here — that would silently wipe everything already saved.
+        console.error("Échec du chargement des données :", e);
+        setLoadError(true);
       } finally { setLoading(false); }
     })();
   }, []);
@@ -336,19 +357,26 @@ export default function App() {
     catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); }
   }
 
-  function logout() { setCurrentPartner(null); setCurrentAdmin(null); setView("landing"); setCodeInput(""); setLoginError(""); }
+  function logout() { setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null); setView("landing"); }
 
-  async function handlePartnerLogin() {
-    const p = data.partners.find(p => p.code === codeInput.trim().toUpperCase());
-    if (!p) { setLoginError("Code partenaire introuvable."); return; }
-    if (p.active === false) { setLoginError("Veuillez contacter Frangola."); return; }
-    setCurrentPartner(p); setView("partnerDash"); setCodeInput(""); setLoginError("");
-    const partners = data.partners.map(pp => pp.id === p.id ? { ...pp, lastLoginAt: Date.now() } : pp);
-    saveData({ ...data, partners });
+  async function updateAdmin(fields) {
+    await saveData({ ...data, settings: { ...data.settings, admin: { ...data.settings.admin, ...fields } } });
   }
 
-  async function saveAdmins(admins) {
-    await saveData({ ...data, settings: { ...data.settings, admins } });
+  async function addMandataire(fields) {
+    const m = { id: uid(), ...fields, password: null, active: true, createdAt: Date.now() };
+    await saveData({ ...data, mandataires: [...data.mandataires, m] });
+    return m;
+  }
+
+  async function updateMandataire(id, fields) {
+    const mandataires = data.mandataires.map(m => m.id === id ? { ...m, ...fields } : m);
+    await saveData({ ...data, mandataires });
+  }
+
+  async function deleteMandataire(id) {
+    const mandataires = data.mandataires.filter(m => m.id !== id);
+    await saveData({ ...data, mandataires });
   }
 
   async function addPartner(fields) {
@@ -505,6 +533,19 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
+  if (loadError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
+        <div className="max-w-sm text-center">
+          <div className="text-2xl mb-3">⚠️</div>
+          <h2 className="font-display text-lg font-semibold fa-navy mb-2">Impossible de charger les données</h2>
+          <p className="text-sm text-gray-500 mb-5">Vérifie ta connexion internet et réessaie. Tes données déjà enregistrées n'ont pas été touchées.</p>
+          <button onClick={() => window.location.reload()} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">Réessayer</button>
+        </div>
+      </div>
+    );
+  }
+
   if (loading || !data) {
     return <div className="min-h-screen flex items-center justify-center fa-bg-offwhite fa-teal-text">Chargement…</div>;
   }
@@ -521,23 +562,24 @@ export default function App() {
 
       {view === "landing" && <Landing onSelect={setView} />}
       {view === "partnerLogin" && (
-        <LoginScreen
-          role="partner"
-          code={codeInput} setCode={setCodeInput} error={loginError}
-          onBack={() => { setView("landing"); setLoginError(""); setCodeInput(""); }}
-          onSubmit={handlePartnerLogin}
+        <EmailPasswordLoginFlow
+          title="Espace partenaire"
+          accounts={data.partners.filter(p => !p.deleted)}
+          onUpdateAccount={updatePartner}
+          onBack={() => setView("landing")}
+          onSuccess={(p) => { setCurrentPartner(p); setView("partnerDash"); }}
+          notFoundMessage="Adresse email non reconnue."
         />
       )}
       {view === "adminLogin" && (
-        <AdminLoginFlow
-          admins={data.settings.admins}
-          onSaveAdmins={saveAdmins}
+        <FrangolaLoginFlow
+          admin={data.settings.admin}
+          mandataires={data.mandataires}
+          onUpdateAdmin={updateAdmin}
+          onUpdateMandataire={updateMandataire}
           onBack={() => setView("landing")}
-          onSuccess={(admin) => {
-            setCurrentAdmin(admin); setView("adminDash");
-            const admins = data.settings.admins.map(a => a.email === admin.email ? { ...a, lastLoginAt: Date.now() } : a);
-            saveData({ ...data, settings: { ...data.settings, admins } });
-          }}
+          onAdminSuccess={() => { setCurrentAdmin(true); setView("adminDash"); }}
+          onMandataireSuccess={(m) => { setCurrentMandataire(m); setView("mandataireDash"); }}
         />
       )}
       {view === "partnerDash" && currentPartner && (
@@ -553,6 +595,13 @@ export default function App() {
           busy={busy}
         />
       )}
+      {view === "mandataireDash" && currentMandataire && (
+        <MandataireDashboard
+          mandataire={data.mandataires.find(m => m.id === currentMandataire.id) || currentMandataire}
+          data={data}
+          onLogout={logout}
+        />
+      )}
       {view === "adminDash" && (
         <AdminDashboard
           data={data}
@@ -564,6 +613,9 @@ export default function App() {
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
           onPermanentlyDeletePartner={permanentlyDeletePartner}
+          onAddMandataire={addMandataire}
+          onUpdateMandataire={updateMandataire}
+          onDeleteMandataire={deleteMandataire}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
           onDuplicateDossier={duplicateDossier}
@@ -638,27 +690,68 @@ function Landing({ onSelect }) {
   );
 }
 
-function AdminLoginFlow({ admins, onSaveAdmins, onBack, onSuccess }) {
-  const [step, setStep] = useState("email"); // email | setup | verify | password
+function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandataire, onBack, onAdminSuccess, onMandataireSuccess }) {
+  const [accountType, setAccountType] = useState(null); // "admin" | "mandataire"
+  const [step, setStep] = useState("email"); // email | createPassword | password | totpSetup | totpVerify
   const [email, setEmail] = useState("");
-  const [admin, setAdmin] = useState(null);
+  const [mandataire, setMandataire] = useState(null);
   const [pendingSecret, setPendingSecret] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   function submitEmail() {
-    if (email.trim() === "2112") {
-      onSuccess({ name: "Frangola", email: "admin@frangola-assure.fr" });
+    const trimmed = email.trim().toLowerCase();
+    if (trimmed === admin.email.toLowerCase()) {
+      setAccountType("admin");
+      setError("");
+      setStep(admin.password ? "password" : "createPassword");
       return;
     }
-    setError("Code incorrect.");
+    const found = mandataires.find(m => (m.email || "").toLowerCase() === trimmed);
+    if (found) {
+      if (found.active === false) { setError("Veuillez contacter Frangola."); return; }
+      setAccountType("mandataire");
+      setMandataire(found);
+      setError("");
+      setStep(found.password ? "password" : "createPassword");
+      return;
+    }
+    setError("Adresse email non reconnue.");
   }
 
-  function confirmPassword() {
-    if (password !== admin.password) { setError("Mot de passe incorrect."); return; }
-    onSuccess(admin);
+  async function submitCreatePassword() {
+    if (password.length < 6) { setError("6 caractères minimum."); return; }
+    if (password !== password2) { setError("Les deux mots de passe ne correspondent pas."); return; }
+    setError(""); setBusy(true);
+    try {
+      if (accountType === "admin") {
+        await onUpdateAdmin({ password });
+        setPendingSecret(randomBase32Secret());
+        setStep("totpSetup");
+      } else {
+        await onUpdateMandataire(mandataire.id, { password, lastLoginAt: Date.now() });
+        onMandataireSuccess({ ...mandataire, password, lastLoginAt: Date.now() });
+      }
+    } finally { setBusy(false); }
+  }
+
+  async function submitPassword() {
+    if (accountType === "admin") {
+      if (password !== admin.password) { setError("Mot de passe incorrect."); return; }
+      setError("");
+      if (admin.totpEnabled && admin.totpSecret) setStep("totpVerify");
+      else { setPendingSecret(randomBase32Secret()); setStep("totpSetup"); }
+    } else {
+      if (password !== mandataire.password) { setError("Mot de passe incorrect."); return; }
+      setBusy(true);
+      try {
+        await onUpdateMandataire(mandataire.id, { lastLoginAt: Date.now() });
+        onMandataireSuccess({ ...mandataire, lastLoginAt: Date.now() });
+      } finally { setBusy(false); }
+    }
   }
 
   async function confirmSetup() {
@@ -666,9 +759,8 @@ function AdminLoginFlow({ admins, onSaveAdmins, onBack, onSuccess }) {
     try {
       const ok = await verifyTotp(pendingSecret, code);
       if (!ok) { setError("Code incorrect — vérifie l'heure de ton téléphone et réessaie."); setBusy(false); return; }
-      const updatedAdmins = admins.map(a => a.email === admin.email ? { ...a, totpSecret: pendingSecret, totpEnabled: true } : a);
-      await onSaveAdmins(updatedAdmins);
-      onSuccess({ ...admin, totpSecret: pendingSecret, totpEnabled: true });
+      await onUpdateAdmin({ totpSecret: pendingSecret, totpEnabled: true });
+      onAdminSuccess();
     } finally { setBusy(false); }
   }
 
@@ -677,16 +769,14 @@ function AdminLoginFlow({ admins, onSaveAdmins, onBack, onSuccess }) {
     try {
       const ok = await verifyTotp(admin.totpSecret, code);
       if (!ok) { setError("Code incorrect."); setBusy(false); return; }
-      onSuccess(admin);
+      onAdminSuccess();
     } finally { setBusy(false); }
   }
-
-  const otpauthUri = admin ? `otpauth://totp/FRANGOLA%20ADP:${encodeURIComponent(admin.email)}?secret=${pendingSecret}&issuer=FRANGOLA%20ADP&algorithm=SHA1&digits=6&period=30` : "";
 
   return (
     <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
       <div className="max-w-sm w-full bg-white border border-gray-200 rounded-2xl shadow-sm p-8">
-        <button onClick={step === "email" ? onBack : () => { setStep("email"); setCode(""); setError(""); }}
+        <button onClick={step === "email" ? onBack : () => { setStep("email"); setCode(""); setError(""); setAccountType(null); }}
           className="flex items-center gap-1 text-sm text-gray-400 hover:fa-teal-text mb-6">
           <ArrowLeft size={15} /> Retour
         </button>
@@ -697,30 +787,48 @@ function AdminLoginFlow({ admins, onSaveAdmins, onBack, onSuccess }) {
 
         {step === "email" && (
           <>
-            <p className="text-sm text-gray-500 mb-5">Entrez le code d'accès.</p>
+            <p className="text-sm text-gray-500 mb-5">Entrez votre adresse email.</p>
             <input value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && submitEmail()}
-              type="text" placeholder="Code d'accès" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+              type="email" placeholder="vous@exemple.fr" autoFocus
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
             <button onClick={submitEmail} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">Continuer</button>
           </>
         )}
 
-        {step === "password" && (
+        {step === "createPassword" && (
           <>
-            <p className="text-sm text-gray-500 mb-5">Accès test — entre le mot de passe.</p>
-            <input value={password} onChange={e => setPassword(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && confirmPassword()}
-              type="password" placeholder="Mot de passe" autoFocus
+            <p className="text-sm text-gray-500 mb-5">Première connexion — créez votre mot de passe.</p>
+            <input value={password} onChange={e => setPassword(e.target.value)} type="password"
+              placeholder="Nouveau mot de passe (6 caractères min.)" autoFocus
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            <input value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
+              type="password" placeholder="Confirmer le mot de passe"
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={confirmPassword} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">Accéder</button>
+            <button onClick={submitCreatePassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+              {busy ? "Création…" : "Créer et continuer"}
+            </button>
           </>
         )}
 
-        {step === "setup" && (
+        {step === "password" && (
           <>
-            <p className="text-sm text-gray-500 mb-1">Première connexion pour <strong className="fa-navy">{admin.name}</strong> — configure la double authentification.</p>
+            <p className="text-sm text-gray-500 mb-5">Entrez votre mot de passe.</p>
+            <input value={password} onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && submitPassword()}
+              type="password" placeholder="Mot de passe" autoFocus
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            <button onClick={submitPassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+              {busy ? "Vérification…" : "Continuer"}
+            </button>
+          </>
+        )}
+
+        {step === "totpSetup" && (
+          <>
+            <p className="text-sm text-gray-500 mb-1">Configurez la double authentification.</p>
             <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 my-4 bg-gray-50 rounded-lg p-3">
               <li>Ouvre Google Authenticator, Authy ou équivalent</li>
               <li>Choisis "Saisir une clé de configuration" (pas de QR ici)</li>
@@ -742,9 +850,9 @@ function AdminLoginFlow({ admins, onSaveAdmins, onBack, onSuccess }) {
           </>
         )}
 
-        {step === "verify" && (
+        {step === "totpVerify" && (
           <>
-            <p className="text-sm text-gray-500 mb-5">Bonjour <strong className="fa-navy">{admin.name}</strong> — entre le code de ton application d'authentification.</p>
+            <p className="text-sm text-gray-500 mb-5">Entre le code de ton application d'authentification.</p>
             <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
               onKeyDown={e => e.key === "Enter" && confirmVerify()}
               placeholder="000000" inputMode="numeric" autoFocus
@@ -752,6 +860,100 @@ function AdminLoginFlow({ admins, onSaveAdmins, onBack, onSuccess }) {
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
             <button onClick={confirmVerify} disabled={busy || code.length !== 6}
               className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+              {busy ? "Vérification…" : "Accéder"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmailPasswordLoginFlow({ title, accounts, onUpdateAccount, onBack, onSuccess, notFoundMessage }) {
+  const [step, setStep] = useState("email"); // email | createPassword | password
+  const [email, setEmail] = useState("");
+  const [account, setAccount] = useState(null);
+  const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  function submitEmail() {
+    const found = accounts.find(a => (a.email || "").toLowerCase() === email.trim().toLowerCase());
+    if (!found) { setError(notFoundMessage || "Adresse email introuvable."); return; }
+    if (found.active === false) { setError("Veuillez contacter Frangola."); return; }
+    setAccount(found);
+    setError("");
+    setStep(found.password ? "password" : "createPassword");
+  }
+
+  async function submitCreatePassword() {
+    if (password.length < 6) { setError("6 caractères minimum."); return; }
+    if (password !== password2) { setError("Les deux mots de passe ne correspondent pas."); return; }
+    setBusy(true);
+    try {
+      await onUpdateAccount(account.id, { password, lastLoginAt: Date.now() });
+      onSuccess({ ...account, password, lastLoginAt: Date.now() });
+    } finally { setBusy(false); }
+  }
+
+  async function submitPassword() {
+    if (password !== account.password) { setError("Mot de passe incorrect."); return; }
+    setBusy(true);
+    try {
+      await onUpdateAccount(account.id, { lastLoginAt: Date.now() });
+      onSuccess({ ...account, lastLoginAt: Date.now() });
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
+      <div className="max-w-sm w-full bg-white border border-gray-200 rounded-2xl shadow-sm p-8">
+        <button onClick={step === "email" ? onBack : () => { setStep("email"); setError(""); }}
+          className="flex items-center gap-1 text-sm text-gray-400 hover:fa-teal-text mb-6">
+          <ArrowLeft size={15} /> Retour
+        </button>
+        <div className="flex items-center gap-2 mb-1">
+          <Users className="fa-teal-text" size={20} />
+          <h2 className="font-display text-lg font-semibold fa-navy">{title}</h2>
+        </div>
+
+        {step === "email" && (
+          <>
+            <p className="text-sm text-gray-500 mb-5">Entrez votre adresse email.</p>
+            <input value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && submitEmail()}
+              type="email" placeholder="vous@exemple.fr" autoFocus
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            <button onClick={submitEmail} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">Continuer</button>
+          </>
+        )}
+
+        {step === "createPassword" && (
+          <>
+            <p className="text-sm text-gray-500 mb-5">Première connexion — créez votre mot de passe.</p>
+            <input value={password} onChange={e => setPassword(e.target.value)} type="password"
+              placeholder="Nouveau mot de passe (6 caractères min.)" autoFocus
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            <input value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
+              type="password" placeholder="Confirmer le mot de passe"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            <button onClick={submitCreatePassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+              {busy ? "Création…" : "Créer et accéder"}
+            </button>
+          </>
+        )}
+
+        {step === "password" && (
+          <>
+            <p className="text-sm text-gray-500 mb-5">Bonjour {account?.firstName || account?.name} — entrez votre mot de passe.</p>
+            <input value={password} onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && submitPassword()}
+              type="password" placeholder="Mot de passe" autoFocus
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            <button onClick={submitPassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
               {busy ? "Vérification…" : "Accéder"}
             </button>
           </>
@@ -798,7 +1000,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
   const [files, setFiles] = useState({ offre: null, tableau: null, cni: null });
 
   function isFormComplete() {
-    return clientLastName.trim();
+    return true;
   }
   async function submit() {
     if (!isFormComplete()) return;
@@ -847,8 +1049,9 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
         <Logo size="text-lg" />
         <div className="flex items-center gap-4">
           <div className="text-right hidden sm:block">
-            <div className="text-sm font-medium fa-navy">{partner.name}</div>
-            <div className="text-xs text-gray-400">{partner.company}</div>
+            <div className="text-sm font-medium fa-navy">
+              {partner.name} {partner.firstName}{partner.company && ` - ${partner.company}`}
+            </div>
           </div>
           <button onClick={onLogout} className="text-gray-400 hover:text-red-600"><LogOut size={18} /></button>
         </div>
@@ -901,7 +1104,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
             <h3 className="font-display font-semibold fa-navy mb-4">Déposer un nouveau dossier</h3>
             <div className="grid sm:grid-cols-2 gap-4 mb-4">
               <div>
-                <label className="block text-sm font-medium fa-navy mb-1">Nom du client <span className="text-amber-600">*</span></label>
+                <label className="block text-sm font-medium fa-navy mb-1">Nom du client</label>
                 <input value={clientLastName} onChange={e => setClientLastName(e.target.value)}
                   placeholder="Nom" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
               </div>
@@ -952,7 +1155,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
             <div key={d.id} className="bg-white border border-gray-200 rounded-2xl p-3.5 sm:p-5 shadow-sm">
               <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
                 <div>
-                  <div className="font-semibold fa-navy">{d.clientLastName} {d.clientFirstName}</div>
+                  <div className="font-semibold fa-navy">{clientName(d)}</div>
                   <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.clientPhone && ` · ${d.clientPhone}`}</div>
                 </div>
                 <StatusBadge status={d.status} />
@@ -988,10 +1191,15 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                       <input value={extraDocLabel} onChange={e => setExtraDocLabel(e.target.value)}
                         placeholder="Nom de la pièce (ex. Avenant, Quittance…)"
                         className="border border-gray-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                      <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition">
+                      <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center gap-2">
                         {extraDocFile ? extraDocFile.name : "Choisir un PDF"}
                         <input type="file" accept="application/pdf" className="hidden" onChange={e => setExtraDocFile(e.target.files?.[0] || null)} />
                       </label>
+                      {extraDocFile && (
+                        <button type="button" onClick={() => setExtraDocFile(null)} className="fa-tap text-gray-400 hover:text-red-600" title="Retirer le fichier">
+                          <X size={16} />
+                        </button>
+                      )}
                     </div>
                     <div className="flex gap-2 mt-2">
                       <button onClick={() => submitExtraDoc(d.id)} disabled={busy || !extraDocFile}
@@ -1166,7 +1374,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                     {paid.sort((a, b) => (b.paymentDate ? new Date(b.paymentDate).getTime() : b.updatedAt) - (a.paymentDate ? new Date(a.paymentDate).getTime() : a.updatedAt)).map(d => (
                       <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
                         <div>
-                          <div className="text-sm fa-navy font-medium">{d.clientLastName} {d.clientFirstName}</div>
+                          <div className="text-sm fa-navy font-medium">{clientName(d)}</div>
                           <div className="text-xs text-gray-400">
                             {d.paymentDate ? fmtDate(new Date(d.paymentDate).getTime()) : "—"}{d.paymentMethod && ` · ${d.paymentMethod}`}
                           </div>
@@ -1223,10 +1431,15 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
               )}
 
               <div className="flex flex-wrap items-center gap-2">
-                <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition">
+                <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center gap-2">
                   {ribFile ? ribFile.name : (partner.ribFile ? "Remplacer mon RIB" : "Choisir un fichier (PDF ou image)")}
                   <input type="file" accept="application/pdf,image/*" className="hidden" onChange={e => setRibFile(e.target.files?.[0] || null)} />
                 </label>
+                {ribFile && (
+                  <button type="button" onClick={() => setRibFile(null)} className="fa-tap text-gray-400 hover:text-red-600" title="Retirer le fichier">
+                    <X size={16} />
+                  </button>
+                )}
                 {ribFile && (
                   <button onClick={submitRib} disabled={ribBusy}
                     className="fa-bg-teal disabled:opacity-50 text-sm font-medium px-4 py-2 rounded-lg transition">
@@ -1242,16 +1455,24 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
   );
 }
 
-const COMMERCIAUX = ["Sébastien", "Nelson"];
-const COMMERCIAL_COLORS = { "Sébastien": "#2F448B", "Nelson": "#545454" };
+const MANDATAIRE_PALETTE = ["#545454", "#8B5CF6", "#0EA5E9", "#F97316", "#059669", "#DC2626", "#DB2777", "#CA8A04"];
+function commercialColor(name) {
+  if (!name) return "#999";
+  if (name === "Sébastien") return "#2F448B";
+  if (name === "Nelson") return "#545454";
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return MANDATAIRE_PALETTE[hash % MANDATAIRE_PALETTE.length];
+}
+const COMMERCIAL_COLORS = new Proxy({}, { get: (_, name) => commercialColor(name) });
 async function lookupVilleFromCodePostal(codePostal) {
   if (!/^\d{5}$/.test(codePostal)) return null;
   try {
-    const res = await fetch(`https://geo.api.gouv.fr/communes?codePostal=${codePostal}&fields=nom&format=json`);
+    const res = await fetch(`https://geo.api.gouv.fr/communes?codePostal=${codePostal}&fields=nom,codeDepartement&format=json`);
     if (!res.ok) return null;
     const arr = await res.json();
     if (!arr || arr.length === 0) return null;
-    return arr.map(c => c.nom).join(" / ");
+    return { ville: arr.map(c => c.nom).join(" / "), departement: arr[0].codeDepartement || null };
   } catch (e) { return null; }
 }
 
@@ -1262,19 +1483,114 @@ const DEPARTEMENTS = [
   "2A", "2B", "971", "972", "973", "974", "976",
 ].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onPermanentlyDeletePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, busy }) {
+function MandataireDashboard({ mandataire, data, onLogout }) {
+  const myPartners = data.partners.filter(p => !p.deleted && p.commercial === mandataire.name);
+  const myDossiers = data.dossiers.filter(d => myPartners.some(p => p.id === d.partnerId));
+  const paid = myDossiers.filter(d => d.status === "Payé");
+  const won = myDossiers.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
+  const ko = myDossiers.filter(d => d.status === "KO");
+  const totalCa = paid.reduce((s, d) => s + (d.caAmount || 0), 0);
+  const totalCommission = paid.reduce((s, d) => s + (d.commissionAmount || 0), 0);
+  const caReel = totalCa - totalCommission;
+  const maPart = caReel / 2;
+  const transformDenom = myDossiers.length - ko.length;
+  const transformRate = transformDenom > 0 ? Math.round((paid.length / transformDenom) * 100) : 0;
+
+  const partnerStats = myPartners.map(p => {
+    const pd = data.dossiers.filter(d => d.partnerId === p.id);
+    const pPaid = pd.filter(d => d.status === "Payé");
+    return {
+      partner: p, count: pd.length,
+      ca: pPaid.reduce((s, d) => s + (d.caAmount || 0), 0),
+    };
+  }).sort((a, b) => b.count - a.count);
+
+  return (
+    <div className="min-h-screen">
+      <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
+        <Logo size="text-lg" />
+        <div className="flex items-center gap-3">
+          <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[mandataire.name] }}>{mandataire.name}</span>
+          <button onClick={onLogout} className="text-gray-400 hover:text-red-600"><LogOut size={18} /></button>
+        </div>
+      </header>
+
+      <main className="max-w-4xl mx-auto px-6 py-8 space-y-6">
+        <div>
+          <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {mandataire.firstName || mandataire.name} 👋</h1>
+          <p className="text-sm text-gray-500">Voici votre production — visible uniquement par vous et Frangola.</p>
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="fa-bg-teal rounded-2xl p-6">
+            <div className="text-xs text-white/80 mb-1">Votre part (mandataire, 50%)</div>
+            <div className="font-display text-3xl font-bold text-white">{fmtEuro(maPart)}</div>
+          </div>
+          <div className="fa-bg-gold rounded-2xl p-6">
+            <div className="text-xs text-teal-900/70 mb-1">CA total généré (payé)</div>
+            <div className="font-display text-3xl font-bold fa-navy">{fmtEuro(totalCa)}</div>
+          </div>
+        </div>
+
+        <div className="grid sm:grid-cols-5 gap-4">
+          <div className="bg-white border border-gray-200 rounded-2xl p-5">
+            <div className="text-xs text-gray-400 mb-1">Partenaires</div>
+            <div className="font-display text-2xl font-bold fa-navy">{myPartners.length}</div>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-2xl p-5">
+            <div className="text-xs text-gray-400 mb-1">Dossiers</div>
+            <div className="font-display text-2xl font-bold fa-navy">{myDossiers.length}</div>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-2xl p-5">
+            <div className="text-xs text-gray-400 mb-1">Gagnés</div>
+            <div className="font-display text-2xl font-bold text-emerald-600">{won.length}</div>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-2xl p-5">
+            <div className="text-xs text-gray-400 mb-1">Transformation</div>
+            <div className="font-display text-2xl font-bold fa-teal-text">{transformRate}%</div>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-2xl p-5">
+            <div className="text-xs text-gray-400 mb-1">KO</div>
+            <div className="font-display text-2xl font-bold text-red-500">{ko.length}</div>
+          </div>
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-2xl p-5">
+          <div className="font-display font-semibold fa-navy mb-4">Vos partenaires</div>
+          {partnerStats.length === 0 ? (
+            <div className="text-sm text-gray-400">Aucun partenaire ne vous est encore rattaché.</div>
+          ) : (
+            <div className="space-y-2">
+              {partnerStats.map(ps => (
+                <div key={ps.partner.id} className="flex items-center justify-between text-sm fa-bg-offwhite rounded-lg px-3 py-2.5">
+                  <span className="fa-navy font-medium">{ps.partner.firstName ? `${ps.partner.firstName} ${ps.partner.name}` : ps.partner.name}</span>
+                  <span className="text-gray-500 text-xs">{ps.count} dossier{ps.count !== 1 ? "s" : ""} · CA {fmtEuro(ps.ca)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onPermanentlyDeletePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, busy }) {
+  const COMMERCIAUX = ["Sébastien", ...data.mandataires.map(m => m.name)];
   const [tab, setTab] = useState("accueil");
   const [newPartnerName, setNewPartnerName] = useState("");
   const [newPartnerFirstName, setNewPartnerFirstName] = useState("");
   const [newPartnerCompany, setNewPartnerCompany] = useState("");
   const [newPartnerPostalCode, setNewPartnerPostalCode] = useState("");
   const [newPartnerVille, setNewPartnerVille] = useState("");
+  const [newPartnerDepartement, setNewPartnerDepartement] = useState("");
   useEffect(() => {
     let active = true;
-    lookupVilleFromCodePostal(newPartnerPostalCode).then(name => { if (active && name) setNewPartnerVille(name); });
+    lookupVilleFromCodePostal(newPartnerPostalCode).then(res => {
+      if (active && res) { setNewPartnerVille(res.ville); setNewPartnerDepartement(res.departement || ""); }
+    });
     return () => { active = false; };
   }, [newPartnerPostalCode]);
-  const [newPartnerDepartement, setNewPartnerDepartement] = useState("");
   const [newPartnerEmail, setNewPartnerEmail] = useState("");
   const [newPartnerCommercial, setNewPartnerCommercial] = useState(COMMERCIAUX[0]);
   const [createdPartner, setCreatedPartner] = useState(null);
@@ -1285,6 +1601,10 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   const [editDossierForm, setEditDossierForm] = useState({});
   const [statsPeriod, setStatsPeriod] = useState("jour");
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
+  const [showAddMandataireForm, setShowAddMandataireForm] = useState(false);
+  const [newMandataireName, setNewMandataireName] = useState("");
+  const [newMandataireFirstName, setNewMandataireFirstName] = useState("");
+  const [newMandataireEmail, setNewMandataireEmail] = useState("");
   const [dossierSearch, setDossierSearch] = useState("");
   const [dossierFilter, setDossierFilter] = useState("tous");
   const [commercialFilter, setCommercialFilter] = useState("tous");
@@ -1344,7 +1664,9 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   useEffect(() => {
     if (!editingId || !editForm.postalCode) return;
     let active = true;
-    lookupVilleFromCodePostal(editForm.postalCode).then(name => { if (active && name) setEditForm(f => ({ ...f, ville: name })); });
+    lookupVilleFromCodePostal(editForm.postalCode).then(res => {
+      if (active && res) setEditForm(f => ({ ...f, ville: res.ville, departement: res.departement || f.departement }));
+    });
     return () => { active = false; };
   }, [editForm.postalCode, editingId]);
   async function saveEdit(id) {
@@ -1466,7 +1788,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
       <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
-          {currentAdmin && <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">{currentAdmin.name}</strong></span>}
+          <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">Frangola</strong></span>
           <button onClick={() => downloadJson(`frangola-adp-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`, data)}
             title="Sauvegarder toutes les données (JSON)"
             className="text-gray-400 hover:fa-teal-text transition">
@@ -1504,6 +1826,10 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "stats" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             <BarChart3 size={15} /> Statistiques
           </button>
+          <button onClick={() => setTab("mandataires")}
+            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "mandataires" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+            <Landmark size={15} /> Mandataires
+          </button>
         </div>
 
         {tab === "accueil" && (() => {
@@ -1520,7 +1846,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
           return (
             <div className="space-y-6">
               <div>
-                <h1 className="font-display text-xl font-semibold fa-navy">Bonjour{currentAdmin ? `, ${currentAdmin.name}` : ""} 👋</h1>
+                <h1 className="font-display text-xl font-semibold fa-navy">Bonjour 👋</h1>
                 <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
               </div>
 
@@ -1552,7 +1878,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                     {priorityItems.slice(0, 6).map(({ d, reasons }) => (
                       <button key={d.id} onClick={() => { setTab("dossiers"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); }}
                         className="w-full text-left text-sm bg-white hover:bg-red-100/50 border border-red-100 rounded-lg px-3 py-2 transition flex items-center justify-between gap-2 flex-wrap">
-                        <span className="fa-navy font-medium">{d.clientLastName} {d.clientFirstName}</span>
+                        <span className="fa-navy font-medium">{clientName(d)}</span>
                         <span className="text-red-700 text-xs">{reasons.join(" · ")}</span>
                       </button>
                     ))}
@@ -1570,10 +1896,14 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
                 <div className="font-display font-semibold fa-navy mb-3">Dernières connexions</div>
                 <div className="space-y-2">
-                  {data.settings.admins.filter(a => a.authType !== "password").map(a => (
-                    <div key={a.email} className="flex items-center justify-between text-sm">
-                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[a.name] || "#999" }}>{a.name}</span>
-                      <span className="text-gray-500 text-xs">{a.lastLoginAt ? `${fmtDate(a.lastLoginAt)} à ${new Date(a.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS["Sébastien"] }}>Frangola</span>
+                    <span className="text-gray-500 text-xs">{data.settings.admin.lastLoginAt ? `${fmtDate(data.settings.admin.lastLoginAt)} à ${new Date(data.settings.admin.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
+                  </div>
+                  {data.mandataires.map(m => (
+                    <div key={m.id} className="flex items-center justify-between text-sm">
+                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{m.name}</span>
+                      <span className="text-gray-500 text-xs">{m.lastLoginAt ? `${fmtDate(m.lastLoginAt)} à ${new Date(m.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
                     </div>
                   ))}
                 </div>
@@ -1603,7 +1933,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                     {priorityItems.map(({ d, reasons }) => (
                       <button key={d.id} onClick={() => setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`)}
                         className="w-full text-left text-sm bg-white hover:bg-red-100/50 border border-red-100 rounded-lg px-3 py-2 transition flex items-center justify-between gap-2 flex-wrap">
-                        <span className="fa-navy font-medium">{d.clientLastName} {d.clientFirstName}</span>
+                        <span className="fa-navy font-medium">{clientName(d)}</span>
                         <span className="text-red-700 text-xs">{reasons.join(" · ")}</span>
                       </button>
                     ))}
@@ -1762,7 +2092,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                                         ) : (
                                           <div>
                                             <div className="font-semibold fa-navy flex items-center gap-2 flex-wrap">
-                                              {d.clientLastName} {d.clientFirstName}
+                                              {clientName(d)}
                                               <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
                                               <button onClick={() => onDuplicateDossier(d.id)} className="fa-tap text-xs text-gray-400 hover:fa-teal-text font-normal">Dupliquer</button>
                                               {findDuplicates(d).length > 0 && (
@@ -2051,7 +2381,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   <option value="">Département</option>
                   {DEPARTEMENTS.map(d => <option key={d} value={d}>{d}</option>)}
                 </select>
-                <input value={newPartnerEmail} onChange={e => setNewPartnerEmail(e.target.value)} type="email" placeholder="Adresse email"
+                <input value={newPartnerEmail} onChange={e => setNewPartnerEmail(e.target.value)} type="email" placeholder="Adresse email *"
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <select value={newPartnerCommercial} onChange={e => setNewPartnerCommercial(e.target.value)}
                   style={{ backgroundColor: COMMERCIAL_COLORS[newPartnerCommercial], color: "#fff" }}
@@ -2060,18 +2390,15 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 </select>
               </div>
               <div className="flex gap-2 items-start flex-wrap">
-                <button onClick={handleAddPartner} disabled={!newPartnerName.trim()}
+                <button onClick={handleAddPartner} disabled={!newPartnerName.trim() || !newPartnerEmail.trim()}
                   className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
                   Créer l'accès
                 </button>
                 <button onClick={() => setShowAddPartnerForm(false)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
               </div>
               {createdPartner && (
-                <div className="mt-4 text-sm bg-teal-50 border border-teal-200 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
-                  <span>Code pour <strong>{createdPartner.name}</strong> : <span className="font-mono font-bold tracking-wider">{createdPartner.code}</span></span>
-                  <button onClick={() => copyCode(createdPartner.code, createdPartner.id)} className="fa-teal-text hover:text-teal-900">
-                    {copiedId === createdPartner.id ? <Check size={16} /> : <Copy size={16} />}
-                  </button>
+                <div className="mt-4 text-sm bg-teal-50 border border-teal-200 rounded-lg px-4 py-3">
+                  <strong>{createdPartner.name}</strong> peut se connecter avec son email (<strong>{createdPartner.email || "non renseigné"}</strong>) — il créera son mot de passe à sa 1ère connexion.
                 </div>
               )}
             </div>
@@ -2139,10 +2466,9 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${p.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
                           {p.active === false ? "Réactiver" : "Désactiver"}
                         </button>
-                        <button onClick={() => copyCode(p.code, p.id)}
-                          className="flex items-center gap-2 text-sm font-mono fa-bg-offwhite hover:bg-teal-50 border border-gray-200 px-3 py-1.5 rounded-lg transition">
-                          {p.code} {copiedId === p.id ? <Check size={14} className="fa-teal-text" /> : <Copy size={14} className="text-gray-400" />}
-                        </button>
+                        <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
+                          {p.email || "email manquant"} · {p.password ? "accès activé" : "en attente de 1ère connexion"}
+                        </span>
                         {confirmDeleteId === p.id ? (
                           <span className="flex items-center gap-1.5 text-xs">
                             <span className="text-red-700">Confirmer ?</span>
@@ -2199,7 +2525,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                             {pDossiers.length === 0 && <div className="text-sm text-gray-400">Aucun dossier pour ce partenaire.</div>}
                             {pDossiers.sort((a, b) => b.createdAt - a.createdAt).map(d => (
                               <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-                                <span className="text-sm fa-navy font-medium">{d.clientLastName} {d.clientFirstName}</span>
+                                <span className="text-sm fa-navy font-medium">{clientName(d)}</span>
                                 <div className="flex items-center gap-2 text-xs text-gray-500">
                                   <StatusBadge status={d.status} />
                                   <span>{fmtDate(d.createdAt)}</span>
@@ -2597,6 +2923,69 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             </div>
           );
         })()}
+
+        {tab === "mandataires" && (
+          <div>
+            <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
+              <h2 className="font-display text-lg font-semibold fa-navy">Mandataires</h2>
+              <button onClick={() => setShowAddMandataireForm(v => !v)}
+                className="flex items-center gap-1.5 fa-bg-gold font-medium text-sm px-4 py-2 rounded-full transition">
+                <Plus size={16} /> Ajouter un mandataire
+              </button>
+            </div>
+
+            {showAddMandataireForm && (
+              <div className="bg-white border border-gray-200 rounded-2xl p-6 mb-6 shadow-sm">
+                <h3 className="font-display font-semibold fa-navy mb-4">Ajouter un mandataire</h3>
+                <div className="grid sm:grid-cols-3 gap-4 mb-4">
+                  <input value={newMandataireName} onChange={e => setNewMandataireName(e.target.value)} placeholder="Nom"
+                    className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <input value={newMandataireFirstName} onChange={e => setNewMandataireFirstName(e.target.value)} placeholder="Prénom"
+                    className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <input value={newMandataireEmail} onChange={e => setNewMandataireEmail(e.target.value)} type="email" placeholder="Adresse email"
+                    className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={async () => {
+                    if (!newMandataireName.trim() || !newMandataireEmail.trim()) return;
+                    await onAddMandataire({ name: newMandataireName.trim(), firstName: newMandataireFirstName.trim(), email: newMandataireEmail.trim() });
+                    setNewMandataireName(""); setNewMandataireFirstName(""); setNewMandataireEmail(""); setShowAddMandataireForm(false);
+                  }} disabled={!newMandataireName.trim() || !newMandataireEmail.trim()}
+                    className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
+                    Créer l'accès
+                  </button>
+                  <button onClick={() => setShowAddMandataireForm(false)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
+                </div>
+                <p className="text-xs text-gray-400 mt-3">Le mandataire créera lui-même son mot de passe à sa première connexion, avec cette adresse email.</p>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {data.mandataires.length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun mandataire pour l'instant — Sébastien reste le commercial par défaut.</div>}
+              {data.mandataires.map(m => (
+                <div key={m.id} className={`bg-white border rounded-xl px-5 py-4 flex items-center justify-between flex-wrap gap-2 ${m.active === false ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
+                  <div>
+                    <div className="font-medium fa-navy flex items-center gap-2">
+                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{m.name}</span>
+                      {m.firstName}
+                      {m.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
+                    </div>
+                    <div className="text-xs text-gray-400">
+                      {m.email} · {m.password ? "Accès activé" : "En attente de 1ère connexion"} · {m.lastLoginAt ? `dernière connexion ${fmtDate(m.lastLoginAt)}` : "jamais connecté"}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => onUpdateMandataire(m.id, { active: m.active === false ? true : false })}
+                      className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${m.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
+                      {m.active === false ? "Réactiver" : "Désactiver"}
+                    </button>
+                    <button onClick={() => onDeleteMandataire(m.id)} className="text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </main>
     </div>
 
