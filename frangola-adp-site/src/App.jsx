@@ -447,21 +447,6 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
-  async function uploadMandataireRib(mandataireId, file) {
-    if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
-    setBusy(true);
-    try {
-      const b64 = await fileToBase64(file);
-      const fileKey = "adp:file:" + uid();
-      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
-      const mandataires = data.mandataires.map(m => m.id === mandataireId
-        ? { ...m, ribFile: { name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() } }
-        : m);
-      await saveData({ ...data, mandataires });
-      return true;
-    } finally { setBusy(false); }
-  }
-
   async function uploadReseauLogo(reseauName, file) {
     const name = reseauName.trim();
     if (!name) return false;
@@ -677,7 +662,6 @@ export default function App() {
           mandataire={data.mandataires.find(m => m.id === currentMandataire.id) || currentMandataire}
           data={data}
           onLogout={logout}
-          onUploadRib={uploadMandataireRib}
         />
       )}
       {view === "adminDash" && (
@@ -822,6 +806,17 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
   const [useRecoveryCode, setUseRecoveryCode] = useState(false);
   const [recoveryCodeInput, setRecoveryCodeInput] = useState("");
 
+  // Generic helpers so TOTP/recovery-code logic works identically for admin and mandataire.
+  const account = accountType === "admin" ? admin : mandataire;
+  async function updateAccount(fields) {
+    if (accountType === "admin") await onUpdateAdmin(fields);
+    else await onUpdateMandataire(mandataire.id, fields);
+  }
+  function finishSuccess(extraFields) {
+    if (accountType === "admin") onAdminSuccess();
+    else onMandataireSuccess({ ...mandataire, ...extraFields });
+  }
+
   function submitEmail() {
     const trimmed = email.trim().toLowerCase();
     if (trimmed === admin.email.toLowerCase()) {
@@ -847,46 +842,32 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
     if (password !== password2) { setError("Les deux mots de passe ne correspondent pas."); return; }
     setError(""); setBusy(true);
     try {
-      if (accountType === "admin") {
-        await onUpdateAdmin({ password });
-        if (admin.totpEnabled && admin.totpSecret) {
-          // Password reset on an account that already has TOTP configured — don't
-          // make them reconfigure their authenticator app, just let them in.
-          await onUpdateAdmin({ lastLoginAt: Date.now() });
-          onAdminSuccess();
-        } else {
-          setPendingSecret(randomBase32Secret());
-          setStep("totpSetup");
-        }
+      await updateAccount({ password });
+      if (account.totpEnabled && account.totpSecret) {
+        // Password reset on an account that already has TOTP configured — don't
+        // make them reconfigure their authenticator app, just let them in.
+        await updateAccount({ lastLoginAt: Date.now() });
+        finishSuccess({ password, lastLoginAt: Date.now() });
       } else {
-        await onUpdateMandataire(mandataire.id, { password, lastLoginAt: Date.now() });
-        onMandataireSuccess({ ...mandataire, password, lastLoginAt: Date.now() });
+        setPendingSecret(randomBase32Secret());
+        setStep("totpSetup");
       }
     } finally { setBusy(false); }
   }
 
   async function submitPassword() {
-    if (accountType === "admin") {
-      if (password !== admin.password) { setError("Mot de passe incorrect."); return; }
-      setError("");
-      if (admin.totpEnabled && admin.totpSecret) setStep("totpVerify");
-      else { setPendingSecret(randomBase32Secret()); setStep("totpSetup"); }
-    } else {
-      if (password !== mandataire.password) { setError("Mot de passe incorrect."); return; }
-      setBusy(true);
-      try {
-        await onUpdateMandataire(mandataire.id, { lastLoginAt: Date.now() });
-        onMandataireSuccess({ ...mandataire, lastLoginAt: Date.now() });
-      } finally { setBusy(false); }
-    }
+    if (password !== account.password) { setError("Mot de passe incorrect."); return; }
+    setError("");
+    if (account.totpEnabled && account.totpSecret) setStep("totpVerify");
+    else { setPendingSecret(randomBase32Secret()); setStep("totpSetup"); }
   }
 
   function startForgotPassword() {
     setError(""); setCode(""); setPassword(""); setPassword2("");
-    if (accountType === "admin" && admin.totpEnabled && admin.totpSecret) {
+    if (account.totpEnabled && account.totpSecret) {
       setStep("forgotAdminTotp");
     } else {
-      // No second factor available (mandataire, or admin without TOTP yet) — direct reset.
+      // No second factor configured yet — direct reset.
       setStep("createPassword");
     }
   }
@@ -895,14 +876,14 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
     setBusy(true); setError("");
     try {
       if (useRecoveryCode) {
-        const match = (admin.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
+        const match = (account.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
         if (!match) { setError("Code de récupération invalide ou déjà utilisé."); setBusy(false); return; }
-        const updatedCodes = admin.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
-        await onUpdateAdmin({ recoveryCodes: updatedCodes });
+        const updatedCodes = account.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
+        await updateAccount({ recoveryCodes: updatedCodes });
         setStep("createPassword");
         return;
       }
-      const ok = await verifyTotp(admin.totpSecret, code);
+      const ok = await verifyTotp(account.totpSecret, code);
       if (!ok) { setError("Code incorrect."); setBusy(false); return; }
       setStep("createPassword");
     } finally { setBusy(false); }
@@ -914,7 +895,7 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
       const ok = await verifyTotp(pendingSecret, code);
       if (!ok) { setError("Code incorrect — vérifie l'heure de ton téléphone et réessaie."); setBusy(false); return; }
       const codes = generateRecoveryCodes();
-      await onUpdateAdmin({ totpSecret: pendingSecret, totpEnabled: true, lastLoginAt: Date.now(), recoveryCodes: codes });
+      await updateAccount({ totpSecret: pendingSecret, totpEnabled: true, lastLoginAt: Date.now(), recoveryCodes: codes });
       setGeneratedRecoveryCodes(codes);
       setStep("showRecoveryCodes");
     } finally { setBusy(false); }
@@ -924,17 +905,17 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
     setBusy(true); setError("");
     try {
       if (useRecoveryCode) {
-        const match = (admin.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
+        const match = (account.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
         if (!match) { setError("Code de récupération invalide ou déjà utilisé."); setBusy(false); return; }
-        const updatedCodes = admin.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
-        await onUpdateAdmin({ recoveryCodes: updatedCodes, lastLoginAt: Date.now() });
-        onAdminSuccess();
+        const updatedCodes = account.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
+        await updateAccount({ recoveryCodes: updatedCodes, lastLoginAt: Date.now() });
+        finishSuccess({ lastLoginAt: Date.now() });
         return;
       }
-      const ok = await verifyTotp(admin.totpSecret, code);
+      const ok = await verifyTotp(account.totpSecret, code);
       if (!ok) { setError("Code incorrect."); setBusy(false); return; }
-      await onUpdateAdmin({ lastLoginAt: Date.now() });
-      onAdminSuccess();
+      await updateAccount({ lastLoginAt: Date.now() });
+      finishSuccess({ lastLoginAt: Date.now() });
     } finally { setBusy(false); }
   }
 
@@ -1060,7 +1041,7 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
                 <div key={rc.code} className="font-mono text-sm fa-navy text-center">{rc.code}</div>
               ))}
             </div>
-            <button onClick={onAdminSuccess} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">
+            <button onClick={() => finishSuccess({ lastLoginAt: Date.now() })} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">
               J'ai noté mes codes — continuer
             </button>
           </>
@@ -1496,7 +1477,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
           const paid = dossiers.filter(d => d.status === "Payé");
           const ko = dossiers.filter(d => d.status === "KO");
           const totalRemuneration = paid.reduce((s, d) => s + (d.commissionAmount || 0), 0);
-          const avgRemuneration = paid.length ? totalRemuneration / paid.length : 0;
+          const avgRemuneration = paid.length ? totalRemuneration / paid.length : 150;
           const transformDenominator = total - ko.length;
           const transformRate = transformDenominator > 0 ? Math.round((paid.length / transformDenominator) * 100) : 0;
 
@@ -1744,18 +1725,7 @@ const DEPARTEMENTS = [
   "2A", "2B", "971", "972", "973", "974", "976",
 ].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-function MandataireDashboard({ mandataire, data, onLogout, onUploadRib }) {
-  const [ribFile, setRibFile] = useState(null);
-  const [ribBusy, setRibBusy] = useState(false);
-  async function submitRib() {
-    if (!ribFile) return;
-    setRibBusy(true);
-    try {
-      const ok = await onUploadRib(mandataire.id, ribFile);
-      if (ok) setRibFile(null);
-    } finally { setRibBusy(false); }
-  }
-
+function MandataireDashboard({ mandataire, data, onLogout }) {
   const myPartners = data.partners.filter(p => !p.deleted && p.commercial === mandataire.name);
   const myDossiers = data.dossiers.filter(d => myPartners.some(p => p.id === d.partnerId));
   const paid = myDossiers.filter(d => d.status === "Payé");
@@ -1843,36 +1813,6 @@ function MandataireDashboard({ mandataire, data, onLogout, onUploadRib }) {
           )}
         </div>
 
-        <div className="bg-white border border-gray-200 rounded-2xl p-6">
-          <div className="font-display font-semibold fa-navy mb-1">🏦 RIB pour le versement de votre part</div>
-          <p className="text-sm text-gray-500 mb-4">Déposez votre RIB pour que Frangola Assure puisse vous verser votre commission.</p>
-
-          {mandataire.ribFile && (
-            <div className="flex items-center justify-between flex-wrap gap-2 bg-teal-50 border border-teal-200 rounded-lg px-4 py-3 mb-4">
-              <span className="text-sm fa-navy">✅ RIB fourni le {fmtDate(mandataire.ribFile.uploadedAt)}</span>
-              <button onClick={() => downloadStoredFile(mandataire.ribFile.key, mandataire.ribFile.name)}
-                className="text-xs fa-teal-text hover:underline font-medium">Voir le fichier</button>
-            </div>
-          )}
-
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center gap-2">
-              {ribFile ? ribFile.name : (mandataire.ribFile ? "Remplacer mon RIB" : "Choisir un fichier (PDF ou image)")}
-              <input type="file" accept="application/pdf,image/*" className="hidden" onChange={e => setRibFile(e.target.files?.[0] || null)} />
-            </label>
-            {ribFile && (
-              <button type="button" onClick={() => setRibFile(null)} className="fa-tap text-gray-400 hover:text-red-600" title="Retirer le fichier">
-                <X size={16} />
-              </button>
-            )}
-            {ribFile && (
-              <button onClick={submitRib} disabled={ribBusy}
-                className="fa-bg-teal disabled:opacity-50 text-sm font-medium px-4 py-2 rounded-lg transition">
-                {ribBusy ? "Envoi…" : "Envoyer le RIB"}
-              </button>
-            )}
-          </div>
-        </div>
       </main>
     </div>
   );
@@ -3424,18 +3364,12 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Sa part (mandataire, 50%)</div><div className="font-display text-lg font-bold fa-navy">{fmtEuro(mPart)}</div></div>
                           <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">CA total généré (payé)</div><div className="font-display text-lg font-bold fa-navy">{fmtEuro(mCa)}</div></div>
                         </div>
-                        <div className="grid sm:grid-cols-5 gap-3 mb-4">
+                        <div className="grid sm:grid-cols-4 gap-3 mb-4">
                           <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">Partenaires</div><div className="font-display font-bold fa-navy">{mPartners.length}</div></div>
                           <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">Dossiers</div><div className="font-display font-bold fa-navy">{mDossiers.length}</div></div>
                           <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">Gagnés</div><div className="font-display font-bold text-emerald-600">{mWon.length}</div></div>
                           <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">KO</div><div className="font-display font-bold text-red-500">{mKo.length}</div></div>
-                          <div className="fa-bg-offwhite rounded-xl p-3"><div className="text-xs text-gray-400">RIB</div><div className="font-display text-sm font-bold fa-navy">{m.ribFile ? "Fourni" : "Aucun"}</div></div>
                         </div>
-                        {m.ribFile && (
-                          <button onClick={() => downloadStoredFile(m.ribFile.key, m.ribFile.name)} className="text-xs fa-teal-text hover:underline">
-                            🏦 Voir le RIB déposé le {fmtDate(m.ribFile.uploadedAt)}
-                          </button>
-                        )}
                       </div>
                     );
                   })()}
