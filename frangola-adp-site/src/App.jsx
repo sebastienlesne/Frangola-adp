@@ -66,6 +66,19 @@ async function verifyTotp(secretBase32, code, windowSteps = 1) {
 function uid() {
   return (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now());
 }
+const SESSION_KEY = "adp:session";
+function getStoredSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function setStoredSession(session) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch (e) { /* ignore */ }
+}
+function clearStoredSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
+}
 function genCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -320,6 +333,25 @@ export default function App() {
 
   const [loadError, setLoadError] = useState(false);
   useEffect(() => { if (data) setColorDataRef(data); }, [data]);
+
+  const sessionRestored = useRef(false);
+  useEffect(() => {
+    if (!data || sessionRestored.current) return;
+    sessionRestored.current = true;
+    const session = getStoredSession();
+    if (!session) return;
+    if (session.type === "admin") {
+      setCurrentAdmin(true); setView("adminDash");
+    } else if (session.type === "mandataire") {
+      const m = data.mandataires.find(m => m.id === session.id);
+      if (m && m.active !== false) { setCurrentMandataire(m); setView("mandataireDash"); }
+      else clearStoredSession();
+    } else if (session.type === "partner") {
+      const p = data.partners.find(p => p.id === session.id && !p.deleted && p.active !== false);
+      if (p) { setCurrentPartner(p); setView("partnerDash"); }
+      else clearStoredSession();
+    }
+  }, [data]);
   useEffect(() => {
     (async () => {
       const initial = {
@@ -379,7 +411,7 @@ export default function App() {
     catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); }
   }
 
-  function logout() { setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null); setView("landing"); }
+  function logout() { setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null); setView("landing"); clearStoredSession(); }
 
   async function updateAdmin(fields) {
     await saveData({ ...data, settings: { ...data.settings, admin: { ...data.settings.admin, ...fields } } });
@@ -476,11 +508,6 @@ export default function App() {
 
   async function restorePartner(id) {
     const partners = data.partners.map(p => p.id === id ? { ...p, deleted: false, deletedAt: null } : p);
-    await saveData({ ...data, partners });
-  }
-
-  async function permanentlyDeletePartner(id) {
-    const partners = data.partners.filter(p => p.id !== id);
     await saveData({ ...data, partners });
   }
 
@@ -629,7 +656,7 @@ export default function App() {
           accounts={data.partners.filter(p => !p.deleted)}
           onUpdateAccount={updatePartner}
           onBack={() => setView("landing")}
-          onSuccess={(p) => { setCurrentPartner(p); setView("partnerDash"); }}
+          onSuccess={(p) => { setCurrentPartner(p); setView("partnerDash"); setStoredSession({ type: "partner", id: p.id }); }}
           notFoundMessage="Adresse email non reconnue."
         />
       )}
@@ -640,8 +667,8 @@ export default function App() {
           onUpdateAdmin={updateAdmin}
           onUpdateMandataire={updateMandataire}
           onBack={() => setView("landing")}
-          onAdminSuccess={() => { setCurrentAdmin(true); setView("adminDash"); }}
-          onMandataireSuccess={(m) => { setCurrentMandataire(m); setView("mandataireDash"); }}
+          onAdminSuccess={() => { setCurrentAdmin(true); setView("adminDash"); setStoredSession({ type: "admin" }); }}
+          onMandataireSuccess={(m) => { setCurrentMandataire(m); setView("mandataireDash"); setStoredSession({ type: "mandataire", id: m.id }); }}
         />
       )}
       {view === "partnerDash" && currentPartner && (
@@ -674,7 +701,6 @@ export default function App() {
           onUploadPartnerContract={uploadPartnerContract}
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
-          onPermanentlyDeletePartner={permanentlyDeletePartner}
           onAddMandataire={addMandataire}
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
@@ -1818,8 +1844,10 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onPermanentlyDeletePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.map(m => m.name)];
+  const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
+  const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
   const [tab, setTab] = useState("accueil");
   const [newPartnerName, setNewPartnerName] = useState("");
   const [newPartnerFirstName, setNewPartnerFirstName] = useState("");
@@ -1844,6 +1872,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   const [editDossierForm, setEditDossierForm] = useState({});
   const [statsPeriod, setStatsPeriod] = useState("jour");
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
+  const [corbeilleSearch, setCorbeilleSearch] = useState("");
   const [showAddMandataireForm, setShowAddMandataireForm] = useState(false);
   const [editingMandataireId, setEditingMandataireId] = useState(null);
   const [editMandataireForm, setEditMandataireForm] = useState({});
@@ -1891,7 +1920,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   }
   const bordereauInputs = useRef({});
 
-  const newDeposits = data.dossiers.filter(d => d.status === "Déposé").length;
+  const newDeposits = liveDossiers.filter(d => d.status === "Déposé").length;
   const partnerName = (id) => data.partners.find(p => p.id === id)?.name || "—";
 
   async function handleAddPartner() {
@@ -2090,14 +2119,14 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
         </div>
 
         {tab === "accueil" && (() => {
-          const priorityItems = data.dossiers
+          const priorityItems = liveDossiers
             .map(d => ({ d, reasons: actionReasons(d) }))
             .filter(x => x.reasons.length > 0)
             .sort((a, b) => b.reasons.length - a.reasons.length);
           const now = new Date();
           const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-          const dossiersActifs = data.dossiers.filter(d => !["KO", "Payé"].includes(d.status)).length;
-          const caduMois = data.dossiers.filter(d => d.status === "Payé" && (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) >= monthStart).reduce((s, d) => s + (d.caAmount || 0), 0);
+          const dossiersActifs = liveDossiers.filter(d => !["KO", "Payé"].includes(d.status)).length;
+          const caduMois = liveDossiers.filter(d => d.status === "Payé" && (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) >= monthStart).reduce((s, d) => s + (d.caAmount || 0), 0);
           const partenairesActifs = data.partners.filter(p => !p.deleted && p.active !== false).length;
 
           return (
@@ -2200,15 +2229,15 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             })()}
             <div className="flex gap-1.5 mb-1 overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
               {[
-                ["tous", "Tous", data.dossiers.length],
-                ["Déposé", "Déposé", data.dossiers.filter(d => d.status === "Déposé").length],
-                ["En vérification", "En vérification", data.dossiers.filter(d => d.status === "En vérification").length],
-                ["Devis en cours", "Devis en cours", data.dossiers.filter(d => d.status === "Devis en cours").length],
-                ["Souscrit", "Souscrit", data.dossiers.filter(d => d.status === "Souscrit").length],
-                ["Bordereau émis", "Bordereau émis", data.dossiers.filter(d => d.status === "Bordereau émis").length],
-                ["Payé", "Payé", data.dossiers.filter(d => d.status === "Payé").length],
-                ["KO", "KO", data.dossiers.filter(d => d.status === "KO").length],
-                ["action", "Nécessite une action", data.dossiers.filter(d => actionReasons(d).length > 0).length],
+                ["tous", "Tous", liveDossiers.length],
+                ["Déposé", "Déposé", liveDossiers.filter(d => d.status === "Déposé").length],
+                ["En vérification", "En vérification", liveDossiers.filter(d => d.status === "En vérification").length],
+                ["Devis en cours", "Devis en cours", liveDossiers.filter(d => d.status === "Devis en cours").length],
+                ["Souscrit", "Souscrit", liveDossiers.filter(d => d.status === "Souscrit").length],
+                ["Bordereau émis", "Bordereau émis", liveDossiers.filter(d => d.status === "Bordereau émis").length],
+                ["Payé", "Payé", liveDossiers.filter(d => d.status === "Payé").length],
+                ["KO", "KO", liveDossiers.filter(d => d.status === "KO").length],
+                ["action", "Nécessite une action", liveDossiers.filter(d => actionReasons(d).length > 0).length],
               ].map(([val, label, count]) => (
                 <button key={val} onClick={() => { setDossierFilter(val); setDossierSearch(""); }}
                   className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition whitespace-nowrap shrink-0 ${dossierFilter === val ? "fa-bg-teal" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"}`}>
@@ -2878,31 +2907,50 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
           </div>
         )}
 
-        {tab === "corbeille" && (
-          <div className="space-y-3">
-            {data.partners.filter(p => p.deleted).length === 0 && (
-              <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">La corbeille est vide.</div>
-            )}
-            {data.partners.filter(p => p.deleted).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0)).map(p => (
-              <div key={p.id} className="bg-white border border-gray-200 rounded-xl px-5 py-4 flex items-center justify-between flex-wrap gap-2 opacity-80">
-                <div>
-                  <div className="font-medium fa-navy"><span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span></div>
-                  <div className="text-xs text-gray-400">
-                    {p.company || "—"} {p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
-                  </div>
+        {tab === "corbeille" && (() => {
+          const deletedPartners = data.partners.filter(p => p.deleted).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+          const q = corbeilleSearch.trim().toLowerCase();
+          const filtered = q
+            ? deletedPartners.filter(p => `${p.name} ${p.firstName || ""}`.toLowerCase().includes(q))
+            : deletedPartners;
+          return (
+            <div className="space-y-3">
+              {deletedPartners.length > 0 && (
+                <div className="relative mb-2 max-w-sm">
+                  <input value={corbeilleSearch} onChange={e => setCorbeilleSearch(e.target.value)}
+                    placeholder="Rechercher un partenaire supprimé…"
+                    className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
+                  {corbeilleSearch && (
+                    <button onClick={() => setCorbeilleSearch("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      <X size={15} />
+                    </button>
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
+              )}
+              {deletedPartners.length === 0 && (
+                <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">La corbeille est vide.</div>
+              )}
+              {deletedPartners.length > 0 && filtered.length === 0 && (
+                <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">Aucun résultat pour "{corbeilleSearch}".</div>
+              )}
+              {filtered.map(p => (
+                <div key={p.id} className="bg-white border border-gray-200 rounded-xl px-5 py-4 flex items-center justify-between flex-wrap gap-2 opacity-80">
+                  <div>
+                    <div className="font-medium fa-navy"><span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span></div>
+                    <div className="text-xs text-gray-400">
+                      {p.company || "—"} {p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
+                    </div>
+                  </div>
                   <button onClick={() => onRestorePartner(p.id)}
                     className="flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-3 py-1.5 rounded-full transition">
                     <RotateCcw size={13} /> Restaurer
                   </button>
-                  <button onClick={() => onPermanentlyDeletePartner(p.id)}
-                    className="text-xs text-gray-400 hover:text-red-600 px-2">Supprimer définitivement</button>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          );
+        })()}
 
         {tab === "stats" && (() => {
           const allDepartements = [...new Set(data.partners.map(p => p.departement).filter(Boolean))].sort();
