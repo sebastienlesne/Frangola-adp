@@ -159,6 +159,19 @@ async function downloadStoredFile(key, fallbackName) {
   document.body.removeChild(link);
 }
 
+async function previewStoredFile(key) {
+  const file = await loadFile(key);
+  if (!file) return;
+  const mime = file.mime || "application/pdf";
+  const byteChars = atob(file.data);
+  const byteNumbers = new Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+  const blob = new Blob([new Uint8Array(byteNumbers)], { type: mime });
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
 function csvEscape(val) {
   const s = String(val ?? "");
   return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -596,6 +609,21 @@ export default function App() {
     await saveData({ ...data, dossiers });
   }
 
+  async function adminUploadDoc(dossierId, docKey, file) {
+    if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo — compresse le PDF avant de le déposer.`); return false; }
+    setBusy(true);
+    try {
+      const b64 = await fileToBase64(file);
+      const fileKey = "adp:file:" + uid();
+      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      const dossiers = data.dossiers.map(d => d.id === dossierId
+        ? { ...d, docs: { ...(d.docs || {}), [docKey]: { name: file.name, key: fileKey, size: file.size } } }
+        : d);
+      await saveData({ ...data, dossiers });
+      return true;
+    } finally { setBusy(false); }
+  }
+
   async function addExtraDoc(dossierId, label, file) {
     if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo — compresse le PDF avant de le déposer.`); return false; }
     setBusy(true);
@@ -705,16 +733,11 @@ export default function App() {
         />
       )}
       {view === "mandataireDash" && currentMandataire && (
-        <MandataireDashboard
-          mandataire={data.mandataires.find(m => m.id === currentMandataire.id) || currentMandataire}
-          data={data}
-          onLogout={logout}
-        />
-      )}
-      {view === "adminDash" && (
         <AdminDashboard
           data={data}
           currentAdmin={currentAdmin}
+          isFullAdmin={false}
+          viewerLabel={currentMandataire.firstName || currentMandataire.name}
           onLogout={logout}
           onAddPartner={addPartner}
           onUpdatePartner={updatePartner}
@@ -733,6 +756,37 @@ export default function App() {
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
+          onAdminUploadDoc={adminUploadDoc}
+          onAddExtraDoc={addExtraDoc}
+          busy={busy}
+        />
+      )}
+      {view === "adminDash" && (
+        <AdminDashboard
+          data={data}
+          currentAdmin={currentAdmin}
+          isFullAdmin={true}
+          viewerLabel="Sébastien"
+          onLogout={logout}
+          onAddPartner={addPartner}
+          onUpdatePartner={updatePartner}
+          onUploadPartnerContract={uploadPartnerContract}
+          onDeletePartner={deletePartner}
+          onRestorePartner={restorePartner}
+          onAddMandataire={addMandataire}
+          onUpdateMandataire={updateMandataire}
+          onDeleteMandataire={deleteMandataire}
+          onRestoreMandataire={restoreMandataire}
+          onUploadReseauLogo={uploadReseauLogo}
+          onRemoveReseauLogo={removeReseauLogo}
+          onUpdateStatus={updateStatus}
+          onUpdateDossierClient={updateDossierClient}
+          onDuplicateDossier={duplicateDossier}
+          onUpdateDossierNotes={updateDossierNotes}
+          onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
+          onUploadBordereau={uploadBordereau}
+          onAdminUploadDoc={adminUploadDoc}
+          onAddExtraDoc={addExtraDoc}
           busy={busy}
         />
       )}
@@ -1676,10 +1730,16 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
               </div>
               <p className="text-sm text-gray-500 mb-4">Votre contrat signé par les deux parties, déposé par Frangola Assure.</p>
               {partner.contractFile ? (
-                <button onClick={() => downloadStoredFile(partner.contractFile.key, partner.contractFile.name)}
-                  className="flex items-center gap-2 text-sm font-medium fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition w-fit">
-                  <Download size={15} /> Télécharger mon contrat signé
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => previewStoredFile(partner.contractFile.key)}
+                    className="flex items-center gap-2 text-sm font-medium fa-navy border border-gray-300 hover:border-teal-400 px-4 py-2.5 rounded-lg transition w-fit">
+                    <FileCheck2 size={15} /> Aperçu
+                  </button>
+                  <button onClick={() => downloadStoredFile(partner.contractFile.key, partner.contractFile.name)}
+                    className="flex items-center gap-2 text-sm font-medium fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition w-fit">
+                    <Download size={15} /> Télécharger mon contrat signé
+                  </button>
+                </div>
               ) : (
                 <div className="text-sm text-gray-400 bg-gray-50 rounded-lg px-4 py-3">
                   Votre contrat n'a pas encore été déposé par Frangola Assure.
@@ -1865,7 +1925,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onAddExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -2000,6 +2060,59 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
     return Math.floor((nowTick - lastAt) / 86400000);
   }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [adminExtraDocOpenId, setAdminExtraDocOpenId] = useState(null);
+  const [adminExtraDocLabel, setAdminExtraDocLabel] = useState("");
+  const [adminExtraDocFile, setAdminExtraDocFile] = useState(null);
+  function renderDocUpload(d) {
+    return (
+      <>
+        <div className="flex flex-wrap gap-2 mt-3">
+          {Object.keys(DOC_LABELS).map(k => d.docs[k] ? (
+            <button key={k} onClick={() => downloadStoredFile(d.docs[k].key, d.docs[k].name)}
+              className="text-xs bg-white hover:bg-teal-50 border border-gray-200 hover:border-teal-300 text-gray-600 hover:text-teal-700 px-2.5 py-1 rounded-full flex items-center gap-1 transition">
+              <FileText size={12} /> {DOC_LABELS[k]} <Download size={11} />
+            </button>
+          ) : (
+            <label key={k} className="fa-tap text-xs bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-700 px-2.5 py-1 rounded-full flex items-center gap-1 transition cursor-pointer">
+              <Upload size={12} /> Ajouter "{DOC_LABELS[k]}" (reçu par email)
+              <input type="file" accept="application/pdf" className="hidden"
+                onChange={e => e.target.files?.[0] && onAdminUploadDoc(d.id, k, e.target.files[0])} />
+            </label>
+          ))}
+          {(d.extraDocs || []).map((ed, i) => (
+            <button key={i} onClick={() => downloadStoredFile(ed.key, ed.name)}
+              className="text-xs bg-teal-50 hover:bg-teal-100 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1 transition">
+              <FileText size={12} /> {ed.label} <Download size={11} />
+            </button>
+          ))}
+        </div>
+        <div className="mt-2">
+          {adminExtraDocOpenId === d.id ? (
+            <div className="flex flex-wrap items-center gap-2 bg-gray-50 rounded-lg p-2.5">
+              <input value={adminExtraDocLabel} onChange={e => setAdminExtraDocLabel(e.target.value)}
+                placeholder="Nom de la pièce" className="text-sm border border-gray-300 rounded-lg px-2.5 py-1.5 w-40 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <label className="text-xs border border-gray-300 rounded-lg px-2.5 py-1.5 cursor-pointer bg-white hover:border-teal-400 transition">
+                {adminExtraDocFile ? adminExtraDocFile.name : "Choisir un PDF"}
+                <input type="file" accept="application/pdf" className="hidden" onChange={e => setAdminExtraDocFile(e.target.files?.[0] || null)} />
+              </label>
+              <button onClick={async () => {
+                if (!adminExtraDocFile) return;
+                const ok = await onAddExtraDoc(d.id, adminExtraDocLabel.trim(), adminExtraDocFile);
+                if (ok) { setAdminExtraDocOpenId(null); setAdminExtraDocLabel(""); setAdminExtraDocFile(null); }
+              }} disabled={!adminExtraDocFile}
+                className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Ajouter</button>
+              <button onClick={() => { setAdminExtraDocOpenId(null); setAdminExtraDocLabel(""); setAdminExtraDocFile(null); }}
+                className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+            </div>
+          ) : (
+            <button onClick={() => setAdminExtraDocOpenId(d.id)} className="fa-tap text-xs text-gray-400 hover:fa-teal-text">
+              + Déposer une pièce complémentaire reçue par email
+            </button>
+          )}
+        </div>
+      </>
+    );
+  }
   const [viewingPartnerId, setViewingPartnerId] = useState(null);
   const [viewingPartnerTab, setViewingPartnerTab] = useState("analytique");
   async function confirmDelete(id) {
@@ -2105,7 +2218,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
       <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
-          <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">Sébastien</strong></span>
+          <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">{viewerLabel}</strong></span>
           <button onClick={() => downloadJson(`frangola-adp-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`, data)}
             title="Sauvegarder toutes les données (JSON)"
             className="text-gray-400 hover:fa-teal-text transition">
@@ -2143,10 +2256,12 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
             className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "stats" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             <BarChart3 size={15} /> Statistiques
           </button>
-          <button onClick={() => setTab("mandataires")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "mandataires" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            <Landmark size={15} /> Mandataires
-          </button>
+          {isFullAdmin && (
+            <button onClick={() => setTab("mandataires")}
+              className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "mandataires" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+              <Landmark size={15} /> Mandataires
+            </button>
+          )}
         </div>
 
         {tab === "accueil" && (() => {
@@ -2163,7 +2278,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
           return (
             <div className="space-y-6">
               <div>
-                <h1 className="font-display text-xl font-semibold fa-navy">Bonjour 👋</h1>
+                <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
                 <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
               </div>
 
@@ -2479,20 +2594,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                                           </div>
                                         );
                                       })())}
-                                      <div className="flex flex-wrap gap-2 mt-4">
-                                        {Object.keys(DOC_LABELS).map(k => d.docs[k] && (
-                                          <button key={k} onClick={() => downloadStoredFile(d.docs[k].key, d.docs[k].name)}
-                                            className="text-xs bg-white hover:bg-teal-50 border border-gray-200 hover:border-teal-300 text-gray-600 hover:text-teal-700 px-2.5 py-1 rounded-full flex items-center gap-1 transition">
-                                            <FileText size={12} /> {DOC_LABELS[k]} <Download size={11} />
-                                          </button>
-                                        ))}
-                                        {(d.extraDocs || []).map((ed, i) => (
-                                          <button key={i} onClick={() => downloadStoredFile(ed.key, ed.name)}
-                                            className="text-xs bg-teal-50 hover:bg-teal-100 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1 transition">
-                                            <FileText size={12} /> {ed.label} <Download size={11} />
-                                          </button>
-                                        ))}
-                                      </div>
+                                      {renderDocUpload(d)}
                                       <div className="flex flex-wrap items-center gap-3 mt-4 pt-4 border-t border-gray-100">
                                         <select value={d.status} onChange={e => onUpdateStatus(d.id, e.target.value)}
                                           className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
@@ -2863,7 +2965,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           {p.active === false ? "Réactiver" : "Désactiver"}
                         </button>
                         <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
-                          {p.email || "email manquant"} · {p.password ? "accès activé" : "en attente de 1ère connexion"}
+                          {p.email || "email manquant"} · {p.password ? "accès activé" : "en attente de 1ère connexion"} · {p.lastLoginAt ? `dernière connexion ${fmtDate(p.lastLoginAt)}` : "jamais connecté"}
                         </span>
                         {!p.password && p.email && (
                           <a href={inviteMailtoLink(p.email, p.firstName, "partner")}
@@ -2924,13 +3026,22 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           <div className="space-y-2">
                             {pDossiers.length === 0 && <div className="text-sm text-gray-400">Aucun dossier pour ce partenaire.</div>}
                             {pDossiers.sort((a, b) => b.createdAt - a.createdAt).map(d => (
-                              <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-                                <span className="text-sm fa-navy font-bold">{clientName(d)}</span>
-                                <div className="flex items-center gap-2 text-xs text-gray-500">
-                                  <StatusBadge status={d.status} />
-                                  <span>{fmtDate(d.createdAt)}</span>
-                                  {d.commissionAmount != null && <span className="fa-teal-text font-semibold">{fmtEuro(d.commissionAmount)}</span>}
+                              <div key={d.id} className="bg-white border border-gray-200 rounded-lg px-3 py-2">
+                                <div className="flex items-center justify-between flex-wrap gap-2">
+                                  <span className="text-sm fa-navy font-bold">{clientName(d)}</span>
+                                  <div className="flex items-center gap-2 text-xs text-gray-500">
+                                    <button onClick={() => setAdminExtraDocOpenId(adminExtraDocOpenId === d.id ? null : d.id)}
+                                      className="fa-tap text-gray-400 hover:fa-teal-text" title="Déposer des pièces">
+                                      <Upload size={13} />
+                                    </button>
+                                    <StatusBadge status={d.status} />
+                                    <span>{fmtDate(d.createdAt)}</span>
+                                    {d.commissionAmount != null && <span className="fa-teal-text font-semibold">{fmtEuro(d.commissionAmount)}</span>}
+                                  </div>
                                 </div>
+                                {adminExtraDocOpenId === d.id && (
+                                  <div className="mt-2 pt-2 border-t border-gray-100">{renderDocUpload(d)}</div>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -3423,7 +3534,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
           );
         })()}
 
-        {tab === "mandataires" && (
+        {tab === "mandataires" && isFullAdmin && (
           <div>
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Mandataires</h2>
