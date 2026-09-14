@@ -1858,6 +1858,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   const [newPartnerName, setNewPartnerName] = useState("");
   const [newPartnerFirstName, setNewPartnerFirstName] = useState("");
   const [newPartnerCompany, setNewPartnerCompany] = useState("");
+  const [newPartnerFlatFee, setNewPartnerFlatFee] = useState("");
   const [newPartnerPostalCode, setNewPartnerPostalCode] = useState("");
   const [newPartnerVille, setNewPartnerVille] = useState("");
   const [newPartnerDepartement, setNewPartnerDepartement] = useState("");
@@ -1946,10 +1947,11 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
       departement: newPartnerDepartement,
       email: newPartnerEmail.trim(),
       commercial: newPartnerCommercial,
+      flatFee: newPartnerFlatFee !== "" ? Number(newPartnerFlatFee) : null,
     });
     setCreatedPartner(p);
     setNewPartnerName(""); setNewPartnerFirstName(""); setNewPartnerCompany("");
-    setNewPartnerPostalCode(""); setNewPartnerVille(""); setNewPartnerDepartement(""); setNewPartnerEmail(""); setNewPartnerCommercial(COMMERCIAUX[0]);
+    setNewPartnerPostalCode(""); setNewPartnerVille(""); setNewPartnerDepartement(""); setNewPartnerEmail(""); setNewPartnerCommercial(COMMERCIAUX[0]); setNewPartnerFlatFee("");
   }
   function startEdit(p) {
     setEditingId(p.id);
@@ -1957,6 +1959,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
       name: p.name || "", firstName: p.firstName || "", company: p.company || "",
       ville: p.ville || "", postalCode: p.postalCode || "", email: p.email || "", commercial: p.commercial || COMMERCIAUX[0],
       departement: p.departement || "",
+      flatFee: p.flatFee != null ? String(p.flatFee) : "",
     });
   }
   useEffect(() => {
@@ -1968,7 +1971,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
     return () => { active = false; };
   }, [editForm.postalCode, editingId]);
   async function saveEdit(id) {
-    await onUpdatePartner(id, editForm);
+    await onUpdatePartner(id, { ...editForm, flatFee: editForm.flatFee !== "" ? Number(editForm.flatFee) : null });
     setEditingId(null);
   }
   async function toggleActive(p) {
@@ -2575,9 +2578,15 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between">
                                                 Rétrocession partenaire (€)
-                                                <button type="button"
-                                                  onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: f.caAmount ? (Number(f.caAmount) / 2).toString() : f.commissionAmount }))}
-                                                  className="fa-teal-text hover:underline font-normal normal-case">50% auto</button>
+                                                {p.flatFee ? (
+                                                  <button type="button"
+                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: String(p.flatFee) }))}
+                                                    className="fa-teal-text hover:underline font-normal normal-case">Forfait {p.flatFee}€</button>
+                                                ) : (
+                                                  <button type="button"
+                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: f.caAmount ? (Number(f.caAmount) / 2).toString() : f.commissionAmount }))}
+                                                    className="fa-teal-text hover:underline font-normal normal-case">50% auto</button>
+                                                )}
                                               </label>
                                               <input type="number" value={financeDraft.commissionAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, commissionAmount: e.target.value }))}
@@ -2708,6 +2717,18 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   {COMMERCIAUX.map(c => <option key={c} value={c} style={{ backgroundColor: COMMERCIAL_COLORS[c], color: "#fff" }}>{commercialLabel(c)}</option>)}
                 </select>
               </div>
+              <label className="flex items-center gap-2 text-sm text-gray-600 mb-4">
+                <input type="checkbox" checked={newPartnerFlatFee !== ""} onChange={e => setNewPartnerFlatFee(e.target.checked ? "100" : "")}
+                  className="rounded border-gray-300" />
+                Hors immobilier (rémunéré au forfait fixe, pas en % du CA)
+              </label>
+              {newPartnerFlatFee !== "" && (
+                <div className="mb-4 max-w-xs">
+                  <label className="block text-xs text-gray-500 mb-1">Forfait par contrat (€)</label>
+                  <input type="number" value={newPartnerFlatFee} onChange={e => setNewPartnerFlatFee(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </div>
+              )}
               <div className="flex gap-2 items-start flex-wrap">
                 <button onClick={handleAddPartner} disabled={!newPartnerName.trim() || !newPartnerEmail.trim()}
                   className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
@@ -2774,6 +2795,18 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                           {COMMERCIAUX.map(c => <option key={c} value={c} style={{ backgroundColor: COMMERCIAL_COLORS[c], color: "#fff" }}>{commercialLabel(c)}</option>)}
                         </select>
                       </div>
+                      <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
+                        <input type="checkbox" checked={editForm.flatFee !== ""} onChange={e => setEditForm(f => ({ ...f, flatFee: e.target.checked ? "100" : "" }))}
+                          className="rounded border-gray-300" />
+                        Hors immobilier (rémunéré au forfait fixe, pas en % du CA)
+                      </label>
+                      {editForm.flatFee !== "" && (
+                        <div className="mb-3 max-w-xs">
+                          <label className="block text-xs text-gray-500 mb-1">Forfait par contrat (€)</label>
+                          <input type="number" value={editForm.flatFee} onChange={e => setEditForm(f => ({ ...f, flatFee: e.target.value }))}
+                            className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        </div>
+                      )}
                       <div className="flex gap-2">
                         <button onClick={() => saveEdit(p.id)} className="fa-bg-teal text-sm font-medium px-4 py-1.5 rounded-lg transition">Enregistrer</button>
                         <button onClick={() => setEditingId(null)} className="text-sm text-gray-500 hover:text-gray-700 px-3">Annuler</button>
@@ -2784,6 +2817,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                       <div>
                         <div className="font-medium fa-navy flex items-center gap-2">
                           <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
+                          {p.flatFee != null && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Forfait {p.flatFee}€</span>}
                           {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                           {p.active !== false && daysSinceLastDossier(p) > INACTIVITY_DAYS && (
                             <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full">
