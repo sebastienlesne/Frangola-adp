@@ -119,6 +119,21 @@ function fmtEuro(n) {
 function up(s) {
   return (s || "").toUpperCase();
 }
+function inviteMailtoLink(email, firstName, kind) {
+  const spaceLabel = kind === "mandataire" ? "Espace Frangola" : "Espace partenaire";
+  const subject = kind === "mandataire" ? "Votre accès mandataire — FRANGOLA ADP" : "Votre accès partenaire — FRANGOLA ADP";
+  const greeting = firstName ? `Bonjour ${firstName},` : "Bonjour,";
+  const body = `${greeting}
+
+Vous pouvez désormais accéder à votre espace sur FRANGOLA ADP :
+https://frangola-adp.fr
+
+Cliquez sur "${spaceLabel}", entrez votre adresse email (${email}), puis créez votre mot de passe — c'est la première étape, tout se fait en quelques secondes.
+
+À bientôt,
+Frangola Assure`;
+  return `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
 function clientName(d) {
   const full = `${(d.clientLastName || "").toUpperCase()} ${d.clientFirstName || ""}`.trim();
   return full || "(Sans nom)";
@@ -1902,6 +1917,7 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
   const [newMandataireFirstName, setNewMandataireFirstName] = useState("");
   const [newMandataireEmail, setNewMandataireEmail] = useState("");
   const [newMandataireColor, setNewMandataireColor] = useState("#545454");
+  const [createdMandataire, setCreatedMandataire] = useState(null);
   const [dossierSearch, setDossierSearch] = useState("");
   const [dossierFilter, setDossierFilter] = useState("tous");
   const [commercialFilter, setCommercialFilter] = useState("tous");
@@ -2737,8 +2753,14 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 <button onClick={() => setShowAddPartnerForm(false)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
               </div>
               {createdPartner && (
-                <div className="mt-4 text-sm bg-teal-50 border border-teal-200 rounded-lg px-4 py-3">
-                  <strong>{createdPartner.name}</strong> peut se connecter avec son email (<strong>{createdPartner.email || "non renseigné"}</strong>) — il créera son mot de passe à sa 1ère connexion.
+                <div className="mt-4 text-sm bg-teal-50 border border-teal-200 rounded-lg px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+                  <span><strong>{createdPartner.name}</strong> peut se connecter avec son email (<strong>{createdPartner.email || "non renseigné"}</strong>) — il créera son mot de passe à sa 1ère connexion.</span>
+                  {createdPartner.email && (
+                    <a href={inviteMailtoLink(createdPartner.email, createdPartner.firstName, "partner")}
+                      className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition whitespace-nowrap">
+                      ✉️ Envoyer l'invitation
+                    </a>
+                  )}
                 </div>
               )}
             </div>
@@ -2843,6 +2865,10 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                         <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
                           {p.email || "email manquant"} · {p.password ? "accès activé" : "en attente de 1ère connexion"}
                         </span>
+                        {!p.password && p.email && (
+                          <a href={inviteMailtoLink(p.email, p.firstName, "partner")}
+                            className="fa-tap text-xs fa-teal-text hover:underline px-2">✉️ Inviter</a>
+                        )}
                         {confirmDeleteId === p.id ? (
                           <span className="flex items-center gap-1.5 text-xs">
                             <span className="text-red-700">Confirmer ?</span>
@@ -3429,7 +3455,8 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                 <div className="flex gap-2">
                   <button onClick={async () => {
                     if (!newMandataireName.trim() || !newMandataireEmail.trim()) return;
-                    await onAddMandataire({ name: newMandataireName.trim(), firstName: newMandataireFirstName.trim(), email: newMandataireEmail.trim(), color: newMandataireColor });
+                    const m = await onAddMandataire({ name: newMandataireName.trim(), firstName: newMandataireFirstName.trim(), email: newMandataireEmail.trim(), color: newMandataireColor });
+                    setCreatedMandataire(m);
                     setNewMandataireName(""); setNewMandataireFirstName(""); setNewMandataireEmail(""); setNewMandataireColor("#545454"); setShowAddMandataireForm(false);
                   }} disabled={!newMandataireName.trim() || !newMandataireEmail.trim()}
                     className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
@@ -3438,6 +3465,16 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                   <button onClick={() => setShowAddMandataireForm(false)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
                 </div>
                 <p className="text-xs text-gray-400 mt-3">Le mandataire créera lui-même son mot de passe à sa première connexion, avec cette adresse email.</p>
+              </div>
+            )}
+
+            {createdMandataire && (
+              <div className="mt-2 mb-6 text-sm bg-teal-50 border border-teal-200 rounded-lg px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+                <span><strong>{createdMandataire.name}</strong> peut se connecter avec son email (<strong>{createdMandataire.email}</strong>) — il créera son mot de passe à sa 1ère connexion.</span>
+                <a href={inviteMailtoLink(createdMandataire.email, createdMandataire.firstName, "mandataire")}
+                  className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition whitespace-nowrap">
+                  ✉️ Envoyer l'invitation
+                </a>
               </div>
             )}
 
@@ -3477,6 +3514,10 @@ function AdminDashboard({ data, currentAdmin, onLogout, onAddPartner, onUpdatePa
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
+                        {!m.password && (
+                          <a href={inviteMailtoLink(m.email, m.firstName, "mandataire")}
+                            className="fa-tap text-xs fa-teal-text hover:underline px-1">✉️ Inviter</a>
+                        )}
                         <button onClick={() => setViewingMandataireId(viewingMandataireId === m.id ? null : m.id)}
                           className="text-sm fa-navy fa-bg-gold px-3 py-1.5 rounded-lg font-medium transition">
                           {viewingMandataireId === m.id ? "Fermer" : "Voir"}
