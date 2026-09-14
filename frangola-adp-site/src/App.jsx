@@ -284,8 +284,17 @@ function StatusBadge({ status }) {
 function Stepper({ status }) {
   if (status === "KO") {
     const koSteps = ["Déposé", "En vérification", "Devis en cours", "KO"];
+    const koProgress = Math.round(((koSteps.length - 1) / STATUS_STEPS.length) * 100);
     return (
-      <div className="flex items-center w-full">
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-xs font-semibold text-red-700">Clôturé sans suite</span>
+          <span className="text-xs font-semibold text-red-700">{koProgress}%</span>
+        </div>
+        <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden mb-3">
+          <div className="h-full bg-red-500 transition-all" style={{ width: `${koProgress}%` }} />
+        </div>
+        <div className="flex items-center w-full">
         {koSteps.map((s, i) => {
           const isLast = i === koSteps.length - 1;
           return (
@@ -301,12 +310,22 @@ function Stepper({ status }) {
             </div>
           );
         })}
+        </div>
       </div>
     );
   }
   const idx = STATUS_STEPS.indexOf(status);
+  const progress = Math.round(((idx + 1) / STATUS_STEPS.length) * 100);
   return (
-    <div className="flex items-center w-full">
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-xs font-semibold fa-teal-text">Avancement du dossier</span>
+        <span className="text-xs font-semibold fa-teal-text">{progress}%</span>
+      </div>
+      <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden mb-3">
+        <div className="h-full fa-bg-teal transition-all" style={{ width: `${progress}%` }} />
+      </div>
+      <div className="flex items-center w-full">
       {STATUS_STEPS.map((s, i) => (
         <div key={s} className="flex items-center flex-1 last:flex-none">
           <div className="flex flex-col items-center gap-1 min-w-[64px]">
@@ -321,6 +340,7 @@ function Stepper({ status }) {
           )}
         </div>
       ))}
+      </div>
     </div>
   );
 }
@@ -624,6 +644,25 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
+  async function removeDoc(dossierId, docKey) {
+    const dossiers = data.dossiers.map(d => {
+      if (d.id !== dossierId) return d;
+      const docs = { ...(d.docs || {}) };
+      delete docs[docKey];
+      return { ...d, docs };
+    });
+    await saveData({ ...data, dossiers });
+  }
+
+  async function removeExtraDoc(dossierId, index) {
+    const dossiers = data.dossiers.map(d => {
+      if (d.id !== dossierId) return d;
+      const extraDocs = (d.extraDocs || []).filter((_, i) => i !== index);
+      return { ...d, extraDocs };
+    });
+    await saveData({ ...data, dossiers });
+  }
+
   async function addExtraDoc(dossierId, label, file) {
     if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo — compresse le PDF avant de le déposer.`); return false; }
     setBusy(true);
@@ -757,7 +796,9 @@ export default function App() {
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
+          onRemoveDoc={removeDoc}
           onAddExtraDoc={addExtraDoc}
+          onRemoveExtraDoc={removeExtraDoc}
           busy={busy}
         />
       )}
@@ -786,7 +827,9 @@ export default function App() {
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
+          onRemoveDoc={removeDoc}
           onAddExtraDoc={addExtraDoc}
+          onRemoveExtraDoc={removeExtraDoc}
           busy={busy}
         />
       )}
@@ -1925,7 +1968,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onAddExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -2068,10 +2111,15 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
       <>
         <div className="flex flex-wrap gap-2 mt-3">
           {Object.keys(DOC_LABELS).map(k => d.docs[k] ? (
-            <button key={k} onClick={() => downloadStoredFile(d.docs[k].key, d.docs[k].name)}
-              className="text-xs bg-white hover:bg-teal-50 border border-gray-200 hover:border-teal-300 text-gray-600 hover:text-teal-700 px-2.5 py-1 rounded-full flex items-center gap-1 transition">
-              <FileText size={12} /> {DOC_LABELS[k]} <Download size={11} />
-            </button>
+            <span key={k} className="text-xs bg-white border border-gray-200 hover:border-teal-300 text-gray-600 px-2.5 py-1 rounded-full flex items-center gap-1">
+              <button onClick={() => downloadStoredFile(d.docs[k].key, d.docs[k].name)}
+                className="flex items-center gap-1 hover:text-teal-700 transition">
+                <FileText size={12} /> {DOC_LABELS[k]} <Download size={11} />
+              </button>
+              <button onClick={() => onRemoveDoc(d.id, k)} className="fa-tap text-gray-400 hover:text-red-600 ml-0.5" title="Retirer ce document">
+                <X size={12} />
+              </button>
+            </span>
           ) : (
             <label key={k} className="fa-tap text-xs bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-700 px-2.5 py-1 rounded-full flex items-center gap-1 transition cursor-pointer">
               <Upload size={12} /> Ajouter "{DOC_LABELS[k]}" (reçu par email)
@@ -2080,10 +2128,14 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
             </label>
           ))}
           {(d.extraDocs || []).map((ed, i) => (
-            <button key={i} onClick={() => downloadStoredFile(ed.key, ed.name)}
-              className="text-xs bg-teal-50 hover:bg-teal-100 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1 transition">
-              <FileText size={12} /> {ed.label} <Download size={11} />
-            </button>
+            <span key={i} className="text-xs bg-teal-50 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1">
+              <button onClick={() => downloadStoredFile(ed.key, ed.name)} className="flex items-center gap-1 hover:underline">
+                <FileText size={12} /> {ed.label} <Download size={11} />
+              </button>
+              <button onClick={() => onRemoveExtraDoc(d.id, i)} className="fa-tap text-teal-500 hover:text-red-600 ml-0.5" title="Retirer ce document">
+                <X size={12} />
+              </button>
+            </span>
           ))}
         </div>
         <div className="mt-2">
