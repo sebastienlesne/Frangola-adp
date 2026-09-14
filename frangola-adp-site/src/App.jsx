@@ -132,7 +132,7 @@ Cliquez sur "${spaceLabel}", entrez votre adresse email (${email}), puis créez 
 
 À bientôt,
 Frangola Assure`;
-  return `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  return `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
 function clientName(d) {
   const full = `${(d.clientLastName || "").toUpperCase()} ${d.clientFirstName || ""}`.trim();
