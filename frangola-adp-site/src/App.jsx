@@ -79,6 +79,12 @@ function setStoredSession(session) {
 function clearStoredSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
 }
+function getStoredTab(key, fallback) {
+  try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
+}
+function setStoredTab(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* ignore */ }
+}
 function genCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -392,7 +398,7 @@ export default function App() {
           admin: { email: "contact@frangola.fr", password: null, totpSecret: null, totpEnabled: false, color: "#2F448B" },
         },
         mandataires: [], reseaux: [],
-        partners: [], dossiers: [],
+        partners: [], dossiers: [], activityLog: [],
       };
       try {
         const res = await storage.get("adp:data", true);
@@ -402,6 +408,7 @@ export default function App() {
           if (!loaded.settings) loaded.settings = {};
           if (!loaded.mandataires) { loaded.mandataires = []; changed = true; }
           if (!loaded.reseaux) { loaded.reseaux = []; changed = true; }
+          if (!loaded.activityLog) { loaded.activityLog = []; changed = true; }
 
           // Migration from the old multi-admin array format.
           if (loaded.settings.admins && !loaded.settings.admin) {
@@ -444,6 +451,13 @@ export default function App() {
     catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); }
   }
 
+  function withLog(nextData, message) {
+    const actor = currentAdmin ? "Sébastien" : (currentMandataire?.firstName || currentMandataire?.name || "Inconnu");
+    const entry = { id: uid(), at: Date.now(), actor, message };
+    const base = nextData.activityLog || data.activityLog || [];
+    return { ...nextData, activityLog: [entry, ...base].slice(0, 300) };
+  }
+
   function logout() { setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null); setView("landing"); clearStoredSession(); }
 
   async function updateAdmin(fields) {
@@ -452,7 +466,7 @@ export default function App() {
 
   async function addMandataire(fields) {
     const m = { id: uid(), ...fields, password: null, active: true, createdAt: Date.now() };
-    await saveData({ ...data, mandataires: [...data.mandataires, m] });
+    await saveData(withLog({ ...data, mandataires: [...data.mandataires, m] }, `a ajouté le mandataire ${fields.name}`));
     return m;
   }
 
@@ -462,18 +476,20 @@ export default function App() {
   }
 
   async function deleteMandataire(id) {
+    const m = data.mandataires.find(m => m.id === id);
     const mandataires = data.mandataires.map(m => m.id === id ? { ...m, deleted: true, deletedAt: Date.now() } : m);
-    await saveData({ ...data, mandataires });
+    await saveData(withLog({ ...data, mandataires }, `a supprimé le mandataire ${m?.name || ""}`));
   }
 
   async function restoreMandataire(id) {
+    const m = data.mandataires.find(m => m.id === id);
     const mandataires = data.mandataires.map(m => m.id === id ? { ...m, deleted: false, deletedAt: null } : m);
-    await saveData({ ...data, mandataires });
+    await saveData(withLog({ ...data, mandataires }, `a restauré le mandataire ${m?.name || ""}`));
   }
 
   async function addPartner(fields) {
     const p = { id: uid(), ...fields, active: true, code: genCode(), createdAt: Date.now() };
-    await saveData({ ...data, partners: [...data.partners, p] });
+    await saveData(withLog({ ...data, partners: [...data.partners, p] }, `a ajouté le partenaire ${fields.name}`));
     return p;
   }
 
@@ -540,13 +556,15 @@ export default function App() {
   }
 
   async function deletePartner(id) {
+    const p = data.partners.find(p => p.id === id);
     const partners = data.partners.map(p => p.id === id ? { ...p, deleted: true, deletedAt: Date.now() } : p);
-    await saveData({ ...data, partners });
+    await saveData(withLog({ ...data, partners }, `a supprimé le partenaire ${p?.name || ""}`));
   }
 
   async function restorePartner(id) {
+    const p = data.partners.find(p => p.id === id);
     const partners = data.partners.map(p => p.id === id ? { ...p, deleted: false, deletedAt: null } : p);
-    await saveData({ ...data, partners });
+    await saveData(withLog({ ...data, partners }, `a restauré le partenaire ${p?.name || ""}`));
   }
 
   async function createDossier(clientFirstName, clientLastName, clientPhone, files) {
@@ -573,12 +591,14 @@ export default function App() {
   }
 
   async function updateStatus(dossierId, newStatus) {
+    const target = data.dossiers.find(d => d.id === dossierId);
     const dossiers = data.dossiers.map(d => {
       if (d.id !== dossierId) return d;
       const history = [...(d.history || []), { status: newStatus, at: Date.now() }];
       return { ...d, status: newStatus, updatedAt: Date.now(), history };
     });
-    await saveData({ ...data, dossiers });
+    const cname = target ? `${target.clientLastName || ""} ${target.clientFirstName || ""}`.trim() || "(sans nom)" : "";
+    await saveData(withLog({ ...data, dossiers }, `a changé le statut de ${cname} → ${newStatus}`));
   }
 
   async function updateDossierClient(dossierId, fields) {
@@ -1335,7 +1355,8 @@ function LoginScreen({ role, code, setCode, error, onBack, onSubmit }) {
 }
 
 function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, busy }) {
-  const [tab, setTab] = useState("encours");
+  const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
+  const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
   const [clientFirstName, setClientFirstName] = useState("");
   const [clientLastName, setClientLastName] = useState("");
@@ -1606,7 +1627,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
           const paid = dossiers.filter(d => d.status === "Payé");
           const ko = dossiers.filter(d => d.status === "KO");
           const totalRemuneration = paid.reduce((s, d) => s + (d.commissionAmount || 0), 0);
-          const avgRemuneration = paid.length ? totalRemuneration / paid.length : 150;
+          const avgRemuneration = paid.length ? totalRemuneration / paid.length : (partner.flatFee != null ? partner.flatFee : 150);
           const transformDenominator = total - ko.length;
           const transformRate = transformDenominator > 0 ? Math.round((paid.length / transformDenominator) * 100) : 0;
 
@@ -1957,7 +1978,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
-  const [tab, setTab] = useState("accueil");
+  const [tab, setTabRaw] = useState(() => getStoredTab("adp:adminTab", "accueil"));
+  const setTab = (t) => { setTabRaw(t); setStoredTab("adp:adminTab", t); };
+  useEffect(() => { if (tab === "mandataires" && !isFullAdmin) setTab("accueil"); }, []);
   const [newPartnerName, setNewPartnerName] = useState("");
   const [newPartnerFirstName, setNewPartnerFirstName] = useState("");
   const [newPartnerCompany, setNewPartnerCompany] = useState("");
@@ -2376,6 +2399,24 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                     </div>
                   ))}
                 </div>
+              </div>
+
+              <div className="bg-white border border-gray-200 rounded-2xl p-5">
+                <div className="font-display font-semibold fa-navy mb-3">Journal d'activité</div>
+                {(!data.activityLog || data.activityLog.length === 0) ? (
+                  <div className="text-sm text-gray-400">Aucune action enregistrée pour l'instant.</div>
+                ) : (
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {data.activityLog.slice(0, 30).map(entry => (
+                      <div key={entry.id} className="flex items-start justify-between gap-2 text-sm">
+                        <span className="text-gray-600">
+                          <strong className="fa-navy" style={{ color: COMMERCIAL_COLORS[entry.actor] }}>{entry.actor}</strong> {entry.message}
+                        </span>
+                        <span className="text-gray-400 text-xs whitespace-nowrap">{fmtDate(entry.at)} {new Date(entry.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <button onClick={() => setTab("dossiers")} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">
