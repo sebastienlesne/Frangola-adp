@@ -129,6 +129,15 @@ function clientName(d) {
   const full = `${(d.clientLastName || "").toUpperCase()} ${d.clientFirstName || ""}`.trim();
   return full || "(Sans nom)";
 }
+function CoEmprunteurBadge({ d }) {
+  if (!d.hasCoEmprunteur) return null;
+  const full = `${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim();
+  return (
+    <span className="text-xs bg-violet-50 border border-violet-200 text-violet-700 px-2 py-0.5 rounded-full font-medium">
+      👥 Co-emprunteur : {full || "non renseigné"}{d.coClientPhone && ` · ${d.coClientPhone}`}
+    </span>
+  );
+}
 
 async function loadFile(key) {
   try {
@@ -587,7 +596,7 @@ export default function App() {
     await saveData(withLog({ ...data, partners }, `a restauré le partenaire ${p?.name || ""}`));
   }
 
-  async function createDossier(clientFirstName, clientLastName, clientPhone, files) {
+  async function createDossier(clientFirstName, clientLastName, clientPhone, files, hasCoEmprunteur, coClientLastName, coClientFirstName, coClientPhone) {
     setBusy(true); setGlobalError("");
     try {
       const docs = {};
@@ -602,6 +611,10 @@ export default function App() {
       }
       const dossier = {
         id: uid(), partnerId: currentPartner.id, clientFirstName, clientLastName, clientPhone, status: "Déposé",
+        hasCoEmprunteur: !!hasCoEmprunteur,
+        coClientLastName: hasCoEmprunteur ? coClientLastName : "",
+        coClientFirstName: hasCoEmprunteur ? coClientFirstName : "",
+        coClientPhone: hasCoEmprunteur ? coClientPhone : "",
         docs, bordereau: null, createdAt: Date.now(), updatedAt: Date.now(),
         history: [{ status: "Déposé", at: Date.now() }], notes: "",
       };
@@ -795,6 +808,7 @@ export default function App() {
           onUploadRib={uploadPartnerRib}
           onSetGoal={setPartnerGoal}
           onMarkMessageRead={markDossierMessageRead}
+          onUpdateDossierClient={updateDossierClient}
           busy={busy}
         />
       )}
@@ -1381,13 +1395,17 @@ function LoginScreen({ role, code, setCode, error, onBack, onSubmit }) {
   );
 }
 
-function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, busy }) {
+function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
   const [clientFirstName, setClientFirstName] = useState("");
   const [clientLastName, setClientLastName] = useState("");
   const [clientPhone, setClientPhone] = useState("");
+  const [hasCoEmprunteur, setHasCoEmprunteur] = useState(false);
+  const [coClientFirstName, setCoClientFirstName] = useState("");
+  const [coClientLastName, setCoClientLastName] = useState("");
+  const [coClientPhone, setCoClientPhone] = useState("");
   const [files, setFiles] = useState({ offre: null, tableau: null, cni: null });
 
   function isFormComplete() {
@@ -1395,11 +1413,30 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
   }
   async function submit() {
     if (!isFormComplete()) return;
-    const ok = await onCreateDossier(clientFirstName.trim(), clientLastName.trim(), clientPhone.trim(), files);
-    if (ok) { setShowForm(false); setClientFirstName(""); setClientLastName(""); setClientPhone(""); setFiles({ offre: null, tableau: null, cni: null }); }
+    const ok = await onCreateDossier(
+      clientFirstName.trim(), clientLastName.trim(), clientPhone.trim(), files,
+      hasCoEmprunteur, coClientLastName.trim(), coClientFirstName.trim(), coClientPhone.trim()
+    );
+    if (ok) {
+      setShowForm(false); setClientFirstName(""); setClientLastName(""); setClientPhone(""); setFiles({ offre: null, tableau: null, cni: null });
+      setHasCoEmprunteur(false); setCoClientFirstName(""); setCoClientLastName(""); setCoClientPhone("");
+    }
   }
 
   const [extraDocOpenId, setExtraDocOpenId] = useState(null);
+  const [editingDossierId, setEditingDossierId] = useState(null);
+  const [editDossierForm, setEditDossierForm] = useState({});
+  function startEditDossier(d) {
+    setEditingDossierId(d.id);
+    setEditDossierForm({
+      clientFirstName: d.clientFirstName || "", clientLastName: d.clientLastName || "", clientPhone: d.clientPhone || "",
+      hasCoEmprunteur: !!d.hasCoEmprunteur, coClientLastName: d.coClientLastName || "", coClientFirstName: d.coClientFirstName || "", coClientPhone: d.coClientPhone || "",
+    });
+  }
+  async function saveEditDossier(id) {
+    await onUpdateDossierClient(id, editDossierForm);
+    setEditingDossierId(null);
+  }
   const [extraDocLabel, setExtraDocLabel] = useState("");
   const [extraDocFile, setExtraDocFile] = useState(null);
   async function submitExtraDoc(dossierId) {
@@ -1518,6 +1555,30 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                   placeholder="06 12 34 56 78" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
               </div>
             </div>
+            <label className="flex items-center gap-2 text-sm text-gray-600 mb-4">
+              <input type="checkbox" checked={hasCoEmprunteur} onChange={e => setHasCoEmprunteur(e.target.checked)}
+                className="rounded border-gray-300" />
+              Co-emprunteur
+            </label>
+            {hasCoEmprunteur && (
+              <div className="grid sm:grid-cols-3 gap-4 mb-4 bg-gray-50 rounded-lg p-4">
+                <div>
+                  <label className="block text-sm font-medium fa-navy mb-1">Nom du co-emprunteur</label>
+                  <input value={coClientLastName} onChange={e => setCoClientLastName(e.target.value)}
+                    placeholder="Nom" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium fa-navy mb-1">Prénom du co-emprunteur</label>
+                  <input value={coClientFirstName} onChange={e => setCoClientFirstName(e.target.value)}
+                    placeholder="Prénom" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium fa-navy mb-1">Téléphone du co-emprunteur</label>
+                  <input value={coClientPhone} onChange={e => setCoClientPhone(e.target.value)} type="tel"
+                    placeholder="06 12 34 56 78" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </div>
+              </div>
+            )}
             {clientLastName.trim() && dossiers.some(d => d.clientLastName?.trim().toLowerCase() === clientLastName.trim().toLowerCase() && d.clientFirstName?.trim().toLowerCase() === clientFirstName.trim().toLowerCase()) && (
               <div className="text-xs text-orange-700 bg-orange-50 border border-orange-200 rounded-lg px-3 py-2 mb-4">
                 ⚠ Vous avez déjà déposé un dossier pour ce client.
@@ -1552,13 +1613,55 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
               <div className="space-y-4">
                 {visibleDossiers.sort((a, b) => b.createdAt - a.createdAt).map(d => (
             <div key={d.id} className="bg-white border border-gray-200 rounded-2xl p-3.5 sm:p-5 shadow-sm">
-              <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-                <div>
-                  <div className="font-bold fa-navy">{clientName(d)}</div>
-                  <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.clientPhone && ` · ${d.clientPhone}`}</div>
+              {editingDossierId === d.id ? (
+                <div className="mb-4 space-y-2">
+                  <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
+                    <input value={editDossierForm.clientLastName}
+                      onChange={e => setEditDossierForm(f => ({ ...f, clientLastName: e.target.value }))}
+                      placeholder="Nom" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-32 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                    <input value={editDossierForm.clientFirstName}
+                      onChange={e => setEditDossierForm(f => ({ ...f, clientFirstName: e.target.value }))}
+                      placeholder="Prénom" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-32 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                    <input value={editDossierForm.clientPhone}
+                      onChange={e => setEditDossierForm(f => ({ ...f, clientPhone: e.target.value }))}
+                      type="tel" placeholder="Téléphone" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input type="checkbox" checked={editDossierForm.hasCoEmprunteur}
+                      onChange={e => setEditDossierForm(f => ({ ...f, hasCoEmprunteur: e.target.checked }))}
+                      className="rounded border-gray-300" />
+                    Co-emprunteur
+                  </label>
+                  {editDossierForm.hasCoEmprunteur && (
+                    <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg p-2">
+                      <input value={editDossierForm.coClientLastName}
+                        onChange={e => setEditDossierForm(f => ({ ...f, coClientLastName: e.target.value }))}
+                        placeholder="Nom co-emprunteur" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                      <input value={editDossierForm.coClientFirstName}
+                        onChange={e => setEditDossierForm(f => ({ ...f, coClientFirstName: e.target.value }))}
+                        placeholder="Prénom co-emprunteur" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                      <input value={editDossierForm.coClientPhone}
+                        onChange={e => setEditDossierForm(f => ({ ...f, coClientPhone: e.target.value }))}
+                        type="tel" placeholder="Téléphone" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <button onClick={() => saveEditDossier(d.id)} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
+                    <button onClick={() => setEditingDossierId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                  </div>
                 </div>
-                <StatusBadge status={d.status} />
-              </div>
+              ) : (
+                <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                  <div>
+                    <div className="font-bold fa-navy flex items-center gap-2 flex-wrap">
+                      {clientName(d)} <CoEmprunteurBadge d={d} />
+                      <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
+                    </div>
+                    <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.clientPhone && ` · ${d.clientPhone}`}</div>
+                  </div>
+                  <StatusBadge status={d.status} />
+                </div>
+              )}
               {d.partnerMessage && (
                 <div className="mb-4 flex items-start justify-between gap-2 text-sm fa-navy bg-teal-50 border border-teal-200 rounded-lg px-3 py-2.5">
                   <div className="flex items-start gap-2">
@@ -2208,7 +2311,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   }
   function startEditDossier(d) {
     setEditingDossierId(d.id);
-    setEditDossierForm({ clientFirstName: d.clientFirstName || "", clientLastName: d.clientLastName || "", clientPhone: d.clientPhone || "" });
+    setEditDossierForm({
+      clientFirstName: d.clientFirstName || "", clientLastName: d.clientLastName || "", clientPhone: d.clientPhone || "",
+      hasCoEmprunteur: !!d.hasCoEmprunteur, coClientLastName: d.coClientLastName || "", coClientFirstName: d.coClientFirstName || "", coClientPhone: d.coClientPhone || "",
+    });
   }
   async function saveEditDossier(id) {
     await onUpdateDossierClient(id, editDossierForm);
@@ -2611,16 +2717,37 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                     <div key={d.id} className="bg-white border border-gray-200 rounded-2xl p-3.5 sm:p-5 shadow-sm">
                                       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                                         {editingDossierId === d.id ? (
-                                          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 w-full">
-                                            <input value={editDossierForm.clientLastName}
-                                              onChange={e => setEditDossierForm(f => ({ ...f, clientLastName: e.target.value }))}
-                                              placeholder="Nom" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-32 focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                                            <input value={editDossierForm.clientFirstName}
-                                              onChange={e => setEditDossierForm(f => ({ ...f, clientFirstName: e.target.value }))}
-                                              placeholder="Prénom" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-32 focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                                            <input value={editDossierForm.clientPhone}
-                                              onChange={e => setEditDossierForm(f => ({ ...f, clientPhone: e.target.value }))}
-                                              type="tel" placeholder="Téléphone" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                          <div className="w-full space-y-2">
+                                            <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
+                                              <input value={editDossierForm.clientLastName}
+                                                onChange={e => setEditDossierForm(f => ({ ...f, clientLastName: e.target.value }))}
+                                                placeholder="Nom" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-32 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                              <input value={editDossierForm.clientFirstName}
+                                                onChange={e => setEditDossierForm(f => ({ ...f, clientFirstName: e.target.value }))}
+                                                placeholder="Prénom" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-32 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                              <input value={editDossierForm.clientPhone}
+                                                onChange={e => setEditDossierForm(f => ({ ...f, clientPhone: e.target.value }))}
+                                                type="tel" placeholder="Téléphone" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                            </div>
+                                            <label className="flex items-center gap-2 text-xs text-gray-600">
+                                              <input type="checkbox" checked={editDossierForm.hasCoEmprunteur}
+                                                onChange={e => setEditDossierForm(f => ({ ...f, hasCoEmprunteur: e.target.checked }))}
+                                                className="rounded border-gray-300" />
+                                              Co-emprunteur
+                                            </label>
+                                            {editDossierForm.hasCoEmprunteur && (
+                                              <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 bg-violet-50 border border-violet-200 rounded-lg p-2">
+                                                <input value={editDossierForm.coClientLastName}
+                                                  onChange={e => setEditDossierForm(f => ({ ...f, coClientLastName: e.target.value }))}
+                                                  placeholder="Nom co-emprunteur" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                                <input value={editDossierForm.coClientFirstName}
+                                                  onChange={e => setEditDossierForm(f => ({ ...f, coClientFirstName: e.target.value }))}
+                                                  placeholder="Prénom co-emprunteur" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                                <input value={editDossierForm.coClientPhone}
+                                                  onChange={e => setEditDossierForm(f => ({ ...f, coClientPhone: e.target.value }))}
+                                                  type="tel" placeholder="Téléphone" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full sm:w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                              </div>
+                                            )}
                                             <div className="flex gap-2">
                                               <button onClick={() => saveEditDossier(d.id)} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
                                               <button onClick={() => setEditingDossierId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
@@ -2630,6 +2757,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                           <div>
                                             <div className="font-bold fa-navy flex items-center gap-2 flex-wrap">
                                               {clientName(d)}
+                                              <CoEmprunteurBadge d={d} />
                                               <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
                                               <button onClick={() => onDuplicateDossier(d.id)} className="fa-tap text-xs text-gray-400 hover:fa-teal-text font-normal">Dupliquer</button>
                                               {findDuplicates(d).length > 0 && (
