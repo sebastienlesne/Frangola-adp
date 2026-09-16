@@ -458,7 +458,27 @@ export default function App() {
     return { ...nextData, activityLog: [entry, ...base].slice(0, 300) };
   }
 
-  function logout() { setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null); setView("landing"); clearStoredSession(); }
+  const [logoutReason, setLogoutReason] = useState(null);
+  function logout(reason) { setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null); setView("landing"); clearStoredSession(); setLogoutReason(reason || null); }
+
+  const INACTIVITY_LIMIT_MS = 60 * 60 * 1000; // 1 heure
+  const lastActivityRef = useRef(Date.now());
+  const isLoggedIn = !!(currentAdmin || currentMandataire || currentPartner);
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    lastActivityRef.current = Date.now();
+    const markActive = () => { lastActivityRef.current = Date.now(); };
+    const events = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"];
+    events.forEach(ev => window.addEventListener(ev, markActive, { passive: true }));
+    const interval = setInterval(() => {
+      if (Date.now() - lastActivityRef.current > INACTIVITY_LIMIT_MS) logout("inactivity");
+    }, 30000);
+    return () => {
+      events.forEach(ev => window.removeEventListener(ev, markActive));
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn]);
 
   async function updateAdmin(fields) {
     await saveData({ ...data, settings: { ...data.settings, admin: { ...data.settings.admin, ...fields } } });
@@ -725,7 +745,9 @@ export default function App() {
 
       {view === "landing" && (
         <Landing
+          logoutReason={logoutReason}
           onSelect={(target) => {
+            setLogoutReason(null);
             // Détection propre au bac à sable Claude (jamais présente sur le vrai site déployé).
             const isTestSandbox = typeof window !== "undefined" && !!window["storage"];
             if (isTestSandbox && target === "adminLogin") {
@@ -842,10 +864,15 @@ export default function App() {
   );
 }
 
-function Landing({ onSelect }) {
+function Landing({ onSelect, logoutReason }) {
   const [showLegal, setShowLegal] = useState(false);
   return (
     <div className="min-h-screen flex flex-col">
+      {logoutReason === "inactivity" && (
+        <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
+          Vous avez été déconnecté après 1h d'inactivité, par sécurité.
+        </div>
+      )}
       <header className="px-6 py-5 flex items-center justify-between fa-bg-offwhite">
         <Logo />
         <div className="flex items-center gap-4">
