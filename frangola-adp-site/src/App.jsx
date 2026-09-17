@@ -678,15 +678,28 @@ export default function App() {
       const cniFile = d.docs?.cni ? await loadFile(d.docs.cni.key) : null;
       if (!offreFile && !tableauFile) return { error: "Aucun document (offre ou tableau) déposé sur ce dossier." };
 
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/analyse-documents`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
-        body: JSON.stringify({
-          offreDoc: offreFile ? { data: offreFile.data, mime: offreFile.mime || "application/pdf" } : null,
-          tableauDoc: tableauFile ? { data: tableauFile.data, mime: tableauFile.mime || "application/pdf" } : null,
-          cniDoc: cniFile ? { data: cniFile.data, mime: cniFile.mime || "application/pdf" } : null,
-        }),
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 55000);
+      let res;
+      try {
+        res = await fetch(`${SUPABASE_URL}/functions/v1/analyse-documents`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
+          body: JSON.stringify({
+            offreDoc: offreFile ? { data: offreFile.data, mime: offreFile.mime || "application/pdf" } : null,
+            tableauDoc: tableauFile ? { data: tableauFile.data, mime: tableauFile.mime || "application/pdf" } : null,
+            cniDoc: cniFile ? { data: cniFile.data, mime: cniFile.mime || "application/pdf" } : null,
+          }),
+          signal: controller.signal,
+        });
+      } catch (fetchErr) {
+        if (fetchErr.name === "AbortError") {
+          return { error: "L'analyse a pris trop de temps et a été interrompue. Réessaie, ou dépose des documents moins volumineux (moins de pages) si le problème persiste." };
+        }
+        throw fetchErr;
+      } finally {
+        clearTimeout(timeoutId);
+      }
       const json = await res.json();
       if (!res.ok || json.error) return { error: json.error || "Erreur pendant l'analyse." };
       return { result: json };
