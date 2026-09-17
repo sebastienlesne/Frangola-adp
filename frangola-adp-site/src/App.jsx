@@ -363,7 +363,7 @@ function FileDrop({ label, file, onChange, required }) {
         <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
           {file ? <FileCheck2 size={18} className="text-teal-600 shrink-0" /> : <Upload size={18} className="shrink-0" />}
           <span className="truncate">{file ? file.name : "Choisir un fichier PDF"}</span>
-          <input type="file" accept="application/pdf" className="hidden"
+          <input type="file" accept="application/pdf,image/*" className="hidden"
             onChange={(e) => onChange(e.target.files?.[0] || null)} />
         </label>
         {file && (
@@ -682,9 +682,9 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
         body: JSON.stringify({
-          offrePdfBase64: offreFile?.data || null,
-          tableauPdfBase64: tableauFile?.data || null,
-          cniPdfBase64: cniFile?.data || null,
+          offreDoc: offreFile ? { data: offreFile.data, mime: offreFile.mime || "application/pdf" } : null,
+          tableauDoc: tableauFile ? { data: tableauFile.data, mime: tableauFile.mime || "application/pdf" } : null,
+          cniDoc: cniFile ? { data: cniFile.data, mime: cniFile.mime || "application/pdf" } : null,
         }),
       });
       const json = await res.json();
@@ -1762,7 +1762,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                         className="border border-gray-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
                       <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center gap-2">
                         {extraDocFile ? extraDocFile.name : "Choisir un PDF"}
-                        <input type="file" accept="application/pdf" className="hidden" onChange={e => setExtraDocFile(e.target.files?.[0] || null)} />
+                        <input type="file" accept="application/pdf,image/*" className="hidden" onChange={e => setExtraDocFile(e.target.files?.[0] || null)} />
                       </label>
                       {extraDocFile && (
                         <button type="button" onClick={() => setExtraDocFile(null)} className="fa-tap text-gray-400 hover:text-red-600" title="Retirer le fichier">
@@ -2355,7 +2355,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
           ) : (
             <label key={k} className="fa-tap text-xs bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-700 px-2.5 py-1 rounded-full flex items-center gap-1 transition cursor-pointer">
               <Upload size={12} /> Ajouter "{DOC_LABELS[k]}" (reçu par email)
-              <input type="file" accept="application/pdf" className="hidden"
+              <input type="file" accept="application/pdf,image/*" className="hidden"
                 onChange={e => e.target.files?.[0] && onAdminUploadDoc(d.id, k, e.target.files[0])} />
             </label>
           ))}
@@ -2377,7 +2377,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                 placeholder="Nom de la pièce" className="text-sm border border-gray-300 rounded-lg px-2.5 py-1.5 w-40 focus:outline-none focus:ring-2 focus:ring-teal-500" />
               <label className="text-xs border border-gray-300 rounded-lg px-2.5 py-1.5 cursor-pointer bg-white hover:border-teal-400 transition">
                 {adminExtraDocFile ? adminExtraDocFile.name : "Choisir un PDF"}
-                <input type="file" accept="application/pdf" className="hidden" onChange={e => setAdminExtraDocFile(e.target.files?.[0] || null)} />
+                <input type="file" accept="application/pdf,image/*" className="hidden" onChange={e => setAdminExtraDocFile(e.target.files?.[0] || null)} />
               </label>
               <button onClick={async () => {
                 if (!adminExtraDocFile) return;
@@ -2967,7 +2967,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                               className="text-sm flex items-center gap-1.5 bg-violet-50 hover:bg-violet-100 text-violet-700 px-3 py-1.5 rounded-lg transition disabled:opacity-50">
                                               <Upload size={14} /> Déposer le bordereau
                                             </button>
-                                            <input type="file" accept="application/pdf" className="hidden"
+                                            <input type="file" accept="application/pdf,image/*" className="hidden"
                                               ref={el => bordereauInputs.current[d.id] = el}
                                               onChange={e => e.target.files?.[0] && onUploadBordereau(d.id, e.target.files[0])} />
                                           </>
@@ -3546,7 +3546,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                               )}
                               <label className="inline-block mt-2 text-xs border border-gray-300 rounded-lg px-3 py-1.5 cursor-pointer bg-white hover:border-teal-400 transition">
                                 {p.contractFile ? "Remplacer le contrat signé" : "Déposer le contrat signé"}
-                                <input type="file" accept="application/pdf" className="hidden"
+                                <input type="file" accept="application/pdf,image/*" className="hidden"
                                   onChange={e => e.target.files?.[0] && onUploadPartnerContract(p.id, e.target.files[0])} />
                               </label>
                             </div>
