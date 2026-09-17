@@ -675,6 +675,7 @@ export default function App() {
     try {
       const offreFile = d.docs?.offre ? await loadFile(d.docs.offre.key) : null;
       const tableauFile = d.docs?.tableau ? await loadFile(d.docs.tableau.key) : null;
+      const cniFile = d.docs?.cni ? await loadFile(d.docs.cni.key) : null;
       if (!offreFile && !tableauFile) return { error: "Aucun document (offre ou tableau) déposé sur ce dossier." };
 
       const res = await fetch(`${SUPABASE_URL}/functions/v1/analyse-documents`, {
@@ -683,6 +684,7 @@ export default function App() {
         body: JSON.stringify({
           offrePdfBase64: offreFile?.data || null,
           tableauPdfBase64: tableauFile?.data || null,
+          cniPdfBase64: cniFile?.data || null,
         }),
       });
       const json = await res.json();
