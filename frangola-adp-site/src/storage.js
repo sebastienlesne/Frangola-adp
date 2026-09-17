@@ -2233,10 +2233,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [simOpenId, setSimOpenId] = useState(null);
   const [simDraft, setSimDraft] = useState({});
   const [simAnalyzing, setSimAnalyzing] = useState(null);
+  const [simAnalysisResult, setSimAnalysisResult] = useState(null);
   const [simAnalyzeError, setSimAnalyzeError] = useState("");
   function openSim(d) {
     setSimOpenId(d.id);
     setSimAnalyzeError("");
+    setSimAnalysisResult(null);
     setSimDraft({
       crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
       assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
@@ -2362,10 +2364,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
             </span>
           ))}
         </div>
-        {d.docs.offre && d.docs.tableau && (
+        {(d.docs.offre || d.docs.tableau) && (
           <button onClick={() => onSwapDocs(d.id, "offre", "tableau")}
             className="fa-tap flex items-center gap-1.5 text-xs text-gray-400 hover:fa-teal-text mt-2 transition">
-            <ArrowLeftRight size={12} /> Le partenaire a inversé "Offre de prêt" et "Tableau d'amortissement" ? Échanger
+            <ArrowLeftRight size={12} /> "Offre de prêt" / "Tableau d'amortissement" mal classée ? Échanger
           </button>
         )}
         <div className="mt-2">
@@ -3068,12 +3070,13 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                               <Sparkles size={15} className="fa-teal-text" />
                                               <span className="text-sm font-semibold fa-navy">Simulation client</span>
                                             </div>
-                                            {d.docs?.offre && d.docs?.tableau && (
+                                            {(d.docs?.offre || d.docs?.tableau) && (
                                               <button onClick={async () => {
-                                                setSimAnalyzing(d.id); setSimAnalyzeError("");
+                                                setSimAnalyzing(d.id); setSimAnalyzeError(""); setSimAnalysisResult(null);
                                                 const { result, error } = await onAnalyzeDossierIA(d.id);
                                                 setSimAnalyzing(null);
                                                 if (error) { setSimAnalyzeError(error); return; }
+                                                setSimAnalysisResult(result);
                                                 setSimDraft({
                                                   crd: result.crdMontant ?? "", crdDate: result.crdDate ?? "",
                                                   assuranceRestante: result.assuranceRestanteTotal ?? "",
@@ -3101,6 +3104,46 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             <div className="flex items-center justify-between text-xs mb-3 px-0.5">
                                               <span className="text-gray-500">Co-emprunteur</span>
                                               <span className="fa-navy font-medium">{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim()}</span>
+                                            </div>
+                                          )}
+
+                                          {simAnalysisResult && simAnalysisResult.clientNom && (
+                                            (simAnalysisResult.clientNom.toUpperCase() !== (d.clientLastName || "").toUpperCase()
+                                              || (simAnalysisResult.clientPrenom || "").toLowerCase() !== (d.clientFirstName || "").toLowerCase()) && (
+                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 flex-wrap">
+                                                <span className="text-xs text-amber-800">
+                                                  ⚠️ Le document indique <strong>{simAnalysisResult.clientNom.toUpperCase()} {simAnalysisResult.clientPrenom}</strong>, le partenaire avait saisi <strong>{clientName(d)}</strong>.
+                                                </span>
+                                                <button onClick={() => onUpdateDossierClient(d.id, { clientLastName: simAnalysisResult.clientNom, clientFirstName: simAnalysisResult.clientPrenom })}
+                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
+                                                  Corriger
+                                                </button>
+                                              </div>
+                                            )
+                                          )}
+                                          {simAnalysisResult && d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
+                                            (simAnalysisResult.coEmprunteurNom.toUpperCase() !== (d.coClientLastName || "").toUpperCase()
+                                              || (simAnalysisResult.coEmprunteurPrenom || "").toLowerCase() !== (d.coClientFirstName || "").toLowerCase()) && (
+                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
+                                                <span className="text-xs text-amber-800">
+                                                  ⚠️ Le document indique un co-emprunteur <strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>, le partenaire avait saisi <strong>{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim() || "aucun"}</strong>.
+                                                </span>
+                                                <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
+                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
+                                                  Corriger
+                                                </button>
+                                              </div>
+                                            )
+                                          )}
+                                          {simAnalysisResult && !d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
+                                            <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
+                                              <span className="text-xs text-amber-800">
+                                                ⚠️ Les documents mentionnent un co-emprunteur (<strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>) non déclaré par le partenaire.
+                                              </span>
+                                              <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
+                                                className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
+                                                Ajouter
+                                              </button>
                                             </div>
                                           )}
 
