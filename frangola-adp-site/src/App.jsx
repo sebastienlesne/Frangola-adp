@@ -2289,6 +2289,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
     setSimDraft({
       crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
       assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
+            devisAssurance: d.simulation?.devisAssurance ?? "",
     });
   }
   function saveSim(id) {
@@ -2296,6 +2297,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
       crd: simDraft.crd === "" ? null : Number(simDraft.crd),
       crdDate: simDraft.crdDate,
       assuranceRestante: simDraft.assuranceRestante === "" ? null : Number(simDraft.assuranceRestante),
+            devisAssurance: simDraft.devisAssurance === "" ? null : Number(simDraft.devisAssurance),
       dureeRestanteMois: simDraft.dureeRestanteMois === "" ? null : Number(simDraft.dureeRestanteMois),
     });
     setSimOpenId(null);
@@ -3269,6 +3271,46 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             <span className="text-xs text-amber-800">Moyenne théorique linéaire — le vrai contrat peut être dégressif (au capital restant dû), avec une mensualité réelle différente.</span>
                                           </div>
 
+<div className="mb-3">
+  <label className="block text-xs text-gray-500 mb-1">Coût assurance restant avec Frangola — devis (€)</label>
+  <input type="number" value={simDraft.devisAssurance}
+    onChange={e => setSimDraft(s => ({ ...s, devisAssurance: e.target.value }))}
+    placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+</div>
+                                          {(() => {
+  const actuel = Number(simDraft.assuranceRestante) || 0;
+  const devis = Number(simDraft.devisAssurance) || 0;
+  const mois = Number(simDraft.dureeRestanteMois) || 0;
+  if (!actuel || !devis || !mois) return null;
+  const gainTotal = actuel - devis;
+  const gainMensuel = gainTotal / mois;
+  const pct = Math.round((gainTotal / actuel) * 100);
+  const favorable = gainTotal > 0;
+  return (
+    <div className={`rounded-lg p-3 mb-3 ${favorable ? "fa-bg-gold" : "bg-red-50 border border-red-200"}`}>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className={`text-xs font-semibold ${favorable ? "fa-navy" : "text-red-700"}`}>
+          {favorable ? "Économie pour le client" : "Le devis est plus cher que le contrat actuel"}
+        </span>
+        <span className={`text-xs font-bold ${favorable ? "fa-navy" : "text-red-700"}`}>
+          {favorable ? `−${pct}%` : `+${Math.abs(pct)}%`}
+        </span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-xs fa-navy">Gain total sur {mois} mois</span>
+        <span className="text-lg font-bold fa-navy">{fmtEuro(Math.abs(gainTotal))}</span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-xs fa-navy">Gain par mois</span>
+        <span className="text-sm font-bold fa-navy">{fmtEuroPrecis(Math.abs(gainMensuel))}</span>
+      </div>
+      <div className="flex items-center justify-between mt-1.5 pt-1.5 border-t border-black/10">
+        <span className="text-[11px] text-teal-900/70">Mensualité moyenne Frangola</span>
+        <span className="text-xs font-semibold fa-navy">{fmtEuroPrecis(devis / mois)}</span>
+      </div>
+    </div>
+  );
+})()}
                                           <div className="flex gap-2">
                                             <button onClick={() => saveSim(d.id)} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
                                             <button onClick={() => setSimOpenId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Fermer</button>
