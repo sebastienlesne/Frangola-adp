@@ -3135,6 +3135,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                                   setSimAutoReclassified(true);
                                                 }
                                                 setSimAnalysisResult(result);
+                                                if (!d.clientLastName && result.clientNom) {
+  await onUpdateDossierClient(d.id, {
+    clientLastName: result.clientNom,
+    clientFirstName: result.clientPrenom || "",
+  });
+}
                                                 setSimDraft({
                                                   crd: result.crdMontant ?? "", crdDate: result.crdDate ?? "",
                                                   assuranceRestante: result.assuranceRestanteTotal ?? "",
