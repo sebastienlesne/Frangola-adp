@@ -422,6 +422,10 @@ export default function App() {
           if (!loaded.mandataires) { loaded.mandataires = []; changed = true; }
           if (!loaded.reseaux) { loaded.reseaux = []; changed = true; }
           if (!loaded.activityLog) { loaded.activityLog = []; changed = true; }
+          if (loaded.mandataires?.some(m => !m.role)) {
+            loaded.mandataires = loaded.mandataires.map(m => m.role ? m : { ...m, role: /^nelson$/i.test((m.name || "").trim()) ? "manager" : "standard" });
+            changed = true;
+          }
 
           // Migration from the old multi-admin array format.
           if (loaded.settings.admins && !loaded.settings.admin) {
@@ -860,11 +864,16 @@ export default function App() {
           busy={busy}
         />
       )}
-      {view === "mandataireDash" && currentMandataire && (
+      {view === "mandataireDash" && currentMandataire && (() => {
+        const liveMandataire = data.mandataires.find(m => m.id === currentMandataire.id) || currentMandataire;
+        if (liveMandataire.role !== "manager") {
+          return <MandataireDashboard mandataire={liveMandataire} data={data} onLogout={logout} />;
+        }
+        return (
         <AdminDashboard
           data={data}
           currentAdmin={currentAdmin}
-          isFullAdmin={false}
+          isFullAdmin={true}
           viewerLabel={currentMandataire.firstName || currentMandataire.name}
           onLogout={logout}
           onAddPartner={addPartner}
@@ -893,7 +902,8 @@ export default function App() {
           onRemoveExtraDoc={removeExtraDoc}
           busy={busy}
         />
-      )}
+        );
+      })()}
       {view === "adminDash" && (
         <AdminDashboard
           data={data}
@@ -2202,7 +2212,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [viewingMandataireId, setViewingMandataireId] = useState(null);
   function startEditMandataire(m) {
     setEditingMandataireId(m.id);
-    setEditMandataireForm({ name: m.name || "", firstName: m.firstName || "", email: m.email || "", color: m.color || commercialColor(m.name) });
+    setEditMandataireForm({ name: m.name || "", firstName: m.firstName || "", email: m.email || "", color: m.color || commercialColor(m.name), role: m.role || "standard" });
   }
   async function saveEditMandataire(id) {
     await onUpdateMandataire(id, editMandataireForm);
@@ -2212,6 +2222,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [newMandataireFirstName, setNewMandataireFirstName] = useState("");
   const [newMandataireEmail, setNewMandataireEmail] = useState("");
   const [newMandataireColor, setNewMandataireColor] = useState("#545454");
+  const [newMandataireRole, setNewMandataireRole] = useState("standard");
   const [createdMandataire, setCreatedMandataire] = useState(null);
   const [dossierSearch, setDossierSearch] = useState("");
   const [dossierFilter, setDossierFilter] = useState("tous");
@@ -2222,10 +2233,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [simOpenId, setSimOpenId] = useState(null);
   const [simDraft, setSimDraft] = useState({});
   const [simAnalyzing, setSimAnalyzing] = useState(null);
+  const [simAnalysisResult, setSimAnalysisResult] = useState(null);
   const [simAnalyzeError, setSimAnalyzeError] = useState("");
   function openSim(d) {
     setSimOpenId(d.id);
     setSimAnalyzeError("");
+    setSimAnalysisResult(null);
     setSimDraft({
       crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
       assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
@@ -2351,10 +2364,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
             </span>
           ))}
         </div>
-        {d.docs.offre && d.docs.tableau && (
+        {(d.docs.offre || d.docs.tableau) && (
           <button onClick={() => onSwapDocs(d.id, "offre", "tableau")}
             className="fa-tap flex items-center gap-1.5 text-xs text-gray-400 hover:fa-teal-text mt-2 transition">
-            <ArrowLeftRight size={12} /> Le partenaire a inversé "Offre de prêt" et "Tableau d'amortissement" ? Échanger
+            <ArrowLeftRight size={12} /> "Offre de prêt" / "Tableau d'amortissement" mal classée ? Échanger
           </button>
         )}
         <div className="mt-2">
@@ -3057,12 +3070,13 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                               <Sparkles size={15} className="fa-teal-text" />
                                               <span className="text-sm font-semibold fa-navy">Simulation client</span>
                                             </div>
-                                            {d.docs?.offre && d.docs?.tableau && (
+                                            {(d.docs?.offre || d.docs?.tableau) && (
                                               <button onClick={async () => {
-                                                setSimAnalyzing(d.id); setSimAnalyzeError("");
+                                                setSimAnalyzing(d.id); setSimAnalyzeError(""); setSimAnalysisResult(null);
                                                 const { result, error } = await onAnalyzeDossierIA(d.id);
                                                 setSimAnalyzing(null);
                                                 if (error) { setSimAnalyzeError(error); return; }
+                                                setSimAnalysisResult(result);
                                                 setSimDraft({
                                                   crd: result.crdMontant ?? "", crdDate: result.crdDate ?? "",
                                                   assuranceRestante: result.assuranceRestanteTotal ?? "",
@@ -3090,6 +3104,46 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             <div className="flex items-center justify-between text-xs mb-3 px-0.5">
                                               <span className="text-gray-500">Co-emprunteur</span>
                                               <span className="fa-navy font-medium">{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim()}</span>
+                                            </div>
+                                          )}
+
+                                          {simAnalysisResult && simAnalysisResult.clientNom && (
+                                            (simAnalysisResult.clientNom.toUpperCase() !== (d.clientLastName || "").toUpperCase()
+                                              || (simAnalysisResult.clientPrenom || "").toLowerCase() !== (d.clientFirstName || "").toLowerCase()) && (
+                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 flex-wrap">
+                                                <span className="text-xs text-amber-800">
+                                                  ⚠️ Le document indique <strong>{simAnalysisResult.clientNom.toUpperCase()} {simAnalysisResult.clientPrenom}</strong>, le partenaire avait saisi <strong>{clientName(d)}</strong>.
+                                                </span>
+                                                <button onClick={() => onUpdateDossierClient(d.id, { clientLastName: simAnalysisResult.clientNom, clientFirstName: simAnalysisResult.clientPrenom })}
+                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
+                                                  Corriger
+                                                </button>
+                                              </div>
+                                            )
+                                          )}
+                                          {simAnalysisResult && d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
+                                            (simAnalysisResult.coEmprunteurNom.toUpperCase() !== (d.coClientLastName || "").toUpperCase()
+                                              || (simAnalysisResult.coEmprunteurPrenom || "").toLowerCase() !== (d.coClientFirstName || "").toLowerCase()) && (
+                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
+                                                <span className="text-xs text-amber-800">
+                                                  ⚠️ Le document indique un co-emprunteur <strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>, le partenaire avait saisi <strong>{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim() || "aucun"}</strong>.
+                                                </span>
+                                                <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
+                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
+                                                  Corriger
+                                                </button>
+                                              </div>
+                                            )
+                                          )}
+                                          {simAnalysisResult && !d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
+                                            <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
+                                              <span className="text-xs text-amber-800">
+                                                ⚠️ Les documents mentionnent un co-emprunteur (<strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>) non déclaré par le partenaire.
+                                              </span>
+                                              <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
+                                                className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
+                                                Ajouter
+                                              </button>
                                             </div>
                                           )}
 
@@ -3959,12 +4013,20 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                     {newMandataireName.trim() || "Aperçu"}
                   </span>
                 </div>
+                <div className="mb-4 max-w-sm">
+                  <label className="block text-sm font-medium fa-navy mb-1">Niveau d'accès</label>
+                  <select value={newMandataireRole} onChange={e => setNewMandataireRole(e.target.value)}
+                    className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    <option value="standard">Mandataire standard — voit uniquement sa production</option>
+                    <option value="manager">Manager — accès complet, comme l'admin</option>
+                  </select>
+                </div>
                 <div className="flex gap-2">
                   <button onClick={async () => {
                     if (!newMandataireName.trim() || !newMandataireEmail.trim()) return;
-                    const m = await onAddMandataire({ name: newMandataireName.trim(), firstName: newMandataireFirstName.trim(), email: newMandataireEmail.trim(), color: newMandataireColor });
+                    const m = await onAddMandataire({ name: newMandataireName.trim(), firstName: newMandataireFirstName.trim(), email: newMandataireEmail.trim(), color: newMandataireColor, role: newMandataireRole });
                     setCreatedMandataire(m);
-                    setNewMandataireName(""); setNewMandataireFirstName(""); setNewMandataireEmail(""); setNewMandataireColor("#545454"); setShowAddMandataireForm(false);
+                    setNewMandataireName(""); setNewMandataireFirstName(""); setNewMandataireEmail(""); setNewMandataireColor("#545454"); setNewMandataireRole("standard"); setShowAddMandataireForm(false);
                   }} disabled={!newMandataireName.trim() || !newMandataireEmail.trim()}
                     className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
                     Créer l'accès
@@ -4000,6 +4062,14 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         <input type="color" value={editMandataireForm.color} onChange={e => setEditMandataireForm(f => ({ ...f, color: e.target.value }))}
                           className="w-10 h-9 rounded-lg border border-gray-300 cursor-pointer p-0.5" />
                       </div>
+                      <div className="mb-3 max-w-sm">
+                        <label className="block text-sm font-medium fa-navy mb-1">Niveau d'accès</label>
+                        <select value={editMandataireForm.role} onChange={e => setEditMandataireForm(f => ({ ...f, role: e.target.value }))}
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500">
+                          <option value="standard">Mandataire standard — voit uniquement sa production</option>
+                          <option value="manager">Manager — accès complet, comme l'admin</option>
+                        </select>
+                      </div>
                       <div className="flex gap-2">
                         <button onClick={() => saveEditMandataire(m.id)} className="fa-bg-teal text-sm font-medium px-4 py-1.5 rounded-lg transition">Enregistrer</button>
                         <button onClick={() => setEditingMandataireId(null)} className="text-sm text-gray-500 hover:text-gray-700 px-3">Annuler</button>
@@ -4010,6 +4080,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                       <div>
                         <div className="font-medium fa-navy flex items-center gap-2">
                           <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{up(m.name)} {m.firstName}</span>
+                          {m.role === "manager" && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Manager</span>}
                           {m.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                         </div>
                         <div className="text-xs text-gray-400">
