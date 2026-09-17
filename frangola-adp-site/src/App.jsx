@@ -148,6 +148,10 @@ async function loadFile(key) {
     return null;
   }
 }
+// N'existent que sur le vrai site (build Vite) — restent null dans le bac à sable Claude,
+// où la fonction d'analyse IA n'est de toute façon pas déployée.
+const SUPABASE_URL = (typeof import.meta !== "undefined" ? import.meta.env?.VITE_SUPABASE_URL : null) || null;
+const SUPABASE_ANON_KEY = (typeof import.meta !== "undefined" ? import.meta.env?.VITE_SUPABASE_ANON_KEY : null) || null;
 async function downloadStoredFile(key, fallbackName) {
   const file = await loadFile(key);
   if (!file) return;
@@ -662,6 +666,33 @@ export default function App() {
     await saveData({ ...data, dossiers });
   }
 
+  async function analyzeDossierIA(dossierId) {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      return { error: "Analyse IA indisponible dans cet aperçu — fonctionne uniquement sur le site en ligne." };
+    }
+    const d = data.dossiers.find(x => x.id === dossierId);
+    if (!d) return { error: "Dossier introuvable." };
+    try {
+      const offreFile = d.docs?.offre ? await loadFile(d.docs.offre.key) : null;
+      const tableauFile = d.docs?.tableau ? await loadFile(d.docs.tableau.key) : null;
+      if (!offreFile && !tableauFile) return { error: "Aucun document (offre ou tableau) déposé sur ce dossier." };
+
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/analyse-documents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
+        body: JSON.stringify({
+          offrePdfBase64: offreFile?.data || null,
+          tableauPdfBase64: tableauFile?.data || null,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) return { error: json.error || "Erreur pendant l'analyse." };
+      return { result: json };
+    } catch (e) {
+      return { error: "Erreur réseau pendant l'analyse : " + String(e) };
+    }
+  }
+
   async function updateDossierPartnerMessage(dossierId, partnerMessage) {
     const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, partnerMessage, partnerMessageRead: false } : d);
     await saveData({ ...data, dossiers });
@@ -852,6 +883,7 @@ export default function App() {
           onDuplicateDossier={duplicateDossier}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
+          onAnalyzeDossierIA={analyzeDossierIA}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
@@ -885,6 +917,7 @@ export default function App() {
           onDuplicateDossier={duplicateDossier}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
+          onAnalyzeDossierIA={analyzeDossierIA}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
@@ -2125,7 +2158,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -2188,8 +2221,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [notesOpenId, setNotesOpenId] = useState(null);
   const [simOpenId, setSimOpenId] = useState(null);
   const [simDraft, setSimDraft] = useState({});
+  const [simAnalyzing, setSimAnalyzing] = useState(null);
+  const [simAnalyzeError, setSimAnalyzeError] = useState("");
   function openSim(d) {
     setSimOpenId(d.id);
+    setSimAnalyzeError("");
     setSimDraft({
       crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
       assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
@@ -3016,11 +3052,35 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
 
                                       {simOpenId === d.id && (
                                         <div className="mt-2 bg-white border border-gray-200 rounded-xl p-4">
-                                          <div className="flex items-center gap-2 mb-1">
-                                            <Sparkles size={15} className="fa-teal-text" />
-                                            <span className="text-sm font-semibold fa-navy">Simulation client</span>
+                                          <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+                                            <div className="flex items-center gap-2">
+                                              <Sparkles size={15} className="fa-teal-text" />
+                                              <span className="text-sm font-semibold fa-navy">Simulation client</span>
+                                            </div>
+                                            {d.docs?.offre && d.docs?.tableau && (
+                                              <button onClick={async () => {
+                                                setSimAnalyzing(d.id); setSimAnalyzeError("");
+                                                const { result, error } = await onAnalyzeDossierIA(d.id);
+                                                setSimAnalyzing(null);
+                                                if (error) { setSimAnalyzeError(error); return; }
+                                                setSimDraft({
+                                                  crd: result.crdMontant ?? "", crdDate: result.crdDate ?? "",
+                                                  assuranceRestante: result.assuranceRestanteTotal ?? "",
+                                                  dureeRestanteMois: result.dureeRestanteMois ?? "",
+                                                });
+                                              }} disabled={simAnalyzing === d.id}
+                                                className="flex items-center gap-1.5 text-xs font-medium fa-bg-teal disabled:opacity-50 px-3 py-1.5 rounded-lg transition">
+                                                <Sparkles size={12} /> {simAnalyzing === d.id ? "Analyse en cours…" : "Analyser avec l'IA"}
+                                              </button>
+                                            )}
                                           </div>
                                           <p className="text-xs text-gray-400 mb-3">Visible uniquement par toi et les mandataires — jamais par le partenaire. Sert à comparer rapidement l'assurance actuelle du client à la proposition Frangola.</p>
+                                          {simAnalyzeError && (
+                                            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
+                                              <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
+                                              <span className="text-xs text-red-700">{simAnalyzeError}</span>
+                                            </div>
+                                          )}
 
                                           <div className="flex items-center justify-between text-xs mb-1 px-0.5">
                                             <span className="text-gray-500">Client identifié</span>
