@@ -3,7 +3,7 @@ import { storage } from "./storage";
 import {
   Shield, Users, Building2, Upload, FileText, CheckCircle2, Clock,
   Bell, LogOut, Download, Plus, ArrowLeft, Copy, Check, AlertCircle,
-  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus
+  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus, Sparkles, ArrowLeftRight
 } from "lucide-react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
@@ -657,6 +657,11 @@ export default function App() {
     await saveData({ ...data, dossiers });
   }
 
+  async function updateDossierSimulation(dossierId, fields) {
+    const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, simulation: { ...(d.simulation || {}), ...fields } } : d);
+    await saveData({ ...data, dossiers });
+  }
+
   async function updateDossierPartnerMessage(dossierId, partnerMessage) {
     const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, partnerMessage, partnerMessageRead: false } : d);
     await saveData({ ...data, dossiers });
@@ -687,6 +692,18 @@ export default function App() {
       if (d.id !== dossierId) return d;
       const docs = { ...(d.docs || {}) };
       delete docs[docKey];
+      return { ...d, docs };
+    });
+    await saveData({ ...data, dossiers });
+  }
+
+  async function swapDocs(dossierId, keyA, keyB) {
+    const dossiers = data.dossiers.map(d => {
+      if (d.id !== dossierId) return d;
+      const docs = { ...(d.docs || {}) };
+      const tmp = docs[keyA];
+      if (docs[keyB]) docs[keyA] = docs[keyB]; else delete docs[keyA];
+      if (tmp) docs[keyB] = tmp; else delete docs[keyB];
       return { ...d, docs };
     });
     await saveData({ ...data, dossiers });
@@ -834,10 +851,12 @@ export default function App() {
           onUpdateDossierClient={updateDossierClient}
           onDuplicateDossier={duplicateDossier}
           onUpdateDossierNotes={updateDossierNotes}
+          onUpdateDossierSimulation={updateDossierSimulation}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
           onRemoveDoc={removeDoc}
+          onSwapDocs={swapDocs}
           onAddExtraDoc={addExtraDoc}
           onRemoveExtraDoc={removeExtraDoc}
           busy={busy}
@@ -865,10 +884,12 @@ export default function App() {
           onUpdateDossierClient={updateDossierClient}
           onDuplicateDossier={duplicateDossier}
           onUpdateDossierNotes={updateDossierNotes}
+          onUpdateDossierSimulation={updateDossierSimulation}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
           onRemoveDoc={removeDoc}
+          onSwapDocs={swapDocs}
           onAddExtraDoc={addExtraDoc}
           onRemoveExtraDoc={removeExtraDoc}
           busy={busy}
@@ -2104,7 +2125,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -2165,6 +2186,24 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [statsDepartementFilter, setStatsDepartementFilter] = useState("tous");
   const [statsReseauFilter, setStatsReseauFilter] = useState("tous");
   const [notesOpenId, setNotesOpenId] = useState(null);
+  const [simOpenId, setSimOpenId] = useState(null);
+  const [simDraft, setSimDraft] = useState({});
+  function openSim(d) {
+    setSimOpenId(d.id);
+    setSimDraft({
+      crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
+      assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
+    });
+  }
+  function saveSim(id) {
+    onUpdateDossierSimulation(id, {
+      crd: simDraft.crd === "" ? null : Number(simDraft.crd),
+      crdDate: simDraft.crdDate,
+      assuranceRestante: simDraft.assuranceRestante === "" ? null : Number(simDraft.assuranceRestante),
+      dureeRestanteMois: simDraft.dureeRestanteMois === "" ? null : Number(simDraft.dureeRestanteMois),
+    });
+    setSimOpenId(null);
+  }
   const [notesDraft, setNotesDraft] = useState("");
   const [messageOpenId, setMessageOpenId] = useState(null);
   const [messageDraft, setMessageDraft] = useState("");
@@ -2276,6 +2315,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
             </span>
           ))}
         </div>
+        {d.docs.offre && d.docs.tableau && (
+          <button onClick={() => onSwapDocs(d.id, "offre", "tableau")}
+            className="fa-tap flex items-center gap-1.5 text-xs text-gray-400 hover:fa-teal-text mt-2 transition">
+            <ArrowLeftRight size={12} /> Le partenaire a inversé "Offre de prêt" et "Tableau d'amortissement" ? Échanger
+          </button>
+        )}
         <div className="mt-2">
           {adminExtraDocOpenId === d.id ? (
             <div className="flex flex-wrap items-center gap-2 bg-gray-50 rounded-lg p-2.5">
@@ -2873,6 +2918,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                       </div>
 
                                       <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100">
+                                        <button onClick={() => simOpenId === d.id ? setSimOpenId(null) : openSim(d)}
+                                          className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
+                                          <Sparkles size={13} /> Simulation client {d.simulation?.crd != null && <span className="fa-bg-gold fa-navy rounded-full w-1.5 h-1.5" />}
+                                        </button>
                                         <button onClick={() => notesOpenId === d.id ? setNotesOpenId(null) : openNotes(d)}
                                           className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
                                           <StickyNote size={13} /> Notes {d.notes && <span className="fa-bg-gold fa-navy rounded-full w-1.5 h-1.5" />}
@@ -2961,6 +3010,70 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                           <div className="flex gap-2 mt-3">
                                             <button onClick={() => saveFinance(d.id)} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
                                             <button onClick={() => setFinanceOpenId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Fermer</button>
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {simOpenId === d.id && (
+                                        <div className="mt-2 bg-white border border-gray-200 rounded-xl p-4">
+                                          <div className="flex items-center gap-2 mb-1">
+                                            <Sparkles size={15} className="fa-teal-text" />
+                                            <span className="text-sm font-semibold fa-navy">Simulation client</span>
+                                          </div>
+                                          <p className="text-xs text-gray-400 mb-3">Visible uniquement par toi et les mandataires — jamais par le partenaire. Sert à comparer rapidement l'assurance actuelle du client à la proposition Frangola.</p>
+
+                                          <div className="flex items-center justify-between text-xs mb-1 px-0.5">
+                                            <span className="text-gray-500">Client identifié</span>
+                                            <span className="fa-navy font-medium flex items-center gap-1"><Check size={12} className="text-emerald-600" />{clientName(d)}</span>
+                                          </div>
+                                          {d.hasCoEmprunteur && (
+                                            <div className="flex items-center justify-between text-xs mb-3 px-0.5">
+                                              <span className="text-gray-500">Co-emprunteur</span>
+                                              <span className="fa-navy font-medium">{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim()}</span>
+                                            </div>
+                                          )}
+
+                                          <div className="grid sm:grid-cols-2 gap-2 mb-2">
+                                            <div>
+                                              <label className="block text-xs text-gray-500 mb-1">CRD à M+3 (€)</label>
+                                              <input type="number" value={simDraft.crd} onChange={e => setSimDraft(s => ({ ...s, crd: e.target.value }))}
+                                                placeholder="268 266" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                            </div>
+                                            <div>
+                                              <label className="block text-xs text-gray-500 mb-1">Date de l'échéance M+3</label>
+                                              <input type="date" value={simDraft.crdDate} onChange={e => setSimDraft(s => ({ ...s, crdDate: e.target.value }))}
+                                                className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                            </div>
+                                          </div>
+
+                                          <div className="grid sm:grid-cols-2 gap-2 mb-2">
+                                            <div>
+                                              <label className="block text-xs text-gray-500 mb-1">Coût assurance restant (€)</label>
+                                              <input type="number" value={simDraft.assuranceRestante} onChange={e => setSimDraft(s => ({ ...s, assuranceRestante: e.target.value }))}
+                                                placeholder="15 319" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                            </div>
+                                            <div>
+                                              <label className="block text-xs text-gray-500 mb-1">Durée restante (mois)</label>
+                                              <input type="number" value={simDraft.dureeRestanteMois} onChange={e => setSimDraft(s => ({ ...s, dureeRestanteMois: e.target.value }))}
+                                                placeholder="280" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                            </div>
+                                          </div>
+
+                                          {simDraft.assuranceRestante && simDraft.dureeRestanteMois && Number(simDraft.dureeRestanteMois) > 0 && (
+                                            <div className="fa-bg-offwhite rounded-lg px-3 py-2 mb-3 flex items-center justify-between">
+                                              <span className="text-xs text-gray-500">Mensualité moyenne (linéaire)</span>
+                                              <span className="text-sm font-bold fa-teal-text">{fmtEuro(Number(simDraft.assuranceRestante) / Number(simDraft.dureeRestanteMois))}</span>
+                                            </div>
+                                          )}
+
+                                          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                                            <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
+                                            <span className="text-xs text-amber-800">Moyenne théorique linéaire — le vrai contrat peut être dégressif (au capital restant dû), avec une mensualité réelle différente.</span>
+                                          </div>
+
+                                          <div className="flex gap-2">
+                                            <button onClick={() => saveSim(d.id)} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
+                                            <button onClick={() => setSimOpenId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Fermer</button>
                                           </div>
                                         </div>
                                       )}
