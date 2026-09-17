@@ -122,6 +122,9 @@ function fmtSize(bytes) {
 function fmtEuro(n) {
   return (n || 0).toLocaleString("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 }
+function fmtEuroPrecis(n) {
+  return (n || 0).toLocaleString("fr-FR", { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function up(s) {
   return (s || "").toUpperCase();
 }
@@ -2232,11 +2235,13 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [simDraft, setSimDraft] = useState({});
   const [simAnalyzing, setSimAnalyzing] = useState(null);
   const [simAnalysisResult, setSimAnalysisResult] = useState(null);
+  const [simAutoReclassified, setSimAutoReclassified] = useState(false);
   const [simAnalyzeError, setSimAnalyzeError] = useState("");
   function openSim(d) {
     setSimOpenId(d.id);
     setSimAnalyzeError("");
     setSimAnalysisResult(null);
+    setSimAutoReclassified(false);
     setSimDraft({
       crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
       assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
@@ -2363,12 +2368,6 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
             </span>
           ))}
         </div>
-        {(d.docs.offre || d.docs.tableau) && (
-          <button onClick={() => onSwapDocs(d.id, "offre", "tableau")}
-            className="fa-tap flex items-center gap-1.5 text-xs text-gray-400 hover:fa-teal-text mt-2 transition">
-            <ArrowLeftRight size={12} /> "Offre de prêt" / "Tableau d'amortissement" mal classée ? Échanger
-          </button>
-        )}
         <div className="mt-2">
           {adminExtraDocOpenId === d.id ? (
             <div className="flex flex-wrap items-center gap-2 bg-gray-50 rounded-lg p-2.5">
@@ -3079,10 +3078,18 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             </div>
                                             {(d.docs?.offre || d.docs?.tableau) && (
                                               <button onClick={async () => {
-                                                setSimAnalyzing(d.id); setSimAnalyzeError(""); setSimAnalysisResult(null);
+                                                setSimAnalyzing(d.id); setSimAnalyzeError(""); setSimAnalysisResult(null); setSimAutoReclassified(false);
                                                 const { result, error } = await onAnalyzeDossierIA(d.id);
                                                 setSimAnalyzing(null);
                                                 if (error) { setSimAnalyzeError(error); return; }
+                                                const misclassified =
+                                                  (result.offreSlotDetecte === "tableau" && result.tableauSlotDetecte === "offre") ||
+                                                  (result.offreSlotDetecte === "tableau" && !d.docs?.tableau) ||
+                                                  (result.tableauSlotDetecte === "offre" && !d.docs?.offre);
+                                                if (misclassified) {
+                                                  await onSwapDocs(d.id, "offre", "tableau");
+                                                  setSimAutoReclassified(true);
+                                                }
                                                 setSimAnalysisResult(result);
                                                 setSimDraft({
                                                   crd: result.crdMontant ?? "", crdDate: result.crdDate ?? "",
@@ -3100,6 +3107,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
                                               <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
                                               <span className="text-xs text-red-700">{simAnalyzeError}</span>
+                                            </div>
+                                          )}
+                                          {simAutoReclassified && (
+                                            <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">
+                                              <Check size={14} className="text-emerald-600 shrink-0 mt-0.5" />
+                                              <span className="text-xs text-emerald-800">"Offre de prêt" et "Tableau d'amortissement" étaient mal classés — reclassés automatiquement.</span>
                                             </div>
                                           )}
 
@@ -3158,7 +3171,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">CRD à M+3 (€)</label>
                                               <input type="number" value={simDraft.crd} onChange={e => setSimDraft(s => ({ ...s, crd: e.target.value }))}
-                                                placeholder="268 266" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                                placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">Date de l'échéance M+3</label>
@@ -3171,19 +3184,19 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">Coût assurance restant (€)</label>
                                               <input type="number" value={simDraft.assuranceRestante} onChange={e => setSimDraft(s => ({ ...s, assuranceRestante: e.target.value }))}
-                                                placeholder="15 319" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                                placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">Durée restante (mois)</label>
                                               <input type="number" value={simDraft.dureeRestanteMois} onChange={e => setSimDraft(s => ({ ...s, dureeRestanteMois: e.target.value }))}
-                                                placeholder="280" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                                placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
                                           </div>
 
                                           {simDraft.assuranceRestante && simDraft.dureeRestanteMois && Number(simDraft.dureeRestanteMois) > 0 && (
                                             <div className="fa-bg-offwhite rounded-lg px-3 py-2 mb-3 flex items-center justify-between">
                                               <span className="text-xs text-gray-500">Mensualité moyenne (linéaire)</span>
-                                              <span className="text-sm font-bold fa-teal-text">{fmtEuro(Number(simDraft.assuranceRestante) / Number(simDraft.dureeRestanteMois))}</span>
+                                              <span className="text-sm font-bold fa-teal-text">{fmtEuroPrecis(Number(simDraft.assuranceRestante) / Number(simDraft.dureeRestanteMois))}</span>
                                             </div>
                                           )}
 
