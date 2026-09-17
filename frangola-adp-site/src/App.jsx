@@ -3102,7 +3102,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                               </button>
                                             )}
                                           </div>
-                                          <p className="text-xs text-gray-400 mb-3">Visible uniquement par toi et les mandataires — jamais par le partenaire. Sert à comparer rapidement l'assurance actuelle du client à la proposition Frangola.</p>
+                                          {!d.docs?.tableau && (
+                                            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                                              <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
+                                              <span className="text-xs text-amber-800">Tableau d'amortissement manquant — le CRD, le coût d'assurance restant et la durée restante ne pourront pas être calculés tant qu'il n'est pas déposé.</span>
+                                            </div>
+                                          )}
                                           {simAnalyzeError && (
                                             <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
                                               <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
@@ -3113,6 +3118,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">
                                               <Check size={14} className="text-emerald-600 shrink-0 mt-0.5" />
                                               <span className="text-xs text-emerald-800">"Offre de prêt" et "Tableau d'amortissement" étaient mal classés — reclassés automatiquement.</span>
+                                            </div>
+                                          )}
+                                          {simAnalysisResult?.noteExplicative && (
+                                            <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-3">
+                                              <Sparkles size={14} className="text-sky-600 shrink-0 mt-0.5" />
+                                              <span className="text-xs text-sky-800"><strong>Note de l'analyse :</strong> {simAnalysisResult.noteExplicative}</span>
                                             </div>
                                           )}
 
