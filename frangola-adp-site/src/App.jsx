@@ -647,17 +647,10 @@ export default function App() {
     await saveData({ ...data, dossiers });
   }
 
-  async function duplicateDossier(dossierId) {
-    const original = data.dossiers.find(d => d.id === dossierId);
-    if (!original) return;
-    const copy = {
-      id: uid(), partnerId: original.partnerId,
-      clientFirstName: original.clientFirstName, clientLastName: original.clientLastName, clientPhone: original.clientPhone,
-      status: "Déposé", docs: {}, extraDocs: [], bordereau: null,
-      createdAt: Date.now(), updatedAt: Date.now(),
-      history: [{ status: "Déposé", at: Date.now() }], notes: "",
-    };
-    await saveData({ ...data, dossiers: [...data.dossiers, copy] });
+  async function deleteDossierPermanently(dossierId) {
+    const target = data.dossiers.find(d => d.id === dossierId);
+    const dossiers = data.dossiers.filter(d => d.id !== dossierId);
+    await saveData(withLog({ ...data, dossiers }, `a supprimé le dossier ${target ? clientName(target) : ""}`));
   }
 
   async function updateDossierNotes(dossierId, notes) {
@@ -889,7 +882,7 @@ export default function App() {
           onRemoveReseauLogo={removeReseauLogo}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
-          onDuplicateDossier={duplicateDossier}
+          onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
           onAnalyzeDossierIA={analyzeDossierIA}
@@ -924,7 +917,7 @@ export default function App() {
           onRemoveReseauLogo={removeReseauLogo}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
-          onDuplicateDossier={duplicateDossier}
+          onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
           onAnalyzeDossierIA={analyzeDossierIA}
@@ -1726,6 +1719,11 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                   <StatusBadge status={d.status} />
                 </div>
               )}
+              {d.status === "KO" && d.koReason && (
+                <div className="mb-4 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2.5 text-red-800">
+                  <strong>Motif :</strong> {d.koReason === "Autre" ? (d.koReasonDetail || "Autre") : d.koReason}
+                </div>
+              )}
               {d.partnerMessage && (
                 <div className="mb-4 flex items-start justify-between gap-2 text-sm fa-navy bg-teal-50 border border-teal-200 rounded-lg px-3 py-2.5">
                   <div className="flex items-start gap-2">
@@ -2168,7 +2166,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDuplicateDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -2329,6 +2327,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
     return Math.floor((nowTick - lastAt) / 86400000);
   }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [confirmDeleteDossierId, setConfirmDeleteDossierId] = useState(null);
   const [adminExtraDocOpenId, setAdminExtraDocOpenId] = useState(null);
   const [adminExtraDocLabel, setAdminExtraDocLabel] = useState("");
   const [adminExtraDocFile, setAdminExtraDocFile] = useState(null);
@@ -2853,11 +2852,19 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                               {clientName(d)}
                                               <CoEmprunteurBadge d={d} />
                                               <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
-                                              <button onClick={() => onDuplicateDossier(d.id)} className="fa-tap text-xs text-gray-400 hover:fa-teal-text font-normal">Dupliquer</button>
                                               {findDuplicates(d).length > 0 && (
                                                 <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full">
                                                   ⚠ Doublon possible ({findDuplicates(d).length})
                                                 </span>
+                                              )}
+                                              {confirmDeleteDossierId === d.id ? (
+                                                <span className="flex items-center gap-1.5 text-xs">
+                                                  <span className="text-red-700">Supprimer définitivement ?</span>
+                                                  <button onClick={() => { onDeleteDossier(d.id); setConfirmDeleteDossierId(null); }} className="font-semibold text-red-700 hover:underline">Oui</button>
+                                                  <button onClick={() => setConfirmDeleteDossierId(null)} className="text-gray-500 hover:underline">Non</button>
+                                                </span>
+                                              ) : (
+                                                <button onClick={() => setConfirmDeleteDossierId(d.id)} className="fa-tap text-xs text-gray-400 hover:text-red-600 font-normal">Supprimer</button>
                                               )}
                                             </div>
                                             <div className="text-xs text-gray-400">
