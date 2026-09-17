@@ -3259,6 +3259,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                             </div>
                                           </div>
 
+                                    {simAnalysisResult?.syntheseCrd && (
+  <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-2">
+    <Sparkles size={14} className="text-sky-600 shrink-0 mt-0.5" />
+    <span className="text-xs text-sky-800"><strong>Comment ce CRD a été trouvé :</strong> {simAnalysisResult.syntheseCrd}</span>
+  </div>
+)}
                                           {simDraft.assuranceRestante && simDraft.dureeRestanteMois && Number(simDraft.dureeRestanteMois) > 0 && (
                                             <div className="fa-bg-offwhite rounded-lg px-3 py-2 mb-3 flex items-center justify-between">
                                               <span className="text-xs text-gray-500">Mensualité moyenne (linéaire)</span>
