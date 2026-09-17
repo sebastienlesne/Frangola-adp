@@ -873,6 +873,8 @@ export default function App() {
           onMarkMessageRead={markDossierMessageRead}
           onUpdateDossierClient={updateDossierClient}
           onUploadDocToSlot={adminUploadDoc}
+          onRemoveDoc={removeDoc}
+          onRemoveExtraDoc={removeExtraDoc}
           busy={busy}
         />
       )}
@@ -1471,7 +1473,7 @@ function LoginScreen({ role, code, setCode, error, onBack, onSubmit }) {
   );
 }
 
-function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadDocToSlot, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -1760,12 +1762,26 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
               <div className="flex flex-wrap gap-2 mt-4">
                 {Object.keys(DOC_LABELS).map(k => d.docs[k] && (
                   <span key={k} className="text-xs fa-bg-offwhite border border-gray-200 text-gray-600 px-2.5 py-1 rounded-full flex items-center gap-1">
-                    <FileText size={12} /> {DOC_LABELS[k]}
+                    <button onClick={() => previewStoredFile(d.docs[k].key)} className="flex items-center gap-1 hover:fa-teal-text transition">
+                      <FileText size={12} /> {DOC_LABELS[k]}
+                    </button>
+                    {d.status !== "KO" && (
+                      <button onClick={() => onRemoveDoc(d.id, k)} className="fa-tap text-gray-400 hover:text-red-600 ml-0.5" title="Retirer ce document">
+                        <X size={12} />
+                      </button>
+                    )}
                   </span>
                 ))}
                 {(d.extraDocs || []).map((ed, i) => (
                   <span key={i} className="text-xs bg-teal-50 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1">
-                    <FileText size={12} /> {ed.label}
+                    <button onClick={() => previewStoredFile(ed.key)} className="flex items-center gap-1 hover:underline">
+                      <FileText size={12} /> {ed.label}
+                    </button>
+                    {d.status !== "KO" && (
+                      <button onClick={() => onRemoveExtraDoc(d.id, i)} className="fa-tap text-teal-500 hover:text-red-600 ml-0.5" title="Retirer ce document">
+                        <X size={12} />
+                      </button>
+                    )}
                   </span>
                 ))}
               </div>
