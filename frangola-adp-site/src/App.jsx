@@ -859,6 +859,7 @@ export default function App() {
           onSetGoal={setPartnerGoal}
           onMarkMessageRead={markDossierMessageRead}
           onUpdateDossierClient={updateDossierClient}
+          onUploadDocToSlot={adminUploadDoc}
           busy={busy}
         />
       )}
@@ -1457,7 +1458,7 @@ function LoginScreen({ role, code, setCode, error, onBack, onSubmit }) {
   );
 }
 
-function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadDocToSlot, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -1486,6 +1487,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
   }
 
   const [extraDocOpenId, setExtraDocOpenId] = useState(null);
+  const [extraDocType, setExtraDocType] = useState("autre");
   const [editingDossierId, setEditingDossierId] = useState(null);
   const [editDossierForm, setEditDossierForm] = useState({});
   function startEditDossier(d) {
@@ -1503,8 +1505,10 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
   const [extraDocFile, setExtraDocFile] = useState(null);
   async function submitExtraDoc(dossierId) {
     if (!extraDocFile) return;
-    const ok = await onAddExtraDoc(dossierId, extraDocLabel.trim(), extraDocFile);
-    if (ok) { setExtraDocOpenId(null); setExtraDocLabel(""); setExtraDocFile(null); }
+    const ok = extraDocType === "autre"
+      ? await onAddExtraDoc(dossierId, extraDocLabel.trim(), extraDocFile)
+      : await onUploadDocToSlot(dossierId, extraDocType, extraDocFile);
+    if (ok) { setExtraDocOpenId(null); setExtraDocLabel(""); setExtraDocFile(null); setExtraDocType("autre"); }
   }
 
   const [ribFile, setRibFile] = useState(null);
@@ -1757,11 +1761,20 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                 extraDocOpenId === d.id ? (
                   <div className="mt-3 fa-bg-offwhite rounded-lg p-3">
                     <div className="flex flex-wrap gap-2 items-center">
-                      <input value={extraDocLabel} onChange={e => setExtraDocLabel(e.target.value)}
-                        placeholder="Nom de la pièce (ex. Avenant, Quittance…)"
-                        className="border border-gray-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                      <select value={extraDocType} onChange={e => setExtraDocType(e.target.value)}
+                        className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500">
+                        {Object.keys(DOC_LABELS).map(k => (
+                          <option key={k} value={k} disabled={!!d.docs?.[k]}>{DOC_LABELS[k]}{d.docs?.[k] ? " (déjà déposée)" : ""}</option>
+                        ))}
+                        <option value="autre">Autre pièce</option>
+                      </select>
+                      {extraDocType === "autre" && (
+                        <input value={extraDocLabel} onChange={e => setExtraDocLabel(e.target.value)}
+                          placeholder="Nom de la pièce (ex. Avenant, Quittance…)"
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                      )}
                       <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center gap-2">
-                        {extraDocFile ? extraDocFile.name : "Choisir un PDF"}
+                        {extraDocFile ? extraDocFile.name : "Choisir un fichier"}
                         <input type="file" accept="application/pdf,image/*" className="hidden" onChange={e => setExtraDocFile(e.target.files?.[0] || null)} />
                       </label>
                       {extraDocFile && (
@@ -1775,14 +1788,14 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
                         className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-4 py-1.5 rounded-lg transition">
                         {busy ? "Envoi…" : "Ajouter la pièce"}
                       </button>
-                      <button onClick={() => { setExtraDocOpenId(null); setExtraDocFile(null); setExtraDocLabel(""); }}
+                      <button onClick={() => { setExtraDocOpenId(null); setExtraDocFile(null); setExtraDocLabel(""); setExtraDocType("autre"); }}
                         className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
                     </div>
                   </div>
                 ) : (
                   <button onClick={() => setExtraDocOpenId(d.id)}
                     className="mt-3 flex items-center gap-1.5 text-xs fa-teal-text hover:underline">
-                    <Upload size={13} /> Ajouter une pièce complémentaire
+                    <Upload size={13} /> Déposer un document
                   </button>
                 )
               )}
