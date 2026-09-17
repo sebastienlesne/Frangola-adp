@@ -679,7 +679,7 @@ export default function App() {
       if (!offreFile && !tableauFile) return { error: "Aucun document (offre ou tableau) déposé sur ce dossier." };
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 55000);
+      const timeoutId = setTimeout(() => controller.abort(), 150000);
       let res;
       try {
         res = await fetch(`${SUPABASE_URL}/functions/v1/analyse-documents`, {
@@ -3146,6 +3146,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                               </button>
                                             )}
                                           </div>
+                                          {simAnalyzing === d.id && (
+                                            <p className="text-xs text-gray-400 mb-3">Peut prendre jusqu'à 2 minutes sur des documents volumineux — tu peux continuer à travailler en parallèle, ça tourne en arrière-plan.</p>
+                                          )}
                                           {!d.docs?.tableau && (
                                             <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
                                               <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
