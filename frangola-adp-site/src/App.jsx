@@ -3308,6 +3308,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
         <span className="text-[11px] text-teal-900/70">Mensualité moyenne Frangola</span>
         <span className="text-xs font-semibold fa-navy">{fmtEuroPrecis(devis / mois)}</span>
       </div>
+            {favorable && (
+        <div className="flex items-center justify-between mt-1.5 pt-1.5 border-t border-black/10">
+          <span className="text-[11px] fa-navy font-semibold">Honoraires Frangola (10% du gain)</span>
+          <span className="text-sm font-bold fa-navy">{fmtEuroPrecis(gainTotal * 0.1)}</span>
+        </div>
+      )}
     </div>
   );
 })()}
