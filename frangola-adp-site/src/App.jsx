@@ -3462,7 +3462,13 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
 
             <div className="space-y-3">
               {data.partners.filter(p => !p.deleted).length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun partenaire pour l'instant.</div>}
-              {data.partners.filter(p => !p.deleted).map(p => (
+                            {data.partners.filter(p => !p.deleted).slice().sort((a, b) => {
+                const ca = a.commercial || "zzz", cb = b.commercial || "zzz";
+                if (ca !== cb) return ca.localeCompare(cb);
+                const da = a.departement || "zzz", db = b.departement || "zzz";
+                if (da !== db) return da.localeCompare(db, undefined, { numeric: true });
+                return (a.name || "").localeCompare(b.name || "");
+              }).map(p => (
                 <div key={p.id} className={`bg-white border rounded-xl px-5 py-4 ${p.active === false ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
                   {editingId === p.id ? (
                     <div>
