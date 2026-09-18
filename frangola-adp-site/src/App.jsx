@@ -535,6 +535,17 @@ export default function App() {
     }));
   }
 
+   // Réinitialise le second facteur d'un mandataire : il reconfigurera son
+  // application d'authentification à sa prochaine connexion.
+  async function resetMandataireTotp(id) {
+    const m = data.mandataires.find(m => m.id === id);
+    await mutateData(base => withLog({
+      ...base,
+      mandataires: base.mandataires.map(x => x.id === id
+        ? { ...x, totpSecret: null, totpEnabled: false, recoveryCodes: [] }
+        : x),
+    }, `a réinitialisé l'authentification de ${m?.name || ""}`));
+  }
   async function deleteMandataire(id) {
     const m = data.mandataires.find(m => m.id === id);
     const mandataires = data.mandataires.map(m => m.id === id ? { ...m, deleted: true, deletedAt: Date.now() } : m);
@@ -920,6 +931,7 @@ export default function App() {
           onAddMandataire={addMandataire}
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
+                    onResetMandataireTotp={resetMandataireTotp}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -955,6 +967,7 @@ export default function App() {
           onAddMandataire={addMandataire}
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
+                    onResetMandataireTotp={resetMandataireTotp}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -2235,7 +2248,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -4324,6 +4337,13 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${m.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
                           {m.active === false ? "Réactiver" : "Désactiver"}
                         </button>
+                                                {m.totpEnabled && (
+                          <button onClick={() => onResetMandataireTotp(m.id)}
+                            title="Efface son Authenticator — il le reconfigurera à sa prochaine connexion"
+                            className="text-xs font-semibold bg-amber-50 text-amber-700 hover:bg-amber-100 px-3 py-1.5 rounded-full transition">
+                            Réinit. authentification
+                          </button>
+                        )}
                         {confirmDeleteMandataireId === m.id ? (
                           <span className="flex items-center gap-1.5 text-xs">
                             <span className="text-red-700">Confirmer ?</span>
