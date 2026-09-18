@@ -941,6 +941,7 @@ export default function App() {
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
+                    onSetChallengeGoals={setChallengeGoals}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -977,6 +978,7 @@ export default function App() {
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
+                    onSetChallengeGoals={setChallengeGoals}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -2436,7 +2438,7 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
     </div>
   );
 }
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -4416,6 +4418,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
           );
         })()}
 
+              {tab === "challenge" && (
+          <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
+            onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
+        )}
         {tab === "mandataires" && isFullAdmin && (
           <div>
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
