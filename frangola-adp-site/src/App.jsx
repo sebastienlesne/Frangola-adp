@@ -2203,6 +2203,9 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
           <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {mandataire.firstName || up(mandataire.name)} 👋</h1>
           <p className="text-sm text-gray-500">Voici votre production — visible uniquement par vous et Frangola.</p>
         </div>
+                <ChallengeBoard data={data}
+          commerciaux={["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)]}
+          onSetGoals={() => {}} canEdit={false} />
 
         <div className="grid sm:grid-cols-2 gap-4">
           <div className="fa-bg-teal rounded-2xl p-6">
