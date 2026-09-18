@@ -537,6 +537,15 @@ export default function App() {
 
    // Réinitialise le second facteur d'un mandataire : il reconfigurera son
   // application d'authentification à sa prochaine connexion.
+   async function setChallengeGoals(fields) {
+    await mutateData(base => ({
+      ...base,
+      settings: {
+        ...base.settings,
+        challenge: { ...(base.settings.challenge || {}), ...fields },
+      },
+    }));
+  }
   async function resetMandataireTotp(id) {
     const m = data.mandataires.find(m => m.id === id);
     await mutateData(base => withLog({
@@ -2248,6 +2257,185 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
+function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
+  const [editGoals, setEditGoals] = useState(false);
+  const [draft, setDraft] = useState({});
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+  const goals = data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
+
+  const commercialOf = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
+  const paidAt = (d) => d.paymentDate ? new Date(d.paymentDate).getTime() : (d.updatedAt || d.createdAt);
+
+  function statsFor(c, start, end) {
+    const parts = data.partners.filter(p => !p.deleted && p.commercial === c && p.createdAt >= start && p.createdAt < end);
+    const doss = data.dossiers.filter(d => commercialOf(d) === c && d.createdAt >= start && d.createdAt < end);
+    const ca = data.dossiers
+      .filter(d => commercialOf(d) === c && d.status === "Payé" && paidAt(d) >= start && paidAt(d) < end)
+      .reduce((s, d) => s + (d.caAmount || 0), 0);
+    return { partenaires: parts.length, dossiers: doss.length, ca };
+  }
+
+  const classement = commerciaux
+    .map(c => ({ nom: c, ...statsFor(c, monthStart, monthEnd) }))
+    .sort((a, b) => (b.dossiers - a.dossiers) || (b.ca - a.ca) || (b.partenaires - a.partenaires));
+  const leader = classement[0];
+  const second = classement[1];
+  const ecart = second ? leader.dossiers - second.dossiers : 0;
+  const totaux = classement.reduce((s, x) => ({
+    partenaires: s.partenaires + x.partenaires,
+    dossiers: s.dossiers + x.dossiers,
+    ca: s.ca + x.ca,
+  }), { partenaires: 0, dossiers: 0, ca: 0 });
+
+  const joursRestants = Math.max(0, Math.ceil((monthEnd - Date.now()) / 86400000));
+  const moisCourant = now.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+
+  const histo = [1, 2, 3].map(i => {
+    const s = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const e = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
+    const cl = commerciaux.map(c => ({ nom: c, ...statsFor(c, s.getTime(), e.getTime()) }))
+      .sort((a, b) => b.dossiers - a.dossiers);
+    return {
+      label: s.toLocaleDateString("fr-FR", { month: "long", year: "numeric" }),
+      gagnant: cl[0],
+      total: cl.reduce((t, x) => t + x.dossiers, 0),
+    };
+  }).filter(h => h.total > 0);
+
+  let bandeau;
+  if (totaux.dossiers === 0) bandeau = "Le mois démarre — tout reste à jouer";
+  else if (ecart === 0) bandeau = "Égalité parfaite — ça se joue maintenant";
+  else bandeau = `${commercialLabel(leader.nom)} mène de ${ecart} dossier${ecart > 1 ? "s" : ""}`;
+
+  function barre(valeur, cible, couleur) {
+    const pct = cible > 0 ? Math.min(100, Math.round((valeur / cible) * 100)) : 0;
+    return (
+      <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div className="h-full transition-all" style={{ width: `${pct}%`, background: couleur }} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 className="font-display text-lg font-semibold fa-navy capitalize">{moisCourant}</h2>
+        <span className="text-sm text-gray-400">{joursRestants} jour{joursRestants > 1 ? "s" : ""} restant{joursRestants > 1 ? "s" : ""}</span>
+      </div>
+
+      <div className="fa-bg-gold rounded-2xl px-5 py-3.5 flex items-center gap-2.5">
+        <span className="text-lg">🏆</span>
+        <span className="font-display font-semibold fa-navy">{bandeau}</span>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-3">
+        {classement.map((c, i) => (
+          <div key={c.nom}
+            className={`bg-white rounded-2xl p-5 ${i === 0 && ecart > 0 ? "border-2" : "border border-gray-200"}`}
+            style={i === 0 && ecart > 0 ? { borderColor: COMMERCIAL_COLORS[c.nom] } : {}}>
+            <div className="flex items-center gap-2 mb-3.5">
+              <span className="w-7 h-7 rounded-full text-white flex items-center justify-center text-xs font-bold"
+                style={{ backgroundColor: COMMERCIAL_COLORS[c.nom] }}>
+                {(commercialLabel(c.nom) || "?").charAt(0).toUpperCase()}
+              </span>
+              <span className="font-display font-semibold fa-navy">{commercialLabel(c.nom)}</span>
+              {i === 0 && ecart > 0 && <span className="ml-auto text-base">👑</span>}
+            </div>
+            <div className="flex items-baseline justify-between py-1">
+              <span className="text-xs text-gray-500">Partenaires recrutés</span>
+              <span className="font-display text-xl font-bold fa-navy">{c.partenaires}</span>
+            </div>
+            <div className="flex items-baseline justify-between py-1">
+              <span className="text-xs text-gray-500">Dossiers déposés</span>
+              <span className="font-display text-xl font-bold fa-navy">{c.dossiers}</span>
+            </div>
+            <div className="flex items-baseline justify-between py-1">
+              <span className="text-xs text-gray-500">CA encaissé</span>
+              <span className="font-display text-xl font-bold fa-navy">{fmtEuro(c.ca)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-2xl p-5">
+        <div className="flex items-center justify-between mb-3.5 flex-wrap gap-2">
+          <span className="font-display font-semibold fa-navy">Objectifs du mois — équipe</span>
+          {canEdit && !editGoals && (
+            <button onClick={() => { setDraft({ partenaires: goals.partenaires, dossiers: goals.dossiers, ca: goals.ca }); setEditGoals(true); }}
+              className="text-xs fa-teal-text hover:underline">Modifier</button>
+          )}
+        </div>
+
+        {editGoals ? (
+          <div className="space-y-2">
+            <div className="grid sm:grid-cols-3 gap-2">
+              <input type="number" value={draft.partenaires} onChange={e => setDraft(d => ({ ...d, partenaires: e.target.value }))}
+                placeholder="Partenaires" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <input type="number" value={draft.dossiers} onChange={e => setDraft(d => ({ ...d, dossiers: e.target.value }))}
+                placeholder="Dossiers" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <input type="number" value={draft.ca} onChange={e => setDraft(d => ({ ...d, ca: e.target.value }))}
+                placeholder="CA (€)" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            </div>
+            <div className="flex gap-2">
+              <button onClick={async () => {
+                await onSetGoals({
+                  partenaires: Number(draft.partenaires) || 0,
+                  dossiers: Number(draft.dossiers) || 0,
+                  ca: Number(draft.ca) || 0,
+                });
+                setEditGoals(false);
+              }} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
+              <button onClick={() => setEditGoals(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <div className="flex justify-between text-xs mb-1.5">
+                <span className="text-gray-500">Nouveaux partenaires</span>
+                <span className="fa-navy font-medium">{totaux.partenaires} / {goals.partenaires}</span>
+              </div>
+              {barre(totaux.partenaires, goals.partenaires, "#008BA8")}
+            </div>
+            <div>
+              <div className="flex justify-between text-xs mb-1.5">
+                <span className="text-gray-500">Dossiers déposés</span>
+                <span className="fa-navy font-medium">{totaux.dossiers} / {goals.dossiers}</span>
+              </div>
+              {barre(totaux.dossiers, goals.dossiers, "#008BA8")}
+            </div>
+            <div>
+              <div className="flex justify-between text-xs mb-1.5">
+                <span className="text-gray-500">CA encaissé</span>
+                <span className="fa-navy font-medium">{fmtEuro(totaux.ca)} / {fmtEuro(goals.ca)}</span>
+              </div>
+              {barre(totaux.ca, goals.ca, "#FCD947")}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {histo.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-2xl p-5">
+          <div className="font-display font-semibold fa-navy mb-3">Mois précédents</div>
+          <div className="space-y-1">
+            {histo.map(h => (
+              <div key={h.label} className="flex items-center justify-between text-sm py-1.5 border-b border-gray-100 last:border-0">
+                <span className="text-gray-500 capitalize">{h.label}</span>
+                <span className="fa-navy">
+                  <span className="font-bold">{commercialLabel(h.gagnant.nom)}</span> · {h.gagnant.dossiers} dossier{h.gagnant.dossiers > 1 ? "s" : ""}
+                </span>
+                <span>🏆</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
