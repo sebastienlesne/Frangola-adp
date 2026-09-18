@@ -537,6 +537,28 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoggedIn]);
 
+    // Dépose une copie horodatée des données, une par jour, 7 jours glissants.
+  async function sauvegardeAuto(donnees) {
+    if (!donnees) return;
+    const jour = new Date().toISOString().slice(0, 10);
+    try {
+      const existant = await storage.list("adp:backup:", true);
+      const cles = (existant?.keys || []).sort();
+      if (cles.includes("adp:backup:" + jour)) return;
+      await storage.set("adp:backup:" + jour, JSON.stringify({
+        at: Date.now(),
+        partenaires: donnees.partners?.length || 0,
+        dossiers: donnees.dossiers?.length || 0,
+        data: donnees,
+      }), true);
+      const apres = [...cles, "adp:backup:" + jour].sort();
+      for (const vieille of apres.slice(0, Math.max(0, apres.length - 7))) {
+        try { await storage.delete(vieille, true); } catch (e) { /* ignore */ }
+      }
+    } catch (e) {
+      console.error("Sauvegarde automatique impossible :", e);
+    }
+  }
   async function updateAdmin(fields) {
     await saveData({ ...data, settings: { ...data.settings, admin: { ...data.settings.admin, ...fields } } });
   }
@@ -918,7 +940,7 @@ export default function App() {
           onUpdateAdmin={updateAdmin}
           onUpdateMandataire={updateMandataire}
           onBack={() => setView("landing")}
-          onAdminSuccess={() => { setCurrentAdmin(true); setView("adminDash"); setStoredSession({ type: "admin" }); }}
+                    onAdminSuccess={() => { setCurrentAdmin(true); setView("adminDash"); setStoredSession({ type: "admin" }); sauvegardeAuto(data); }}
           onMandataireSuccess={(m) => { setCurrentMandataire(m); setView("mandataireDash"); setStoredSession({ type: "mandataire", id: m.id }); }}
         />
       )}
@@ -2460,6 +2482,28 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
     </div>
   );
 }
+  // Dépose une copie horodatée des données, une par jour, 7 jours glissants.
+  async function sauvegardeAuto(donnees) {
+    if (!donnees) return;
+    const jour = new Date().toISOString().slice(0, 10);
+    try {
+      const existant = await storage.list("adp:backup:", true);
+      const cles = (existant?.keys || []).sort();
+      if (cles.includes("adp:backup:" + jour)) return;
+      await storage.set("adp:backup:" + jour, JSON.stringify({
+        at: Date.now(),
+        partenaires: donnees.partners?.length || 0,
+        dossiers: donnees.dossiers?.length || 0,
+        data: donnees,
+      }), true);
+      const apres = [...cles, "adp:backup:" + jour].sort();
+      for (const vieille of apres.slice(0, Math.max(0, apres.length - 7))) {
+        try { await storage.delete(vieille, true); } catch (e) { /* ignore */ }
+      }
+    } catch (e) {
+      console.error("Sauvegarde automatique impossible :", e);
+    }
+  }
 function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
@@ -4411,6 +4455,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                 </div>
               </div>
 
+                            <SauvegardesPanel />
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
                 <div className="font-display font-semibold fa-navy mb-4">Évolution du nombre de partenaires</div>
                 <div style={{ width: "100%", height: 200 }}>
