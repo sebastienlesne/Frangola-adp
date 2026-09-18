@@ -471,6 +471,24 @@ export default function App() {
     catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); }
   }
 
+  // Écrit en repartant TOUJOURS de l'état réellement stocké, jamais de la copie
+  // chargée au démarrage — sinon deux personnes connectées en même temps
+  // s'écrasent mutuellement (partenaire disparu, Authenticator réinitialisé).
+  async function mutateData(mutator) {
+    let base = data;
+    try {
+      const res = await storage.get("adp:data", true);
+      if (res && res.value) base = JSON.parse(res.value);
+    } catch (e) {
+      setGlobalError("Impossible de relire les données — modification annulée.");
+      return false;
+    }
+    const next = mutator(base);
+    if (!next) return false;
+    setData(next);
+    try { await storage.set("adp:data", JSON.stringify(next), true); return true; }
+    catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); return false; }
+  }
   function withLog(nextData, message) {
     const actor = currentAdmin ? "Sébastien" : (currentMandataire?.firstName || currentMandataire?.name || "Inconnu");
     const entry = { id: uid(), at: Date.now(), actor, message };
@@ -511,8 +529,10 @@ export default function App() {
   }
 
   async function updateMandataire(id, fields) {
-    const mandataires = data.mandataires.map(m => m.id === id ? { ...m, ...fields } : m);
-    await saveData({ ...data, mandataires });
+        await mutateData(base => ({
+      ...base,
+      mandataires: base.mandataires.map(m => m.id === id ? { ...m, ...fields } : m),
+    }));
   }
 
   async function deleteMandataire(id) {
@@ -534,8 +554,10 @@ export default function App() {
   }
 
   async function updatePartner(id, fields) {
-    const partners = data.partners.map(p => p.id === id ? { ...p, ...fields } : p);
-    await saveData({ ...data, partners });
+       await mutateData(base => ({
+      ...base,
+      partners: base.partners.map(p => p.id === id ? { ...p, ...fields } : p),
+    }));
   }
 
   async function setPartnerGoal(partnerId, monthlyGoal) {
@@ -629,7 +651,7 @@ export default function App() {
         docs, bordereau: null, createdAt: Date.now(), updatedAt: Date.now(),
         history: [{ status: "Déposé", at: Date.now() }], notes: "",
       };
-      await saveData({ ...data, dossiers: [...data.dossiers, dossier] });
+            await mutateData(base => ({ ...base, dossiers: [...base.dossiers, dossier] }));
       return true;
     } finally { setBusy(false); }
   }
