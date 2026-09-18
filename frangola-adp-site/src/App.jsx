@@ -132,6 +132,82 @@ function clientName(d) {
   const full = `${(d.clientLastName || "").toUpperCase()} ${d.clientFirstName || ""}`.trim();
   return full || "(Sans nom)";
 }
+const MOTIFS_REFUS = [
+  "Ce confrère fait déjà partie du réseau FRANGOLA.",
+  "Ce confrère a déjà été présenté antérieurement.",
+  "Les coordonnées transmises sont incomplètes ou erronées.",
+  "Le confrère ne souhaite pas donner suite.",
+  "Autre",
+];
+
+function siretValide(siret) {
+  const s = (siret || "").replace(/\D/g, "");
+  if (s.length !== 14) return false;
+  let somme = 0;
+  for (let i = 0; i < 14; i++) {
+    let n = Number(s[i]);
+    if (i % 2 === 0) { n *= 2; if (n > 9) n -= 9; }
+    somme += n;
+  }
+  return somme % 10 === 0;
+}
+
+function normaliseTel(t) {
+  return (t || "").replace(/\D/g, "").slice(-9);
+}
+
+function mesDeclarations(partnerId) {
+  return (_colorDataRef?.parrainages || [])
+    .filter(p => p.parrainId === partnerId)
+    .sort((a, b) => b.at - a.at);
+}
+
+// Ne bloque jamais : signale, l'arbitrage reste humain.
+function detecterDoublon(decl) {
+  if (!_colorDataRef) return { niveau: null, messages: [] };
+  const messages = [];
+  let niveau = null;
+  const siret = (decl.siret || "").replace(/\D/g, "");
+  const tel = normaliseTel(decl.telephone);
+  const nom = (decl.nom || "").trim().toLowerCase();
+  const reseau = (decl.reseau || "").trim().toLowerCase();
+
+  for (const p of _colorDataRef.partners || []) {
+    const memeSiret = siret && (p.siret || "").replace(/\D/g, "") === siret;
+    const memeTel = tel && normaliseTel(p.telephone || p.phone) === tel;
+    const nomP = (p.name || "").trim().toLowerCase();
+    const reseauP = (p.company || "").trim().toLowerCase();
+    const etiquette = `${p.firstName || ""} ${(p.name || "").toUpperCase()}`.trim();
+    const etat = p.deleted ? " (supprimé)" : (p.active === false ? " (inactif)" : "");
+    if (memeSiret) {
+      niveau = "rouge";
+      messages.push(`SIRET identique à ${etiquette}${etat}, inscrit le ${fmtDate(p.createdAt)}.`);
+    } else if (memeTel) {
+      niveau = "rouge";
+      messages.push(`Téléphone identique à ${etiquette}${etat}, inscrit le ${fmtDate(p.createdAt)}.`);
+    } else if (nom && nomP === nom && reseau && reseauP === reseau) {
+      if (niveau !== "rouge") niveau = "orange";
+      messages.push(`Même nom et même réseau que ${etiquette}${etat}.`);
+    }
+  }
+
+  for (const d of _colorDataRef.parrainages || []) {
+    if (d.id === decl.id || d.statut === "refuse") continue;
+    const memeSiret = siret && (d.siret || "").replace(/\D/g, "") === siret;
+    const memeTel = tel && normaliseTel(d.telephone) === tel;
+    if ((memeSiret || memeTel) && d.at < decl.at) {
+      niveau = "rouge";
+      messages.push(`Déjà présenté par un autre partenaire le ${fmtDate(d.at)}.`);
+    }
+  }
+
+  if (decl.siret && !siretValide(decl.siret)) {
+    if (niveau !== "rouge") niveau = "orange";
+    messages.push("Le numéro SIRET saisi est mal formé — à vérifier.");
+  }
+
+  return { niveau, messages };
+}
 function CoEmprunteurBadge({ d }) {
   if (!d.hasCoEmprunteur) return null;
   const full = `${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim();
@@ -578,7 +654,26 @@ export default function App() {
 
    // Réinitialise le second facteur d'un mandataire : il reconfigurera son
   // application d'authentification à sa prochaine connexion.
-   async function setChallengeGoals(fields) {
+    async function declarerParrainage(parrainId, fields) {
+    const decl = {
+      id: uid(), parrainId, ...fields,
+      at: Date.now(), statut: "en_attente", motif: "",
+    };
+    return await mutateData(base => ({
+      ...base,
+      parrainages: [...(base.parrainages || []), decl],
+    }));
+  }
+
+  async function traiterParrainage(id, statut, motif) {
+    await mutateData(base => ({
+      ...base,
+      parrainages: (base.parrainages || []).map(p => p.id === id
+        ? { ...p, statut, motif: motif || "", traiteAt: Date.now() }
+        : p),
+    }));
+  }
+  async function setChallengeGoals(fields) {
     await mutateData(base => ({
       ...base,
       settings: {
@@ -950,6 +1045,7 @@ export default function App() {
           dossiers={data.dossiers.filter(d => d.partnerId === currentPartner.id)}
           onLogout={logout}
           onCreateDossier={createDossier}
+                    onDeclarerParrainage={declarerParrainage}
           onAddExtraDoc={addExtraDoc}
           onUploadRib={uploadPartnerRib}
           onSetGoal={setPartnerGoal}
@@ -983,6 +1079,7 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
+                    onTraiterParrainage={traiterParrainage}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -1020,6 +1117,7 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
+                    onTraiterParrainage={traiterParrainage}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -1560,7 +1658,108 @@ function LoginScreen({ role, code, setCode, error, onBack, onSubmit }) {
   );
 }
 
-function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+function ParrainageCard({ partner, onDeclarer }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [form, setForm] = useState({ nom: "", prenom: "", telephone: "", reseau: "", siret: "" });
+  const [erreur, setErreur] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [envoye, setEnvoye] = useState(false);
+  const declarations = mesDeclarations(partner.id);
+
+  async function envoyer() {
+    if (!form.nom.trim() || !form.prenom.trim()) { setErreur("Le nom et le prénom sont obligatoires."); return; }
+    if (normaliseTel(form.telephone).length < 9) { setErreur("Le numéro de téléphone est incomplet."); return; }
+    if ((form.siret || "").replace(/\D/g, "").length !== 14) { setErreur("Le SIRET doit comporter 14 chiffres."); return; }
+    setErreur(""); setBusy(true);
+    try {
+      const ok = await onDeclarer(partner.id, {
+        nom: form.nom.trim(), prenom: form.prenom.trim(),
+        telephone: form.telephone.trim(), reseau: form.reseau.trim(),
+        siret: form.siret.replace(/\D/g, ""),
+      });
+      if (ok !== false) {
+        setForm({ nom: "", prenom: "", telephone: "", reseau: "", siret: "" });
+        setOuvert(false); setEnvoye(true);
+        setTimeout(() => setEnvoye(false), 6000);
+      }
+    } finally { setBusy(false); }
+  }
+
+  const champ = (cle, label) => (
+    <div>
+      <label className="block text-xs text-gray-500 mb-1">{label}</label>
+      <input value={form[cle]} onChange={e => setForm(f => ({ ...f, [cle]: e.target.value }))}
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+    </div>
+  );
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-6">
+      <div className="font-display font-semibold fa-navy mb-1">🤝 Parrainez un confrère</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Présentez-nous un confrère qui ne travaille pas encore avec Frangola et percevez une part du chiffre d'affaires qu'il générera. Seuls les confrères inconnus de notre réseau sont éligibles.
+      </p>
+
+      {envoye && (
+        <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2.5 mb-4">
+          <Check size={14} className="text-emerald-600 shrink-0 mt-0.5" />
+          <span className="text-xs text-emerald-800">Déclaration enregistrée. Frangola revient vers vous après vérification.</span>
+        </div>
+      )}
+
+      {!ouvert ? (
+        <button onClick={() => setOuvert(true)}
+          className="fa-bg-gold fa-navy text-sm font-medium px-5 py-2.5 rounded-lg transition">
+          Présenter un confrère
+        </button>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid sm:grid-cols-2 gap-3">
+            {champ("nom", "Nom")}
+            {champ("prenom", "Prénom")}
+            {champ("telephone", "Téléphone")}
+            {champ("reseau", "Réseau / agence")}
+          </div>
+          {champ("siret", "N° SIRET (14 chiffres)")}
+          <p className="text-xs text-gray-400">Le SIRET nous permet de vérifier que ce confrère n'est pas déjà référencé.</p>
+          {erreur && <div className="text-xs text-red-600">{erreur}</div>}
+          <div className="flex gap-2">
+            <button onClick={envoyer} disabled={busy}
+              className="fa-bg-teal disabled:opacity-50 text-sm font-medium px-5 py-2 rounded-lg transition">
+              {busy ? "Envoi…" : "Envoyer la déclaration"}
+            </button>
+            <button onClick={() => { setOuvert(false); setErreur(""); }}
+              className="text-sm text-gray-500 hover:text-gray-700 px-3">Annuler</button>
+          </div>
+        </div>
+      )}
+
+      {declarations.length > 0 && (
+        <div className="mt-5 pt-4 border-t border-gray-100 space-y-2">
+          <div className="text-xs font-semibold fa-navy mb-1">Vos déclarations</div>
+          {declarations.map(d => (
+            <div key={d.id} className="fa-bg-offwhite rounded-lg px-3 py-2.5">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="text-sm fa-navy font-bold">{d.prenom} {(d.nom || "").toUpperCase()}</span>
+                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                  d.statut === "valide" ? "bg-emerald-50 text-emerald-700"
+                  : d.statut === "refuse" ? "bg-red-50 text-red-700"
+                  : "bg-amber-50 text-amber-700"}`}>
+                  {d.statut === "valide" ? "Validée" : d.statut === "refuse" ? "Refusée" : "En cours de vérification"}
+                </span>
+              </div>
+              <div className="text-xs text-gray-400 mt-0.5">Déclaré le {fmtDate(d.at)}{d.reseau && ` · ${d.reseau}`}</div>
+              {d.statut === "refuse" && d.motif && (
+                <div className="text-xs text-red-700 mt-1.5">{d.motif}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -1688,6 +1887,10 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
           <button onClick={() => setTab("contrat")}
             className={`flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "contrat" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             <FileCheck2 size={15} /> Mon contrat
+          </button>
+                    <button onClick={() => setTab("parrainage")}
+            className={`flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "parrainage" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+            🤝 Parrainage
           </button>
         </div>
 
@@ -2097,6 +2300,9 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onAddE
           );
         })()}
 
+                {tab === "parrainage" && (
+          <ParrainageCard partner={partner} onDeclarer={onDeclarerParrainage} />
+        )}
         {tab === "contrat" && (
           <div className="space-y-6 max-w-xl">
             <div className="bg-white border border-gray-200 rounded-2xl p-6">
@@ -2303,6 +2509,105 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
+function RegistreParrainages({ data, onTraiter }) {
+  const [refusId, setRefusId] = useState(null);
+  const [motif, setMotif] = useState(MOTIFS_REFUS[0]);
+  const [motifLibre, setMotifLibre] = useState("");
+  const decls = (data.parrainages || []).slice().sort((a, b) => b.at - a.at);
+  const attente = decls.filter(d => d.statut === "en_attente");
+  const traitees = decls.filter(d => d.statut !== "en_attente").slice(0, 10);
+
+  const nomParrainDe = (id) => {
+    const p = data.partners.find(x => x.id === id);
+    return p ? (p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)) : "—";
+  };
+
+  function confirmerRefus(id) {
+    const texte = motif === "Autre" ? motifLibre.trim() : motif;
+    onTraiter(id, "refuse", texte || "Déclaration non retenue.");
+    setRefusId(null); setMotif(MOTIFS_REFUS[0]); setMotifLibre("");
+  }
+
+  if (decls.length === 0) return null;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-4">
+      <div className="font-display font-semibold fa-navy mb-1">
+        🤝 Déclarations de parrainage
+        {attente.length > 0 && <span className="ml-2 fa-bg-gold fa-navy text-xs font-bold px-2 py-0.5 rounded-full">{attente.length} en attente</span>}
+      </div>
+      <p className="text-sm text-gray-500 mb-4">Vérifiez les alertes puis validez ou refusez. Rien n'est rattaché sans votre accord.</p>
+
+      {attente.length === 0 && <div className="text-sm text-gray-400 mb-3">Aucune déclaration en attente.</div>}
+
+      <div className="space-y-3">
+        {attente.map(d => {
+          const alerte = detecterDoublon(d);
+          return (
+            <div key={d.id} className={`rounded-xl p-3.5 border ${
+              alerte.niveau === "rouge" ? "border-red-200 bg-red-50"
+              : alerte.niveau === "orange" ? "border-amber-200 bg-amber-50"
+              : "border-gray-200 fa-bg-offwhite"}`}>
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+                <span className="text-sm fa-navy font-bold">{d.prenom} {(d.nom || "").toUpperCase()}</span>
+                <span className="text-xs text-gray-500">présenté par <strong className="fa-navy">{nomParrainDe(d.parrainId)}</strong> le {fmtDate(d.at)}</span>
+              </div>
+              <div className="text-xs text-gray-500 mb-2">
+                {d.telephone} {d.reseau && `· ${d.reseau}`} · SIRET {d.siret}
+              </div>
+
+              {alerte.messages.length > 0 && (
+                <div className={`text-xs mb-2.5 space-y-0.5 ${alerte.niveau === "rouge" ? "text-red-800" : "text-amber-800"}`}>
+                  {alerte.messages.map((m, i) => <div key={i}>⚠ {m}</div>)}
+                </div>
+              )}
+
+              {refusId === d.id ? (
+                <div className="space-y-2">
+                  <select value={motif} onChange={e => setMotif(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    {MOTIFS_REFUS.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                  {motif === "Autre" && (
+                    <input value={motifLibre} onChange={e => setMotifLibre(e.target.value)}
+                      placeholder="Motif communiqué au parrain"
+                      className="w-full border border-gray-300 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  )}
+                  <div className="flex gap-2">
+                    <button onClick={() => confirmerRefus(d.id)}
+                      className="text-xs font-semibold bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg transition">Confirmer le refus</button>
+                    <button onClick={() => setRefusId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <button onClick={() => onTraiter(d.id, "valide", "")}
+                    className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">Valider</button>
+                  <button onClick={() => setRefusId(d.id)}
+                    className="text-xs font-semibold bg-white border border-gray-300 hover:border-red-300 text-gray-600 px-3 py-1.5 rounded-lg transition">Refuser</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {traitees.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-100 space-y-1">
+          <div className="text-xs font-semibold fa-navy mb-1">Traitées récemment</div>
+          {traitees.map(d => (
+            <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 text-xs py-1">
+              <span className="fa-navy">{d.prenom} {(d.nom || "").toUpperCase()} · {nomParrainDe(d.parrainId)}</span>
+              <span className={d.statut === "valide" ? "text-emerald-700 font-semibold" : "text-red-700"}>
+                {d.statut === "valide" ? "Validée" : `Refusée — ${d.motif}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
   const [editGoals, setEditGoals] = useState(false);
   const [draft, setDraft] = useState({});
@@ -2504,7 +2809,7 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
       console.error("Sauvegarde automatique impossible :", e);
     }
   }
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -3667,6 +3972,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
 
         {tab === "partenaires" && (
           <div>
+                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} />
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Partenaires</h2>
               <div className="flex items-center gap-2">
