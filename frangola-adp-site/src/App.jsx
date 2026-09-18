@@ -2811,6 +2811,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
             className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "stats" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             <BarChart3 size={15} /> Statistiques
           </button>
+                    <button onClick={() => setTab("challenge")}
+            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "challenge" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+            🏆 Challenge
+          </button>
           {isFullAdmin && (
             <button onClick={() => setTab("mandataires")}
               className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "mandataires" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
