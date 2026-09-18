@@ -465,10 +465,28 @@ export default function App() {
     })();
   }, []);
 
+    // Refuse d'écrire si les données ont changé depuis le chargement de la page.
+  // Sans ce contrôle, deux personnes connectées en même temps s'écrasent
+  // mutuellement : partenaire disparu, Authenticator réinitialisé, dossier perdu.
   async function saveData(next) {
-    setData(next);
-    try { await storage.set("adp:data", JSON.stringify(next), true); }
-    catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); }
+    let stocke = null;
+    try {
+      const res = await storage.get("adp:data", true);
+      if (res && res.value) stocke = JSON.parse(res.value);
+    } catch (e) {
+      setGlobalError("Impossible de vérifier les données — modification annulée.");
+      return false;
+    }
+    const revLocale = data?.rev ?? 0;
+    const revStockee = stocke?.rev ?? 0;
+    if (stocke && revStockee !== revLocale) {
+      setGlobalError("Ces données ont été modifiées ailleurs entre-temps. Rechargez la page avant de continuer — votre dernière saisie n'a pas été enregistrée.");
+      return false;
+    }
+    const versionne = { ...next, rev: revLocale + 1 };
+    setData(versionne);
+    try { await storage.set("adp:data", JSON.stringify(versionne), true); return true; }
+    catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); return false; }
   }
 
   // Écrit en repartant TOUJOURS de l'état réellement stocké, jamais de la copie
@@ -483,10 +501,11 @@ export default function App() {
       setGlobalError("Impossible de relire les données — modification annulée.");
       return false;
     }
-    const next = mutator(base);
+       const next = mutator(base);
     if (!next) return false;
-    setData(next);
-    try { await storage.set("adp:data", JSON.stringify(next), true); return true; }
+    const versionne = { ...next, rev: (base?.rev ?? 0) + 1 };
+    setData(versionne);
+    try { await storage.set("adp:data", JSON.stringify(versionne), true); return true; }
     catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); return false; }
   }
   function withLog(nextData, message) {
