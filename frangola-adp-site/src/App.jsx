@@ -2245,6 +2245,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
   const [statsPeriod, setStatsPeriod] = useState("jour");
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
   const [corbeilleSearch, setCorbeilleSearch] = useState("");
+    const [partnerSearch, setPartnerSearch] = useState("");
   const [corbeilleMandataireSearch, setCorbeilleMandataireSearch] = useState("");
   const [confirmDeleteMandataireId, setConfirmDeleteMandataireId] = useState(null);
   async function confirmDeleteMandataire(id) {
@@ -3461,14 +3462,74 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
             )}
 
             <div className="space-y-3">
+                           <div className="relative mb-2">
+                <input value={partnerSearch} onChange={e => setPartnerSearch(e.target.value)}
+                  placeholder="Rechercher un partenaire, une agence, une ville…"
+                  className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
+                {partnerSearch && (
+                  <button onClick={() => setPartnerSearch("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
+                    <X size={15} />
+                  </button>
+                )}
+              </div>
               {data.partners.filter(p => !p.deleted).length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun partenaire pour l'instant.</div>}
-                            {data.partners.filter(p => !p.deleted).slice().sort((a, b) => {
-                const ca = a.commercial || "zzz", cb = b.commercial || "zzz";
-                if (ca !== cb) return ca.localeCompare(cb);
-                const da = a.departement || "zzz", db = b.departement || "zzz";
-                if (da !== db) return da.localeCompare(db, undefined, { numeric: true });
-                return (a.name || "").localeCompare(b.name || "");
-              }).map(p => (
+                         {(() => {
+                const q = partnerSearch.trim().toLowerCase();
+                const filtreActif = q.length > 0;
+                const cles = (p) => [p.commercial || "Sans commercial", p.departement || "Sans département"];
+                const vivants = data.partners.filter(p => !p.deleted).filter(p =>
+                  !filtreActif || `${p.firstName || ""} ${p.name || ""} ${p.company || ""} ${p.ville || ""} ${p.email || ""}`.toLowerCase().includes(q)
+                );
+                const tri = vivants.slice().sort((a, b) => {
+                  const [ca, da] = cles(a), [cb, db] = cles(b);
+                  if (ca !== cb) return ca.localeCompare(cb);
+                  if (da !== db) return da.localeCompare(db, undefined, { numeric: true });
+                  return (a.name || "").localeCompare(b.name || "");
+                });
+                const lignes = [];
+                let comCourant = null, depCourant = null;
+                for (const p of tri) {
+                  const [com, dep] = cles(p);
+                  const cleCom = "pcom:" + com;
+                  const cleDep = "pdep:" + com + ":" + dep;
+                  if (com !== comCourant) {
+                    comCourant = com; depCourant = null;
+                    lignes.push({ __header: "commercial", id: cleCom, nom: com, nb: tri.filter(x => cles(x)[0] === com).length });
+                  }
+                  if (!filtreActif && collapsed.has(cleCom)) continue;
+                  if (dep !== depCourant) {
+                    depCourant = dep;
+                    lignes.push({ __header: "departement", id: cleDep, nom: dep, nb: tri.filter(x => cles(x)[0] === com && cles(x)[1] === dep).length });
+                  }
+                  if (!filtreActif && collapsed.has(cleDep)) continue;
+                  lignes.push(p);
+                }
+                return lignes;
+              })().map(p => p.__header ? (
+                p.__header === "commercial" ? (
+                  <button key={p.id} onClick={() => toggleFolder(p.id)}
+                    className="w-full flex items-center justify-between px-5 py-3.5 rounded-xl fa-bg-pink hover:brightness-95 transition">
+                    <div className="flex items-center gap-3">
+                      {collapsed.has(p.id) ? <Folder className="fa-navy" size={20} /> : <FolderOpen className="fa-navy" size={20} />}
+                      <span className="font-display font-bold fa-navy">{commercialLabel(p.nom)}</span>
+                      <span className="text-xs text-teal-900/70">{p.nb} partenaire{p.nb > 1 ? "s" : ""}</span>
+                    </div>
+                    <ChevronDown size={16} className={`fa-navy transition-transform ${collapsed.has(p.id) ? "" : "rotate-180"}`} />
+                  </button>
+                ) : (
+                  <button key={p.id} onClick={() => toggleFolder(p.id)}
+                    className="w-full flex items-center justify-between pl-10 pr-5 py-2.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-50 transition">
+                    <div className="flex items-center gap-2">
+                      {collapsed.has(p.id) ? <Folder className="fa-teal-text" size={16} /> : <FolderOpen className="fa-teal-text" size={16} />}
+                      <span className="text-sm font-semibold fa-navy">{p.nom === "Sans département" ? p.nom : `Département ${p.nom}`}</span>
+                      <span className="text-xs text-gray-400">{p.nb}</span>
+                    </div>
+                    <ChevronDown size={14} className={`text-gray-400 transition-transform ${collapsed.has(p.id) ? "" : "rotate-180"}`} />
+                  </button>
+                )
+              ) : (
                 <div key={p.id} className={`bg-white border rounded-xl px-5 py-4 ${p.active === false ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
                   {editingId === p.id ? (
                     <div>
