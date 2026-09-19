@@ -75,6 +75,38 @@ function purgeAncienneSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
 }
 
+// =============================================================================
+// APPAREIL DE CONFIANCE
+//
+// Permet de ne pas redemander l'Authenticator à chaque rechargement, mais
+// UNIQUEMENT sur les machines que la personne a explicitement désignées, en
+// cochant une case. Rien n'est mémorisé sans ce geste : sur un ordinateur
+// tiers, le second facteur reste exigé.
+//
+// La marque est liée au compte : si quelqu'un d'autre se connecte sur cette
+// machine, elle ne lui sert à rien. Elle expire au bout de 30 jours.
+// =============================================================================
+const APPAREIL_KEY = "adp:appareilConnu";
+const APPAREIL_DUREE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function cleAppareil(kind, account) {
+  return kind === "admin" ? "admin:" + (account?.email || "") : "mandataire:" + (account?.id || "");
+}
+function appareilReconnu(cle) {
+  try {
+    const brut = localStorage.getItem(APPAREIL_KEY);
+    if (!brut) return false;
+    const marque = JSON.parse(brut);
+    return !!marque && marque.cle === cle && typeof marque.jusqu === "number" && Date.now() < marque.jusqu;
+  } catch (e) { return false; }
+}
+function memoriserAppareil(cle) {
+  try { localStorage.setItem(APPAREIL_KEY, JSON.stringify({ cle, jusqu: Date.now() + APPAREIL_DUREE_MS })); } catch (e) { /* ignore */ }
+}
+function oublierAppareil() {
+  try { localStorage.removeItem(APPAREIL_KEY); } catch (e) { /* ignore */ }
+}
+
 // Adresse de la fonction serveur qui crée ou réinitialise un accès.
 const URL_ACTIVATION = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/activer-compte`;
 
@@ -588,14 +620,32 @@ export default function App() {
     if (roleResolu.current === authUser.id) return;
     roleResolu.current = authUser.id;
 
+    // Le second facteur n'est sauté que si TROIS conditions sont réunies :
+    // il est déjà configuré, la personne a coché « se souvenir » sur CETTE
+    // machine, et la marque n'a pas expiré.
+    const passeLeSecondFacteur = (kind, compte) =>
+      !!(compte?.totpEnabled && compte?.totpSecret && appareilReconnu(cleAppareil(kind, compte)));
+
     if (emailConnecte && emailConnecte === (data.settings?.admin?.email || "").trim().toLowerCase()) {
-      setPendingAuth({ kind: "admin", account: data.settings.admin });
+      const adm = data.settings.admin;
+      if (passeLeSecondFacteur("admin", adm)) {
+        setCurrentAdmin(true); setView("adminDash");
+        updateAdmin({ lastLoginAt: Date.now() });
+        sauvegardeAuto(data);
+      } else {
+        setPendingAuth({ kind: "admin", account: adm });
+      }
       return;
     }
     const m = data.mandataires.find(x => !x.deleted && (x.email || "").trim().toLowerCase() === emailConnecte);
     if (m) {
       if (m.active === false) { deconnexion("desactive"); return; }
-      setPendingAuth({ kind: "mandataire", account: m });
+      if (passeLeSecondFacteur("mandataire", m)) {
+        setCurrentMandataire(m); setView("mandataireDash");
+        updateMandataire(m.id, { lastLoginAt: Date.now() });
+      } else {
+        setPendingAuth({ kind: "mandataire", account: m });
+      }
       return;
     }
     const p = data.partners.find(x => !x.deleted && (x.email || "").trim().toLowerCase() === emailConnecte);
@@ -1638,8 +1688,30 @@ function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel })
   const [recoveryCodeInput, setRecoveryCodeInput] = useState("");
   const [useRecoveryCode, setUseRecoveryCode] = useState(false);
   const [generatedRecoveryCodes, setGeneratedRecoveryCodes] = useState([]);
+  const [memoriser, setMemoriser] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Décochée par défaut, volontairement : sur une machine qui n'est pas la
+  // sienne, ne rien faire est le comportement sûr.
+  const cle = cleAppareil(kind, account);
+  function terminer() {
+    if (memoriser) memoriserAppareil(cle); else oublierAppareil();
+    onDone();
+  }
+
+  const caseAppareil = (
+    <label className="flex items-start gap-2 text-xs text-gray-500 mb-4 cursor-pointer select-none">
+      <input type="checkbox" checked={memoriser} onChange={e => setMemoriser(e.target.checked)}
+        className="mt-0.5 accent-teal-600" />
+      <span>
+        Se souvenir de cet appareil pendant 30 jours.
+        <span className="block text-gray-400">
+          À ne cocher que sur vos propres machines — le mot de passe restera demandé, pas le code.
+        </span>
+      </span>
+    </label>
+  );
 
   async function confirmSetup() {
     setBusy(true); setError("");
@@ -1661,13 +1733,13 @@ function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel })
         if (!match) { setError("Code de récupération invalide ou déjà utilisé."); return; }
         const updatedCodes = account.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
         await onUpdateAccount({ recoveryCodes: updatedCodes, lastLoginAt: Date.now() });
-        onDone();
+        terminer();
         return;
       }
       const ok = await verifyTotp(account.totpSecret, code);
       if (!ok) { setError("Code incorrect."); return; }
       await onUpdateAccount({ lastLoginAt: Date.now() });
-      onDone();
+      terminer();
     } finally { setBusy(false); }
   }
 
@@ -1701,6 +1773,7 @@ function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel })
               placeholder="000000" inputMode="numeric" autoFocus
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            {caseAppareil}
             <button onClick={confirmSetup} disabled={busy || code.length !== 6}
               className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
               {busy ? "Vérification…" : "Activer et accéder"}
@@ -1720,7 +1793,7 @@ function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel })
                 <div key={rc.code} className="font-mono text-sm fa-navy text-center">{rc.code}</div>
               ))}
             </div>
-            <button onClick={onDone} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">
+            <button onClick={terminer} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">
               J'ai noté mes codes — continuer
             </button>
           </>
@@ -1743,6 +1816,7 @@ function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel })
                 className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             )}
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            {caseAppareil}
             <button onClick={confirmVerify} disabled={busy || (useRecoveryCode ? recoveryCodeInput.trim().length < 9 : code.length !== 6)}
               className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
               {busy ? "Vérification…" : "Accéder"}
