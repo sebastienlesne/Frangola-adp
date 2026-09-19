@@ -5533,9 +5533,6 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                 <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
               </div>
 
-              <ProductionDuMois data={data} commerciaux={COMMERCIAUX}
-                onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
-
               <div className="grid sm:grid-cols-4 gap-4">
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
                   <div className="text-xs text-gray-400 mb-1">Dossiers actifs</div>
@@ -5583,40 +5580,6 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                   ✅ Rien ne nécessite d'action pour l'instant.
                 </div>
               )}
-
-              <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                <div className="font-display font-semibold fa-navy mb-3">Dernières connexions</div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS["Sébastien"] }}>Sébastien</span>
-                    <span className="text-gray-500 text-xs">{data.settings.admin.lastLoginAt ? `${fmtDate(data.settings.admin.lastLoginAt)} à ${new Date(data.settings.admin.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
-                  </div>
-                  {data.mandataires.map(m => (
-                    <div key={m.id} className="flex items-center justify-between text-sm">
-                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{commercialLabel(m.name)}</span>
-                      <span className="text-gray-500 text-xs">{m.lastLoginAt ? `${fmtDate(m.lastLoginAt)} à ${new Date(m.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                <div className="font-display font-semibold fa-navy mb-3">Journal d'activité</div>
-                {(!data.activityLog || data.activityLog.length === 0) ? (
-                  <div className="text-sm text-gray-400">Aucune action enregistrée pour l'instant.</div>
-                ) : (
-                  <div className="space-y-2 max-h-80 overflow-y-auto">
-                    {data.activityLog.slice(0, 30).map(entry => (
-                      <div key={entry.id} className="flex items-start justify-between gap-2 text-sm">
-                        <span className="text-gray-600">
-                          <strong className="fa-navy" style={{ color: COMMERCIAL_COLORS[entry.actor] }}>{entry.actor}</strong> {entry.message}
-                        </span>
-                        <span className="text-gray-400 text-xs whitespace-nowrap">{fmtDate(entry.at)} {new Date(entry.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
 
               <button onClick={() => setTab("dossiers")} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">
                 Voir tous les dossiers →
@@ -7023,6 +6986,41 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               <ProjectionCA data={data} />
               <ObjectifsCA data={data} />
 
+              <div className="bg-white border border-gray-200 rounded-2xl p-5">
+                <div className="font-display font-semibold fa-navy mb-3">Dernières connexions</div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS["Sébastien"] }}>Sébastien</span>
+                    <span className="text-gray-500 text-xs">{data.settings.admin.lastLoginAt ? `${fmtDate(data.settings.admin.lastLoginAt)} à ${new Date(data.settings.admin.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
+                  </div>
+                  {data.mandataires.map(m => (
+                    <div key={m.id} className="flex items-center justify-between text-sm">
+                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{commercialLabel(m.name)}</span>
+                      <span className="text-gray-500 text-xs">{m.lastLoginAt ? `${fmtDate(m.lastLoginAt)} à ${new Date(m.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white border border-gray-200 rounded-2xl p-5">
+                <div className="font-display font-semibold fa-navy mb-3">Journal d'activité</div>
+                {(!data.activityLog || data.activityLog.length === 0) ? (
+                  <div className="text-sm text-gray-400">Aucune action enregistrée pour l'instant.</div>
+                ) : (
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {data.activityLog.slice(0, 30).map(entry => (
+                      <div key={entry.id} className="flex items-start justify-between gap-2 text-sm">
+                        <span className="text-gray-600">
+                          <strong className="fa-navy" style={{ color: COMMERCIAL_COLORS[entry.actor] }}>{entry.actor}</strong> {entry.message}
+                        </span>
+                        <span className="text-gray-400 text-xs whitespace-nowrap">{fmtDate(entry.at)} {new Date(entry.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+
               <div className="flex flex-wrap items-center gap-2">
                 <select value={statsDepartementFilter} onChange={e => setStatsDepartementFilter(e.target.value)}
                   className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500">
@@ -7350,8 +7348,14 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
           <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} />
         )}
         {tab === "challenge" && (
-          <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
-            onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
+          <div className="space-y-6">
+            {/* Les objectifs se modifient dans le tableau ci-dessous, pas ici :
+                un seul endroit pour une même valeur. */}
+            <ProductionDuMois data={data} commerciaux={COMMERCIAUX}
+              onSetGoals={onSetChallengeGoals} canEdit={false} />
+            <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
+              onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
+          </div>
         )}
         {tab === "mandataires" && isFullAdmin && (
           <div>
