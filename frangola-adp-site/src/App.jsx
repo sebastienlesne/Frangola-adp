@@ -165,6 +165,17 @@ function fmtSize(bytes) {
   if (!bytes) return "";
   return (bytes / 1024 / 1024).toFixed(1) + " Mo";
 }
+// Ancienneté lisible d'un élément en attente : c'est l'information qui dit
+// s'il faut s'en occuper maintenant ou non.
+function joursDepuis(ts) {
+  if (!ts) return "";
+  const h = Math.floor((Date.now() - ts) / 3600000);
+  if (h < 1) return "à l'instant";
+  if (h < 24) return `depuis ${h} h`;
+  const j = Math.floor(h / 24);
+  return `depuis ${j} j`;
+}
+
 function fmtEuro(n) {
   return (n || 0).toLocaleString("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 }
@@ -1832,6 +1843,82 @@ function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel })
   );
 }
 
+const SITE_URL = "https://frangola-adp.fr";
+
+// =============================================================================
+// MESSAGE D'INVITATION
+//
+// Prépare le courrier d'accueil qu'on envoie à un nouveau partenaire ou à un
+// nouveau mandataire avec son code d'activation. Le contenu diffère : un
+// mandataire doit en plus configurer son application d'authentification.
+// =============================================================================
+function messageInvitation(cible, expediteur, genre) {
+  const prenom = (cible.firstName || "").trim();
+  const bonjour = prenom ? `Bonjour ${prenom},` : "Bonjour,";
+  const email = (cible.email || "").trim();
+  const code = cible.code || "—";
+
+  if (genre === "mandataire") {
+    return {
+      sujet: "Votre accès à Frangola ADP",
+      corps: [
+        bonjour,
+        "",
+        "Votre accès à Frangola ADP est ouvert. Vous y suivrez les dossiers d'assurance de prêt, vos partenaires et leur production.",
+        "",
+        "Pour l'activer :",
+        "",
+        `1. Rendez-vous sur ${SITE_URL}`,
+        "2. En haut à droite, cliquez sur « Espace Frangola »",
+        "3. Cliquez sur « Première connexion, ou mot de passe oublié ? »",
+        `4. Saisissez votre adresse email (${email}), le code ci-dessous, et choisissez votre mot de passe`,
+        "5. Configurez ensuite la double authentification avec Google Authenticator, Authy ou équivalent — l'écran vous guide pas à pas",
+        "",
+        `Votre code d'activation : ${code}`,
+        "",
+        "Ce code est personnel, à usage unique, et valable 30 jours.",
+        "Notez bien vos codes de récupération à la fin de la configuration : ils sont affichés une seule fois.",
+        "",
+        "Une question ? Répondez simplement à ce message.",
+        "",
+        "À très vite,",
+        expediteur || "Sébastien",
+        "Frangola — Assurance de prêt",
+      ].join("\n"),
+    };
+  }
+
+  return {
+    sujet: "Bienvenue chez Frangola — vos accès",
+    corps: [
+      bonjour,
+      "",
+      "Bienvenue chez Frangola, et merci de votre confiance.",
+      "",
+      "Votre espace partenaire est ouvert. Vous y déposerez vos dossiers d'assurance de prêt, vous suivrez leur avancement en temps réel, et vous y retrouverez vos bordereaux de commission.",
+      "",
+      "Pour l'activer, trois minutes :",
+      "",
+      `1. Rendez-vous sur ${SITE_URL}`,
+      "2. Cliquez sur « Espace partenaire »",
+      "3. Cliquez sur « Première connexion, ou mot de passe oublié ? »",
+      `4. Saisissez votre adresse email (${email}), le code ci-dessous, et choisissez votre mot de passe`,
+      "",
+      `Votre code d'activation : ${code}`,
+      "",
+      "Ce code est personnel, à usage unique, et valable 30 jours.",
+      "",
+      "Une fois connecté, vous pourrez déposer votre premier dossier immédiatement. Nous le prenons en charge sous 24 heures.",
+      "",
+      "Une question ? Répondez simplement à ce message, ou appelez-moi.",
+      "",
+      "À très vite,",
+      expediteur || "Sébastien",
+      "Frangola — Assurance de prêt",
+    ].join("\n"),
+  };
+}
+
 // =============================================================================
 // CODE D'ACTIVATION — ce qu'un partenaire ou un mandataire doit recevoir pour
 // créer son mot de passe la première fois, ou le reprendre s'il l'a perdu.
@@ -1839,9 +1926,23 @@ function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel })
 // Le mot de passe n'apparaît nulle part : il est détenu par Supabase sous
 // forme d'empreinte. Personne, pas même l'administrateur, ne peut le lire.
 // =============================================================================
-function BlocAcces({ cible, onReinitialiser }) {
+function BlocAcces({ cible, onReinitialiser, expediteur, genre = "partenaire" }) {
   const [copie, setCopie] = useState(false);
+  const [copieMsg, setCopieMsg] = useState(false);
   const [confirme, setConfirme] = useState(false);
+
+  function preparerEmail() {
+    const { sujet, corps } = messageInvitation(cible, expediteur, genre);
+    const lien = `mailto:${encodeURIComponent(cible.email || "")}?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(corps)}`;
+    window.location.href = lien;
+  }
+  function copierMessage() {
+    const { corps } = messageInvitation(cible, expediteur, genre);
+    try {
+      navigator.clipboard.writeText(corps);
+      setCopieMsg(true); setTimeout(() => setCopieMsg(false), 2000);
+    } catch (e) { /* presse-papier indisponible */ }
+  }
   // Le code ne s'affiche que tant qu'il sert : première connexion en attente,
   // ou accès réinitialisé par l'administrateur. Une fois consommé, il est
   // effacé côté serveur et seul le bouton de réinitialisation subsiste.
@@ -1864,6 +1965,20 @@ function BlocAcces({ cible, onReinitialiser }) {
             className="font-mono font-bold tracking-widest hover:underline">{cible.code}</button>
           {copie && <span className="text-emerald-700">copié</span>}
         </span>
+      )}
+      {codeUtile && cible.email && (
+        <button onClick={preparerEmail}
+          title="Ouvre votre messagerie avec le message d'accueil déjà rédigé"
+          className="text-xs font-semibold bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200 px-2.5 py-1 rounded-lg transition">
+          ✉ Préparer l'email
+        </button>
+      )}
+      {codeUtile && (
+        <button onClick={copierMessage}
+          title="Copie le message d'accueil complet, à coller dans un SMS ou WhatsApp"
+          className="text-xs font-semibold bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200 px-2.5 py-1 rounded-lg transition">
+          {copieMsg ? "message copié" : "Copier le message"}
+        </button>
       )}
       {!codeUtile && (
         confirme ? (
@@ -2582,7 +2697,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                           </div>
                           <div className="fa-bg-gold rounded-xl p-4">
                             <div className="text-xs text-teal-900/70">Vos gains de parrainage</div>
-                            <div className="font-display text-xl font-bold fa-navy">{fmtEuro(bilan.gainTotal)}</div>
+                            <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(bilan.gainTotal)}</div>
                           </div>
                         </div>
                         <div className="space-y-2">
@@ -2596,7 +2711,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                                   {f.dossiers} dossier{f.dossiers !== 1 ? "s" : ""} · CA généré {fmtEuro(f.ca)}
                                 </div>
                               </div>
-                              <span className="text-sm font-bold fa-bg-gold fa-navy px-2.5 py-1 rounded-full">{fmtEuro(f.gain)}</span>
+                              <span className="text-sm font-bold fa-bg-gold fa-navy px-2.5 py-1 rounded-full">{fmtEuroPrecis(f.gain)}</span>
                             </div>
                           ))}
                         </div>
@@ -3271,15 +3386,15 @@ function VersementsParrainage({ data, onAddVersement }) {
       <div className="grid sm:grid-cols-3 gap-3 mb-4">
         <div className="fa-bg-offwhite rounded-xl p-4">
           <div className="text-xs text-gray-400">Dû depuis le début</div>
-          <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalDu)}</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(totalDu)}</div>
         </div>
         <div className="fa-bg-offwhite rounded-xl p-4">
           <div className="text-xs text-gray-400">Déjà versé</div>
-          <div className="font-display text-xl font-bold text-emerald-600">{fmtEuro(totalVerse)}</div>
+          <div className="font-display text-xl font-bold text-emerald-600">{fmtEuroPrecis(totalVerse)}</div>
         </div>
         <div className="fa-bg-gold rounded-xl p-4">
           <div className="text-xs text-teal-900/70">Reste à payer</div>
-          <div className="font-display text-xl font-bold fa-navy">{fmtEuro(Math.max(0, totalDu - totalVerse))}</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(Math.max(0, totalDu - totalVerse))}</div>
         </div>
       </div>
 
@@ -3297,9 +3412,9 @@ function VersementsParrainage({ data, onAddVersement }) {
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs text-gray-500">Dû {fmtEuro(x.gainTotal)} · versé {fmtEuro(x.verse)}</span>
+                  <span className="text-xs text-gray-500">Dû {fmtEuroPrecis(x.gainTotal)} · versé {fmtEuroPrecis(x.verse)}</span>
                   <span className={`text-sm font-bold px-2.5 py-1 rounded-full ${x.reste > 0.5 ? "fa-bg-gold fa-navy" : "bg-emerald-50 text-emerald-700"}`}>
-                    {x.reste > 0.5 ? `à verser ${fmtEuro(x.reste)}` : "à jour"}
+                    {x.reste > 0.5 ? `à verser ${fmtEuroPrecis(x.reste)}` : "à jour"}
                   </span>
                 </div>
               </div>
@@ -3341,7 +3456,7 @@ function VersementsParrainage({ data, onAddVersement }) {
                           {clientName(d)} <span className="text-gray-400">— via {filleul.firstName ? `${filleul.firstName} ${up(filleul.name)}` : up(filleul.name)}</span>
                         </span>
                         <span className="fa-navy">
-                          CA {fmtEuro(d.caAmount || 0)} → prime {fmtEuro((d.caAmount || 0) * PARRAINAGE_TAUX)}
+                          CA {fmtEuroPrecis(d.caAmount || 0)} → prime {fmtEuroPrecis((d.caAmount || 0) * PARRAINAGE_TAUX)}
                         </span>
                       </div>
                     ))}
@@ -3395,7 +3510,7 @@ function FacturesPartenaires({ data, onSetStatut }) {
         Factures partenaires
         {attente.length > 0 && (
           <span className="ml-2 fa-bg-gold fa-navy text-xs font-bold px-2 py-0.5 rounded-full">
-            {attente.length} à régler · {fmtEuro(totalDu)}
+            {attente.length} à régler · {fmtEuroPrecis(totalDu)}
           </span>
         )}
       </div>
@@ -3776,7 +3891,17 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
       </>
     );
   }
+  const [fileToutVoir, setFileToutVoir] = useState(false);
   const [viewingPartnerId, setViewingPartnerId] = useState(null);
+  // Fiches dont la liste des filleuls est dépliée (clic sur la pastille dorée).
+  const [filleulsOuverts, setFilleulsOuverts] = useState(new Set());
+  function toggleFilleuls(id) {
+    setFilleulsOuverts(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
   const [viewingPartnerTab, setViewingPartnerTab] = useState("analytique");
   async function confirmDelete(id) {
     await onDeletePartner(id);
@@ -3946,8 +4071,68 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
         {tab === "accueil" && (() => {
           const priorityItems = liveDossiers
             .map(d => ({ d, reasons: actionReasons(d) }))
-            .filter(x => x.reasons.length > 0)
-            .sort((a, b) => b.reasons.length - a.reasons.length);
+            .filter(x => x.reasons.length > 0);
+
+          // File d'attente unique : tout ce qui attend une action de Frangola,
+          // quelle qu'en soit la nature, trié du plus ancien au plus récent.
+          // Sans cela l'information reste éparpillée entre quatre onglets.
+          const nomPartenaire = (id) => {
+            const x = data.partners.find(p => p.id === id);
+            return x ? (x.firstName ? `${x.firstName} ${up(x.name)}` : up(x.name)) : "—";
+          };
+
+          const fileAttente = [
+            ...priorityItems.map(({ d, reasons }) => ({
+              cle: "d-" + d.id,
+              categorie: "Dossier",
+              couleur: "bg-teal-100 text-teal-800",
+              titre: clientName(d),
+              detail: reasons.join(" · "),
+              depuis: d.createdAt,
+              aller: () => { setTab("dossiers"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); },
+            })),
+            ...(data.parrainages || []).filter(x => x.statut === "en_attente").map(x => ({
+              cle: "p-" + x.id,
+              categorie: "Parrainage",
+              couleur: "bg-amber-100 text-amber-800",
+              titre: `${x.prenom || ""} ${up(x.nom || "")}`.trim() || "Filleul sans nom",
+              detail: `présenté par ${nomPartenaire(x.parrainId)} — à valider`,
+              depuis: x.at,
+              aller: () => setTab("partenaires"),
+            })),
+            ...data.partners.filter(p => !p.deleted).flatMap(p =>
+              (p.factures || []).filter(f => f.statut === "Déposée").map(f => ({
+                cle: "f-" + f.id,
+                categorie: "Facture",
+                couleur: "bg-violet-100 text-violet-800",
+                titre: nomPartenaire(p.id),
+                detail: `facture de ${fmtEuroPrecis(f.montant || 0)} à régler`,
+                depuis: f.at,
+                aller: () => setTab("partenaires"),
+              }))),
+            ...data.partners.filter(p => !p.deleted && filleulsDe(p.id).length > 0).map(p => {
+              const du = bilanParrainage(p.id).gainTotal;
+              const verse = (p.parrainageVerse || 0) + (p.parrainageVersements || []).reduce((sm, v) => sm + (v.montant || 0), 0);
+              return { p, reste: du - verse };
+            }).filter(x => x.reste > 0.5).map(x => ({
+              cle: "v-" + x.p.id,
+              categorie: "Parrainage",
+              couleur: "bg-amber-100 text-amber-800",
+              titre: nomPartenaire(x.p.id),
+              detail: `rétrocession de ${fmtEuroPrecis(x.reste)} à verser`,
+              depuis: x.p.createdAt,
+              aller: () => setTab("partenaires"),
+            })),
+            ...data.partners.filter(p => !p.deleted && !p.email).map(p => ({
+              cle: "i-" + p.id,
+              categorie: "Fiche",
+              couleur: "bg-gray-200 text-gray-700",
+              titre: nomPartenaire(p.id),
+              detail: "email manquant — accès impossible",
+              depuis: p.createdAt,
+              aller: () => setTab("partenaires"),
+            })),
+          ].sort((a, b) => (a.depuis || 0) - (b.depuis || 0));
           const now = new Date();
           const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
           const dossiersActifs = liveDossiers.filter(d => !["KO", "Payé"].includes(d.status)).length;
@@ -3980,22 +4165,27 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                 </div>
               </div>
 
-              {priorityItems.length > 0 ? (
+              {fileAttente.length > 0 ? (
                 <div className="border border-red-200 bg-red-50 rounded-2xl p-4">
-                  <div className="flex items-center gap-2 font-display font-semibold text-red-800 mb-3">
-                    <AlertCircle size={16} /> {priorityItems.length} dossier{priorityItems.length > 1 ? "s" : ""} nécessite{priorityItems.length > 1 ? "nt" : ""} une action
+                  <div className="flex items-center gap-2 font-display font-semibold text-red-800 mb-1">
+                    <AlertCircle size={16} /> {fileAttente.length} chose{fileAttente.length > 1 ? "s" : ""} à traiter
                   </div>
+                  <div className="text-xs text-red-700/70 mb-3">La plus ancienne en premier.</div>
                   <div className="space-y-1.5">
-                    {priorityItems.slice(0, 6).map(({ d, reasons }) => (
-                      <button key={d.id} onClick={() => { setTab("dossiers"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); }}
-                        className="w-full text-left text-sm bg-white hover:bg-red-100/50 border border-red-100 rounded-lg px-3 py-2 transition flex items-center justify-between gap-2 flex-wrap">
-                        <span className="fa-navy font-bold">{clientName(d)}</span>
-                        <span className="text-red-700 text-xs">{reasons.join(" · ")}</span>
+                    {fileAttente.slice(0, fileToutVoir ? fileAttente.length : 8).map(item => (
+                      <button key={item.cle} onClick={item.aller}
+                        className="w-full text-left text-sm bg-white hover:bg-red-100/50 border border-red-100 rounded-lg px-3 py-2 transition flex items-center gap-2 flex-wrap">
+                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${item.couleur}`}>{item.categorie}</span>
+                        <span className="fa-navy font-bold">{item.titre}</span>
+                        <span className="text-red-700 text-xs">{item.detail}</span>
+                        <span className="ml-auto text-xs text-gray-400 shrink-0">{joursDepuis(item.depuis)}</span>
                       </button>
                     ))}
                   </div>
-                  {priorityItems.length > 6 && (
-                    <button onClick={() => setTab("dossiers")} className="text-xs fa-teal-text hover:underline mt-3">Voir les {priorityItems.length - 6} autres →</button>
+                  {fileAttente.length > 8 && (
+                    <button onClick={() => setFileToutVoir(v => !v)} className="text-xs fa-teal-text hover:underline mt-3">
+                      {fileToutVoir ? "Réduire la liste" : `Voir les ${fileAttente.length - 8} autres →`}
+                    </button>
                   )}
                 </div>
               ) : (
@@ -4825,8 +5015,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <input value={newPartnerTelephone} onChange={e => setNewPartnerTelephone(e.target.value)} type="tel" placeholder="Téléphone"
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                <input value={newPartnerSiret} onChange={e => setNewPartnerSiret(e.target.value.replace(/\D/g, "").slice(0, 14))} inputMode="numeric" placeholder="N° SIRET (14 chiffres)"
-                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                {/* Un apporteur hors immobilier est un particulier : il n'a pas de SIRET. */}
+                {newPartnerFlatFee === "" && (
+                  <input value={newPartnerSiret} onChange={e => setNewPartnerSiret(e.target.value.replace(/\D/g, "").slice(0, 14))} inputMode="numeric" placeholder="N° SIRET (14 chiffres)"
+                    className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                )}
                 <select value={newPartnerCommercial} onChange={e => setNewPartnerCommercial(e.target.value)}
                   style={{ backgroundColor: COMMERCIAL_COLORS[newPartnerCommercial], color: "#fff" }}
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-teal-500">
@@ -4834,7 +5027,8 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                 </select>
               </div>
               <label className="flex items-center gap-2 text-sm text-gray-600 mb-4">
-                <input type="checkbox" checked={newPartnerFlatFee !== ""} onChange={e => setNewPartnerFlatFee(e.target.checked ? "100" : "")}
+                <input type="checkbox" checked={newPartnerFlatFee !== ""}
+                  onChange={e => { setNewPartnerFlatFee(e.target.checked ? "100" : ""); if (e.target.checked) setNewPartnerSiret(""); }}
                   className="rounded border-gray-300" />
                 Hors immobilier (rémunéré au forfait fixe, pas en % du CA)
               </label>
@@ -4973,8 +5167,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                         <input value={editForm.telephone} onChange={e => setEditForm(f => ({ ...f, telephone: e.target.value }))} type="tel" placeholder="Téléphone"
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                        <input value={editForm.siret} onChange={e => setEditForm(f => ({ ...f, siret: e.target.value.replace(/\D/g, "").slice(0, 14) }))} inputMode="numeric" placeholder="N° SIRET (14 chiffres)"
-                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        {/* Idem en modification : cocher « hors immobilier » retire le SIRET. */}
+                        {editForm.flatFee === "" && (
+                          <input value={editForm.siret} onChange={e => setEditForm(f => ({ ...f, siret: e.target.value.replace(/\D/g, "").slice(0, 14) }))} inputMode="numeric" placeholder="N° SIRET (14 chiffres)"
+                            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        )}
                         <select value={editForm.commercial} onChange={e => setEditForm(f => ({ ...f, commercial: e.target.value }))}
                           style={{ backgroundColor: COMMERCIAL_COLORS[editForm.commercial], color: "#fff" }}
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-teal-500">
@@ -4991,7 +5188,8 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         </select>
                       </div>
                       <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
-                        <input type="checkbox" checked={editForm.flatFee !== ""} onChange={e => setEditForm(f => ({ ...f, flatFee: e.target.checked ? "100" : "" }))}
+                        <input type="checkbox" checked={editForm.flatFee !== ""}
+                          onChange={e => setEditForm(f => ({ ...f, flatFee: e.target.checked ? "100" : "", siret: e.target.checked ? "" : f.siret }))}
                           className="rounded border-gray-300" />
                         Hors immobilier (rémunéré au forfait fixe, pas en % du CA)
                       </label>
@@ -5013,12 +5211,17 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         <div className="font-medium fa-navy flex items-center gap-2">
                           <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
                           {p.flatFee != null && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Forfait {p.flatFee}€</span>}
-                          {filleulsDe(p.id).length > 0 && (
-                            <span className="text-xs font-semibold fa-bg-gold fa-navy px-2 py-0.5 rounded-full"
-                              title={"Filleuls : " + filleulsDe(p.id).map(f => f.firstName ? `${f.firstName} ${up(f.name)}` : up(f.name)).join(", ")}>
-                              🤝 Parrain de {filleulsDe(p.id).length}
-                            </span>
-                          )}
+                          {filleulsDe(p.id).length > 0 && (() => {
+                            const n = filleulsDe(p.id).length;
+                            return (
+                              <button onClick={() => toggleFilleuls(p.id)}
+                                title="Voir les filleuls"
+                                className="text-xs font-semibold fa-bg-gold fa-navy px-2 py-0.5 rounded-full hover:brightness-95 transition inline-flex items-center gap-1">
+                                🤝 {n} parrainage{n > 1 ? "s" : ""}
+                                <ChevronDown size={12} className={filleulsOuverts.has(p.id) ? "rotate-180 transition" : "transition"} />
+                              </button>
+                            );
+                          })()}
                           {!p.email && (
                             <span className="text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full">
                               ✎ Fiche à compléter
@@ -5038,11 +5241,37 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         </div>
                         <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">
                           {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
-                          {filleulsDe(p.id).length > 0 && (
-                            <span className="w-full text-xs text-teal-700">
-                              Filleuls : {filleulsDe(p.id).map(f => f.firstName ? `${f.firstName} ${up(f.name)}` : up(f.name)).join(" · ")}
-                            </span>
-                          )}
+                          {filleulsOuverts.has(p.id) && filleulsDe(p.id).length > 0 && (() => {
+                            const bilan = bilanParrainage(p.id);
+                            return (
+                              <div className="w-full mt-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                <div className="text-xs font-semibold fa-navy mb-2">
+                                  Filleuls de {p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}
+                                </div>
+                                <div className="space-y-1.5">
+                                  {filleulsDe(p.id).map(f => {
+                                    const ca = caGenerePar(f.id);
+                                    return (
+                                      <div key={f.id} className="flex items-baseline justify-between gap-3 flex-wrap text-xs">
+                                        <span className="fa-navy font-medium">
+                                          {f.firstName ? `${f.firstName} ${up(f.name)}` : up(f.name)}
+                                          {f.company && <span className="text-gray-500 font-normal"> · {f.company}</span>}
+                                          {f.active === false && <span className="text-gray-400 font-normal"> · inactif</span>}
+                                        </span>
+                                        <span className="text-gray-500">
+                                          depuis le {fmtDate(f.createdAt)} · C.A. généré <strong className="fa-navy">{fmtEuroPrecis(ca)}</strong>
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <div className="mt-2 pt-2 border-t border-amber-200 text-xs fa-navy">
+                                  Rétrocession due à {p.firstName || up(p.name)} : <strong>{fmtEuroPrecis(bilan.gainTotal)}</strong>
+                                  <span className="text-gray-500"> (10 % de {fmtEuro(bilan.caTotal)})</span>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                         {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
                       </div>
@@ -5062,7 +5291,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
                           {p.email || "email manquant"} · {p.lastLoginAt ? `dernière connexion ${fmtDate(p.lastLoginAt)}` : "jamais connecté"}
                         </span>
-                        <BlocAcces cible={p} onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
+                        <BlocAcces cible={p} expediteur={viewerLabel} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
                         {confirmDeleteId === p.id ? (
                           <span className="flex items-center gap-1.5 text-xs">
                             <span className="text-red-700">Confirmer ?</span>
@@ -5110,7 +5339,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                             <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Dossiers KO</div><div className="font-display text-xl font-bold text-red-500">{ko.length}</div></div>
                             <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">CA généré (payé)</div><div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalCaP)}</div></div>
                             <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Dernière connexion</div><div className="font-display text-sm font-bold fa-navy">{p.lastLoginAt ? fmtDate(p.lastLoginAt) : "Jamais connecté"}</div></div>
-                            <div className="fa-bg-gold rounded-xl p-4 sm:col-span-3"><div className="text-xs text-teal-900/70">Rétrocession totale perçue par ce partenaire</div><div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalCommP)}</div></div>
+                            <div className="fa-bg-gold rounded-xl p-4 sm:col-span-3"><div className="text-xs text-teal-900/70">Rétrocession totale perçue par ce partenaire</div><div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(totalCommP)}</div></div>
                           </div>
                         )}
 
@@ -5656,7 +5885,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                     <div className="grid sm:grid-cols-2 gap-3 mb-4">
                       <div className="fa-bg-offwhite rounded-xl p-4">
                         <div className="text-xs text-gray-400">Coût du dispositif</div>
-                        <div className="font-display text-lg font-bold fa-navy">{fmtEuro(coutTotal)}</div>
+                        <div className="font-display text-lg font-bold fa-navy">{fmtEuroPrecis(coutTotal)}</div>
                         <div className="text-[11px] text-gray-400 mt-0.5">{Math.round(PARRAINAGE_TAUX * 100)} % reversés aux parrains</div>
                       </div>
                       <div className="fa-bg-offwhite rounded-xl p-4">
@@ -5676,7 +5905,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                                 {i + 1}. {x.p.firstName ? `${x.p.firstName} ${up(x.p.name)}` : up(x.p.name)}
                               </span>
                               <span className="text-xs text-gray-500">
-                                {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA {fmtEuro(x.caTotal)} · prime {fmtEuro(x.gainTotal)}
+                                {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA {fmtEuroPrecis(x.caTotal)} · prime {fmtEuroPrecis(x.gainTotal)}
                               </span>
                             </div>
                           ))}
@@ -5826,7 +6055,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           {m.email} · {m.lastLoginAt ? `dernière connexion ${fmtDate(m.lastLoginAt)}` : "jamais connecté"}
                         </div>
                         <div className="mt-1.5">
-                          <BlocAcces cible={m} onReinitialiser={() => reinitialiserAcces("mandataire", m.id)} />
+                          <BlocAcces cible={m} expediteur={viewerLabel} genre="mandataire" onReinitialiser={() => reinitialiserAcces("mandataire", m.id)} />
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
