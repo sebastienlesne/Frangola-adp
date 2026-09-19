@@ -208,6 +208,40 @@ function detecterDoublon(decl) {
 
   return { niveau, messages };
 }
+const PARRAINAGE_TAUX = 0.10;
+
+function filleulsDe(partnerId) {
+  if (!_colorDataRef || !partnerId) return [];
+  return _colorDataRef.partners.filter(p => !p.deleted && p.parrainId === partnerId);
+}
+
+function caGenerePar(partnerId) {
+  if (!_colorDataRef) return 0;
+  return _colorDataRef.dossiers
+    .filter(d => d.partnerId === partnerId && d.status === "Payé")
+    .reduce((s, d) => s + (d.caAmount || 0), 0);
+}
+
+function bilanParrainage(partnerId) {
+  const filleuls = filleulsDe(partnerId).map(f => {
+    const ca = caGenerePar(f.id);
+    const dossiers = (_colorDataRef?.dossiers || []).filter(d => d.partnerId === f.id).length;
+    return { partner: f, ca, dossiers, gain: ca * PARRAINAGE_TAUX };
+  });
+  return {
+    filleuls,
+    actifs: filleuls.filter(f => f.dossiers > 0).length,
+    caTotal: filleuls.reduce((s, f) => s + f.ca, 0),
+    gainTotal: filleuls.reduce((s, f) => s + f.gain, 0),
+  };
+}
+
+function nomParrain(partnerId) {
+  const p = _colorDataRef?.partners.find(x => x.id === partnerId);
+  if (!p) return null;
+  return p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+}
+
 function CoEmprunteurBadge({ d }) {
   if (!d.hasCoEmprunteur) return null;
   const full = `${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim();
@@ -541,7 +575,12 @@ export default function App() {
     })();
   }, []);
 
-    // Refuse d'écrire si les données ont changé depuis le chargement de la page.
+  // Numéro de version réellement écrit, mis à jour immédiatement après chaque
+  // enregistrement réussi. React met son état à jour de façon différée : s'y
+  // fier faisait refuser à tort la deuxième écriture d'une même action.
+  const revRef = useRef(null);
+
+  // Refuse d'écrire si les données ont changé depuis le chargement de la page.
   // Sans ce contrôle, deux personnes connectées en même temps s'écrasent
   // mutuellement : partenaire disparu, Authenticator réinitialisé, dossier perdu.
   async function saveData(next) {
@@ -553,7 +592,7 @@ export default function App() {
       setGlobalError("Impossible de vérifier les données — modification annulée.");
       return false;
     }
-    const revLocale = data?.rev ?? 0;
+    const revLocale = revRef.current ?? (data?.rev ?? 0);
     const revStockee = stocke?.rev ?? 0;
     if (stocke && revStockee !== revLocale) {
       setGlobalError("Ces données ont été modifiées ailleurs entre-temps. Rechargez la page avant de continuer — votre dernière saisie n'a pas été enregistrée.");
@@ -561,8 +600,14 @@ export default function App() {
     }
     const versionne = { ...next, rev: revLocale + 1 };
     setData(versionne);
-    try { await storage.set("adp:data", JSON.stringify(versionne), true); return true; }
-    catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); return false; }
+    try {
+      await storage.set("adp:data", JSON.stringify(versionne), true);
+      revRef.current = versionne.rev;
+      return true;
+    } catch (e) {
+      setGlobalError("Échec de l'enregistrement — réessaie.");
+      return false;
+    }
   }
 
   // Écrit en repartant TOUJOURS de l'état réellement stocké, jamais de la copie
@@ -581,8 +626,14 @@ export default function App() {
     if (!next) return false;
     const versionne = { ...next, rev: (base?.rev ?? 0) + 1 };
     setData(versionne);
-    try { await storage.set("adp:data", JSON.stringify(versionne), true); return true; }
-    catch (e) { setGlobalError("Échec de l'enregistrement — réessaie."); return false; }
+    try {
+      await storage.set("adp:data", JSON.stringify(versionne), true);
+      revRef.current = versionne.rev;
+      return true;
+    } catch (e) {
+      setGlobalError("Échec de l'enregistrement — réessaie.");
+      return false;
+    }
   }
   function withLog(nextData, message) {
     const actor = currentAdmin ? "Sébastien" : (currentMandataire?.firstName || currentMandataire?.name || "Inconnu");
@@ -2287,6 +2338,58 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                 )}
               </div>
 
+              {(() => {
+                const bilan = bilanParrainage(partner.id);
+                const monParrain = nomParrain(partner.parrainId);
+                if (bilan.filleuls.length === 0 && !monParrain) return null;
+                return (
+                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
+                    <div className="font-display font-semibold fa-navy mb-1">🤝 Mon parrainage</div>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Vous percevez {Math.round(PARRAINAGE_TAUX * 100)} % du chiffre d'affaires généré par les confrères que vous avez présentés.
+                    </p>
+                    {monParrain && (
+                      <div className="text-xs text-gray-400 mb-4">Vous avez été parrainé par {monParrain}.</div>
+                    )}
+                    {bilan.filleuls.length === 0 ? (
+                      <div className="text-sm text-gray-400">Vous n'avez pas encore de filleul.</div>
+                    ) : (
+                      <>
+                        <div className="grid sm:grid-cols-3 gap-3 mb-4">
+                          <div className="fa-bg-offwhite rounded-xl p-4">
+                            <div className="text-xs text-gray-400">Filleuls</div>
+                            <div className="font-display text-xl font-bold fa-navy">{bilan.filleuls.length}</div>
+                          </div>
+                          <div className="fa-bg-offwhite rounded-xl p-4">
+                            <div className="text-xs text-gray-400">Dont actifs</div>
+                            <div className="font-display text-xl font-bold text-emerald-600">{bilan.actifs}</div>
+                          </div>
+                          <div className="fa-bg-gold rounded-xl p-4">
+                            <div className="text-xs text-teal-900/70">Vos gains de parrainage</div>
+                            <div className="font-display text-xl font-bold fa-navy">{fmtEuro(bilan.gainTotal)}</div>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          {bilan.filleuls.slice().sort((a, b) => b.ca - a.ca).map(f => (
+                            <div key={f.partner.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
+                              <div>
+                                <div className="text-sm fa-navy font-bold">
+                                  {f.partner.firstName ? `${f.partner.firstName} ${up(f.partner.name)}` : up(f.partner.name)}
+                                </div>
+                                <div className="text-xs text-gray-400">
+                                  {f.dossiers} dossier{f.dossiers !== 1 ? "s" : ""} · CA généré {fmtEuro(f.ca)}
+                                </div>
+                              </div>
+                              <span className="text-sm font-bold fa-bg-gold fa-navy px-2.5 py-1 rounded-full">{fmtEuro(f.gain)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
               {avgRemuneration > 0 && (
                 <div className="fa-bg-pink rounded-2xl p-5">
                   <div className="font-display font-semibold fa-navy mb-1">📈 À vous de jouer</div>
@@ -2787,28 +2890,71 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
     </div>
   );
 }
-  // Dépose une copie horodatée des données, une par jour, 7 jours glissants.
-  async function sauvegardeAuto(donnees) {
-    if (!donnees) return;
-    const jour = new Date().toISOString().slice(0, 10);
+function SauvegardesPanel() {
+  const [liste, setListe] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function charger() {
+    setBusy(true);
     try {
-      const existant = await storage.list("adp:backup:", true);
-      const cles = (existant?.keys || []).sort();
-      if (cles.includes("adp:backup:" + jour)) return;
-      await storage.set("adp:backup:" + jour, JSON.stringify({
-        at: Date.now(),
-        partenaires: donnees.partners?.length || 0,
-        dossiers: donnees.dossiers?.length || 0,
-        data: donnees,
-      }), true);
-      const apres = [...cles, "adp:backup:" + jour].sort();
-      for (const vieille of apres.slice(0, Math.max(0, apres.length - 7))) {
-        try { await storage.delete(vieille, true); } catch (e) { /* ignore */ }
+      const res = await storage.list("adp:backup:", true);
+      const cles = (res?.keys || []).sort().reverse();
+      const details = [];
+      for (const cle of cles) {
+        try {
+          const item = await storage.get(cle, true);
+          const parsed = JSON.parse(item.value);
+          details.push({ cle, jour: cle.replace("adp:backup:", ""), at: parsed.at, partenaires: parsed.partenaires, dossiers: parsed.dossiers });
+        } catch (e) { /* ignore */ }
       }
+      setListe(details);
     } catch (e) {
-      console.error("Sauvegarde automatique impossible :", e);
-    }
+      setListe([]);
+    } finally { setBusy(false); }
   }
+
+  async function telecharger(cle, jour) {
+    try {
+      const item = await storage.get(cle, true);
+      const parsed = JSON.parse(item.value);
+      downloadJson(`frangola-adp-sauvegarde-${jour}.json`, parsed.data);
+    } catch (e) { /* ignore */ }
+  }
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+        <div className="font-display font-semibold fa-navy">Sauvegardes automatiques</div>
+        <button onClick={charger} disabled={busy}
+          className="text-xs fa-teal-text hover:underline disabled:opacity-50">
+          {busy ? "Chargement…" : (liste ? "Rafraîchir" : "Afficher")}
+        </button>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        Une copie est déposée à chaque première connexion de la journée. Les 7 dernières sont conservées.
+      </p>
+      {liste === null && <div className="text-sm text-gray-400">Cliquez sur « Afficher » pour voir les sauvegardes disponibles.</div>}
+      {liste !== null && liste.length === 0 && <div className="text-sm text-gray-400">Aucune sauvegarde pour l'instant — la première sera créée à votre prochaine connexion.</div>}
+      {liste !== null && liste.length > 0 && (
+        <div className="space-y-2">
+          {liste.map(s => (
+            <div key={s.cle} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
+              <div>
+                <div className="text-sm fa-navy font-bold">{fmtDate(s.at)}</div>
+                <div className="text-xs text-gray-400">{s.partenaires} partenaire{s.partenaires !== 1 ? "s" : ""} · {s.dossiers} dossier{s.dossiers !== 1 ? "s" : ""}</div>
+              </div>
+              <button onClick={() => telecharger(s.cle, s.jour)}
+                className="text-xs font-medium fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition">
+                Télécharger
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
@@ -2831,6 +2977,8 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
     return () => { active = false; };
   }, [newPartnerPostalCode]);
   const [newPartnerEmail, setNewPartnerEmail] = useState("");
+  const [newPartnerTelephone, setNewPartnerTelephone] = useState("");
+  const [newPartnerSiret, setNewPartnerSiret] = useState("");
   const [newPartnerCommercial, setNewPartnerCommercial] = useState(COMMERCIAUX[0]);
   const [createdPartner, setCreatedPartner] = useState(null);
   const [copiedId, setCopiedId] = useState(null);
@@ -2937,20 +3085,24 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
       postalCode: newPartnerPostalCode.trim(),
       departement: newPartnerDepartement,
       email: newPartnerEmail.trim(),
+      telephone: newPartnerTelephone.trim(),
+      siret: newPartnerSiret.replace(/\D/g, ""),
       commercial: newPartnerCommercial,
       flatFee: newPartnerFlatFee !== "" ? Number(newPartnerFlatFee) : null,
     });
     setCreatedPartner(p);
     setNewPartnerName(""); setNewPartnerFirstName(""); setNewPartnerCompany("");
-    setNewPartnerPostalCode(""); setNewPartnerVille(""); setNewPartnerDepartement(""); setNewPartnerEmail(""); setNewPartnerCommercial(COMMERCIAUX[0]); setNewPartnerFlatFee("");
+    setNewPartnerPostalCode(""); setNewPartnerVille(""); setNewPartnerDepartement(""); setNewPartnerEmail(""); setNewPartnerCommercial(COMMERCIAUX[0]); setNewPartnerFlatFee(""); setNewPartnerTelephone(""); setNewPartnerSiret("");
   }
   function startEdit(p) {
     setEditingId(p.id);
     setEditForm({
       name: p.name || "", firstName: p.firstName || "", company: p.company || "",
       ville: p.ville || "", postalCode: p.postalCode || "", email: p.email || "", commercial: p.commercial || COMMERCIAUX[0],
+      telephone: p.telephone || "", siret: p.siret || "",
       departement: p.departement || "",
       flatFee: p.flatFee != null ? String(p.flatFee) : "",
+      parrainId: p.parrainId || "",
     });
   }
   useEffect(() => {
@@ -4029,6 +4181,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                 </select>
                 <input value={newPartnerEmail} onChange={e => setNewPartnerEmail(e.target.value)} type="email" placeholder="Adresse email *"
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                <input value={newPartnerTelephone} onChange={e => setNewPartnerTelephone(e.target.value)} type="tel" placeholder="Téléphone"
+                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                <input value={newPartnerSiret} onChange={e => setNewPartnerSiret(e.target.value.replace(/\D/g, "").slice(0, 14))} inputMode="numeric" placeholder="N° SIRET (14 chiffres)"
+                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <select value={newPartnerCommercial} onChange={e => setNewPartnerCommercial(e.target.value)}
                   style={{ backgroundColor: COMMERCIAL_COLORS[newPartnerCommercial], color: "#fff" }}
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-teal-500">
@@ -4173,10 +4329,23 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         </select>
                         <input value={editForm.email} onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))} type="email" placeholder="Adresse email"
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        <input value={editForm.telephone} onChange={e => setEditForm(f => ({ ...f, telephone: e.target.value }))} type="tel" placeholder="Téléphone"
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                        <input value={editForm.siret} onChange={e => setEditForm(f => ({ ...f, siret: e.target.value.replace(/\D/g, "").slice(0, 14) }))} inputMode="numeric" placeholder="N° SIRET (14 chiffres)"
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                         <select value={editForm.commercial} onChange={e => setEditForm(f => ({ ...f, commercial: e.target.value }))}
                           style={{ backgroundColor: COMMERCIAL_COLORS[editForm.commercial], color: "#fff" }}
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-teal-500">
                           {COMMERCIAUX.map(c => <option key={c} value={c} style={{ backgroundColor: COMMERCIAL_COLORS[c], color: "#fff" }}>{commercialLabel(c)}</option>)}
+                        </select>
+                        <select value={editForm.parrainId} onChange={e => setEditForm(f => ({ ...f, parrainId: e.target.value }))}
+                          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500">
+                          <option value="">Parrainé par… (aucun)</option>
+                          {data.partners.filter(x => !x.deleted && x.id !== p.id).map(x => (
+                            <option key={x.id} value={x.id}>
+                              {x.firstName ? `${x.firstName} ${up(x.name)}` : up(x.name)}
+                            </option>
+                          ))}
                         </select>
                       </div>
                       <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
@@ -4202,6 +4371,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         <div className="font-medium fa-navy flex items-center gap-2">
                           <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
                           {p.flatFee != null && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Forfait {p.flatFee}€</span>}
+                          {filleulsDe(p.id).length > 0 && (
+                            <span className="text-xs font-semibold fa-bg-gold fa-navy px-2 py-0.5 rounded-full">
+                              🤝 {filleulsDe(p.id).length} filleul{filleulsDe(p.id).length > 1 ? "s" : ""}
+                            </span>
+                          )}
                           {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                           {p.active !== false && daysSinceLastDossier(p) > INACTIVITY_DAYS && (
                             <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full">
@@ -4762,6 +4936,65 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
               </div>
 
                             <SauvegardesPanel />
+
+              {(() => {
+                const parrains = data.partners
+                  .filter(p => !p.deleted && filleulsDe(p.id).length > 0)
+                  .map(p => ({ p, ...bilanParrainage(p.id), verse: p.parrainageVerse || 0 }))
+                  .sort((a, b) => b.gainTotal - a.gainTotal);
+                if (parrains.length === 0) return null;
+                const totalDu = parrains.reduce((s, x) => s + x.gainTotal, 0);
+                const totalVerse = parrains.reduce((s, x) => s + x.verse, 0);
+                return (
+                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
+                    <div className="font-display font-semibold fa-navy mb-1">🤝 Parrainage — sommes à verser</div>
+                    <p className="text-sm text-gray-500 mb-4">
+                      {Math.round(PARRAINAGE_TAUX * 100)} % du CA généré par chaque filleul, dû à son parrain.
+                      Saisissez le montant déjà versé pour suivre le reste à payer.
+                    </p>
+                    <div className="grid sm:grid-cols-3 gap-3 mb-4">
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">Total dû depuis le début</div>
+                        <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalDu)}</div>
+                      </div>
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">Déjà versé</div>
+                        <div className="font-display text-xl font-bold text-emerald-600">{fmtEuro(totalVerse)}</div>
+                      </div>
+                      <div className="fa-bg-gold rounded-xl p-4">
+                        <div className="text-xs text-teal-900/70">Reste à payer</div>
+                        <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalDu - totalVerse)}</div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {parrains.map(x => {
+                        const reste = x.gainTotal - x.verse;
+                        return (
+                          <div key={x.p.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
+                            <div className="min-w-[150px]">
+                              <div className="text-sm fa-navy font-bold">
+                                {x.p.firstName ? `${x.p.firstName} ${up(x.p.name)}` : up(x.p.name)}
+                              </div>
+                              <div className="text-xs text-gray-400">
+                                {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA généré {fmtEuro(x.caTotal)}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-xs text-gray-500">Dû {fmtEuro(x.gainTotal)}</span>
+                              <input type="number" defaultValue={x.verse || ""} placeholder="versé"
+                                onBlur={e => onUpdatePartner(x.p.id, { parrainageVerse: e.target.value === "" ? 0 : Number(e.target.value) })}
+                                className="border border-gray-300 rounded-lg px-2 py-1 text-xs w-24 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                              <span className={`text-sm font-bold px-2.5 py-1 rounded-full ${reste > 0 ? "fa-bg-gold fa-navy" : "bg-emerald-50 text-emerald-700"}`}>
+                                {reste > 0 ? `reste ${fmtEuro(reste)}` : "à jour"}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
                 <div className="font-display font-semibold fa-navy mb-4">Évolution du nombre de partenaires</div>
                 <div style={{ width: "100%", height: 200 }}>
