@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import { storage } from "./storage";
+import { supabase } from "./supabaseClient";
 import {
   Shield, Users, Building2, Upload, FileText, CheckCircle2, Clock,
   Bell, LogOut, Download, Plus, ArrowLeft, Copy, Check, AlertCircle,
-  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus, Sparkles, ArrowLeftRight
+  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus, Sparkles, ArrowLeftRight, TrendingUp, Key
 } from "lucide-react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
@@ -66,18 +67,31 @@ async function verifyTotp(secretBase32, code, windowSteps = 1) {
 function uid() {
   return (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now());
 }
+// La session est désormais tenue par Supabase Auth, qui la conserve et la
+// renouvelle lui-même. L'ancienne session maison, stockée en clair dans le
+// navigateur, est effacée au démarrage pour ne laisser aucune trace.
 const SESSION_KEY = "adp:session";
-function getStoredSession() {
-  try {
-    const raw = localStorage.getItem(SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) { return null; }
-}
-function setStoredSession(session) {
-  try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch (e) { /* ignore */ }
-}
-function clearStoredSession() {
+function purgeAncienneSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
+}
+
+// Adresse de la fonction serveur qui crée ou réinitialise un accès.
+const URL_ACTIVATION = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/activer-compte`;
+
+async function appelerActivation(corps) {
+  const reponse = await fetch(URL_ACTIVATION, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+    },
+    body: JSON.stringify(corps),
+  });
+  let resultat = {};
+  try { resultat = await reponse.json(); } catch (e) { /* réponse vide */ }
+  if (!reponse.ok) throw new Error(resultat.error || "Activation impossible. Réessayez dans un instant.");
+  return resultat;
 }
 function getStoredTab(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
@@ -500,116 +514,104 @@ export default function App() {
   const [loadError, setLoadError] = useState(false);
   useEffect(() => { if (data) setColorDataRef(data); }, [data]);
 
-  const sessionRestored = useRef(false);
+  // ==========================================================================
+  // DÉMARRAGE — l'authentification d'abord, les données ensuite
+  //
+  // Auparavant les données étaient chargées avant même l'écran de connexion :
+  // n'importe qui pouvait donc les lire sans compte. Désormais rien n'est lu
+  // tant que Supabase n'a pas reconnu la personne.
+  // ==========================================================================
+  const [authUser, setAuthUser] = useState(null);
+  const [authPret, setAuthPret] = useState(false);
+
   useEffect(() => {
-    if (!data || sessionRestored.current) return;
-    sessionRestored.current = true;
-    const session = getStoredSession();
-    if (!session) return;
-    if (session.type === "admin") {
-      setCurrentAdmin(true); setView("adminDash");
-    } else if (session.type === "mandataire") {
-      const m = data.mandataires.find(m => m.id === session.id && !m.deleted);
-      if (m && m.active !== false) { setCurrentMandataire(m); setView("mandataireDash"); }
-      else clearStoredSession();
-    } else if (session.type === "partner") {
-      const p = data.partners.find(p => p.id === session.id && !p.deleted && p.active !== false);
-      if (p) { setCurrentPartner(p); setView("partnerDash"); }
-      else clearStoredSession();
-    }
-  }, [data]);
+    purgeAncienneSession();
+    let vivant = true;
+    supabase.auth.getSession().then(({ data: s }) => {
+      if (!vivant) return;
+      setAuthUser(s?.session?.user || null);
+      setAuthPret(true);
+    }).catch(() => { if (vivant) setAuthPret(true); });
+    const { data: abo } = supabase.auth.onAuthStateChange((_evt, session) => {
+      setAuthUser(session?.user || null);
+    });
+    return () => { vivant = false; abo?.subscription?.unsubscribe?.(); };
+  }, []);
+
+  const emailConnecte = (authUser?.email || "").trim().toLowerCase();
+
+  // --- Chargement des données, uniquement une fois authentifié
   useEffect(() => {
+    if (!authPret) return;
+    if (!authUser) { setData(null); setLoadError(false); setLoading(false); return; }
+    let vivant = true;
+    setLoading(true); setLoadError(false);
     (async () => {
-      const initial = {
-        settings: {
-          admin: { email: "contact@frangola.fr", password: null, totpSecret: null, totpEnabled: false, color: "#2F448B" },
-        },
-        mandataires: [], reseaux: [],
-        partners: [], dossiers: [], activityLog: [],
-      };
       try {
         const res = await storage.get("adp:data", true);
-        if (res && res.value) {
-          const loaded = JSON.parse(res.value);
-          let changed = false;
-          if (!loaded.settings) loaded.settings = {};
-          if (!loaded.mandataires) { loaded.mandataires = []; changed = true; }
-          if (!loaded.reseaux) { loaded.reseaux = []; changed = true; }
-          if (!loaded.activityLog) { loaded.activityLog = []; changed = true; }
-          if (loaded.mandataires?.some(m => !m.role)) {
-            loaded.mandataires = loaded.mandataires.map(m => m.role ? m : { ...m, role: /^nelson$/i.test((m.name || "").trim()) ? "manager" : "standard" });
-            changed = true;
-          }
-
-          // Migration from the old multi-admin array format.
-          if (loaded.settings.admins && !loaded.settings.admin) {
-            const contactEntry = loaded.settings.admins.find(a => a.email === "contact@frangola.fr");
-            loaded.settings.admin = {
-              email: "contact@frangola.fr",
-              password: contactEntry?.password || null,
-              totpSecret: null, totpEnabled: false,
-            };
-            const nelsonEntry = loaded.settings.admins.find(a => a.email === "nelson@frangola-assure.fr");
-            if (nelsonEntry && !loaded.mandataires.some(m => m.name === "Nelson")) {
-              loaded.mandataires.push({ id: uid(), name: "Nelson", firstName: "", email: nelsonEntry.email, password: nelsonEntry.password || null, createdAt: Date.now() });
-            }
-            delete loaded.settings.admins;
-            changed = true;
-          }
-          if (!loaded.settings.admin) { loaded.settings.admin = initial.settings.admin; changed = true; }
-          if (!loaded.settings.admin.color) { loaded.settings.admin.color = "#2F448B"; changed = true; }
-
-          if (changed) await storage.set("adp:data", JSON.stringify(loaded), true);
-          setData(loaded);
+        // Une absence de données ne peut plus signifier « premier démarrage » :
+        // avec les règles d'accès, elle signifie « lecture refusée ». On ne
+        // réinitialise donc JAMAIS ici, sous peine de tout effacer.
+        if (!res || !res.value) { if (vivant) setLoadError(true); return; }
+        const loaded = JSON.parse(res.value);
+        let changed = false;
+        if (!loaded.settings) loaded.settings = {};
+        if (!loaded.mandataires) { loaded.mandataires = []; changed = true; }
+        if (!loaded.reseaux) { loaded.reseaux = []; changed = true; }
+        if (!loaded.partners) { loaded.partners = []; changed = true; }
+        if (!loaded.dossiers) { loaded.dossiers = []; changed = true; }
+        if (!loaded.parrainages) { loaded.parrainages = []; changed = true; }
+        if (!loaded.activityLog) { loaded.activityLog = []; changed = true; }
+        if (loaded.mandataires.some(m => !m.role)) {
+          loaded.mandataires = loaded.mandataires.map(m => m.role ? m : { ...m, role: /^nelson$/i.test((m.name || "").trim()) ? "manager" : "standard" });
+          changed = true;
         }
-        else {
-          // Genuinely no data yet (first-ever run) — safe to initialize.
-          await storage.set("adp:data", JSON.stringify(initial), true);
-          setData(initial);
-        }
+        if (!loaded.settings.admin) { loaded.settings.admin = { email: "contact@frangola.fr", color: "#2F448B" }; changed = true; }
+        if (!loaded.settings.admin.color) { loaded.settings.admin.color = "#2F448B"; changed = true; }
+        if (changed) { try { await storage.set("adp:data", JSON.stringify(loaded), true); } catch (e) { /* lecture seule : on continue */ } }
+        if (vivant) { revRef.current = loaded.rev ?? 0; setData(loaded); }
       } catch (e) {
-        // A real error occurred (network, permissions, parsing...). NEVER overwrite
-        // existing data here — that would silently wipe everything already saved.
         console.error("Échec du chargement des données :", e);
-        setLoadError(true);
-      } finally { setLoading(false); }
+        if (vivant) setLoadError(true);
+      } finally { if (vivant) setLoading(false); }
     })();
-  }, []);
+    return () => { vivant = false; };
+  }, [authPret, authUser?.id]);
+
+  // --- Qui est cette personne ? Le rôle se déduit des données, pas du bouton
+  //     sur lequel elle a cliqué à l'accueil.
+  const [pendingAuth, setPendingAuth] = useState(null);
+  const roleResolu = useRef(null);
+
+  useEffect(() => {
+    if (!data || !authUser) return;
+    if (roleResolu.current === authUser.id) return;
+    roleResolu.current = authUser.id;
+
+    if (emailConnecte && emailConnecte === (data.settings?.admin?.email || "").trim().toLowerCase()) {
+      setPendingAuth({ kind: "admin", account: data.settings.admin });
+      return;
+    }
+    const m = data.mandataires.find(x => !x.deleted && (x.email || "").trim().toLowerCase() === emailConnecte);
+    if (m) {
+      if (m.active === false) { deconnexion("desactive"); return; }
+      setPendingAuth({ kind: "mandataire", account: m });
+      return;
+    }
+    const p = data.partners.find(x => !x.deleted && (x.email || "").trim().toLowerCase() === emailConnecte);
+    if (p) {
+      if (p.active === false) { deconnexion("desactive"); return; }
+      setCurrentPartner(p); setView("partnerDash");
+      updatePartner(p.id, { lastLoginAt: Date.now() });
+      return;
+    }
+    deconnexion("sansFiche");
+  }, [data, authUser, emailConnecte]);
 
   // Numéro de version réellement écrit, mis à jour immédiatement après chaque
   // enregistrement réussi. React met son état à jour de façon différée : s'y
   // fier faisait refuser à tort la deuxième écriture d'une même action.
   const revRef = useRef(null);
-
-  // Refuse d'écrire si les données ont changé depuis le chargement de la page.
-  // Sans ce contrôle, deux personnes connectées en même temps s'écrasent
-  // mutuellement : partenaire disparu, Authenticator réinitialisé, dossier perdu.
-  async function saveData(next) {
-    let stocke = null;
-    try {
-      const res = await storage.get("adp:data", true);
-      if (res && res.value) stocke = JSON.parse(res.value);
-    } catch (e) {
-      setGlobalError("Impossible de vérifier les données — modification annulée.");
-      return false;
-    }
-    const revLocale = revRef.current ?? (data?.rev ?? 0);
-    const revStockee = stocke?.rev ?? 0;
-    if (stocke && revStockee !== revLocale) {
-      setGlobalError("Ces données ont été modifiées ailleurs entre-temps. Rechargez la page avant de continuer — votre dernière saisie n'a pas été enregistrée.");
-      return false;
-    }
-    const versionne = { ...next, rev: revLocale + 1 };
-    setData(versionne);
-    try {
-      await storage.set("adp:data", JSON.stringify(versionne), true);
-      revRef.current = versionne.rev;
-      return true;
-    } catch (e) {
-      setGlobalError("Échec de l'enregistrement — réessaie.");
-      return false;
-    }
-  }
 
   // Écrit en repartant TOUJOURS de l'état réellement stocké, jamais de la copie
   // chargée au démarrage — sinon deux personnes connectées en même temps
@@ -623,7 +625,7 @@ export default function App() {
       setGlobalError("Impossible de relire les données — modification annulée.");
       return false;
     }
-       const next = mutator(base);
+    const next = mutator(base);
     if (!next) return false;
     const versionne = { ...next, rev: (base?.rev ?? 0) + 1 };
     setData(versionne);
@@ -644,7 +646,21 @@ export default function App() {
   }
 
   const [logoutReason, setLogoutReason] = useState(null);
-  function logout(reason) { setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null); setView("landing"); clearStoredSession(); setLogoutReason(reason || null); }
+  // Ferme la session côté Supabase ET côté application. Tant que la session
+  // Supabase n'est pas fermée, un rechargement de page reconnecterait la
+  // personne : c'est elle qui fait foi maintenant, plus l'état React.
+  async function deconnexion(reason) {
+    roleResolu.current = null;
+    setPendingAuth(null);
+    setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null);
+    setApercuPartnerId(null);
+    setData(null);
+    setView("landing");
+    setLogoutReason(reason || null);
+    purgeAncienneSession();
+    try { await supabase.auth.signOut(); } catch (e) { /* session déjà close */ }
+  }
+  function logout(reason) { deconnexion(reason); }
 
   const INACTIVITY_LIMIT_MS = 60 * 60 * 1000; // 1 heure
   const lastActivityRef = useRef(Date.now());
@@ -692,7 +708,7 @@ export default function App() {
   }
 
   async function addMandataire(fields) {
-    const m = { id: uid(), ...fields, password: null, active: true, createdAt: Date.now() };
+    const m = { id: uid(), ...fields, code: genCode(), active: true, createdAt: Date.now() };
     await mutateData(base => withLog({ ...base, mandataires: [...base.mandataires, m] }, `a ajouté le mandataire ${fields.name}`));
     return m;
   }
@@ -1151,6 +1167,35 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
+  // ==========================================================================
+  // ÉCRANS PUBLICS — tant que personne n'est authentifié, aucune donnée
+  // n'est chargée : il n'y a donc rien à afficher d'autre que la connexion.
+  // ==========================================================================
+  if (!authPret) {
+    return <div className="min-h-screen flex items-center justify-center fa-bg-offwhite fa-teal-text">Chargement…</div>;
+  }
+
+  if (!authUser) {
+    return (
+      <div className="min-h-screen fa-bg-offwhite font-body">
+        <style>{BRAND_STYLES}</style>
+        {globalError && (
+          <div className="bg-red-50 border-b border-red-200 text-red-700 text-sm px-4 py-2 flex items-center gap-2">
+            <AlertCircle size={16} /> {globalError}
+            <button className="ml-auto text-red-400 hover:text-red-600" onClick={() => setGlobalError("")}>✕</button>
+          </div>
+        )}
+        {view === "partnerLogin" ? (
+          <ConnexionFlow titre="Espace partenaire" variante="partenaire" onBack={() => setView("landing")} />
+        ) : view === "adminLogin" ? (
+          <ConnexionFlow titre="Espace Frangola" variante="frangola" onBack={() => setView("landing")} />
+        ) : (
+          <Landing logoutReason={logoutReason} onSelect={(target) => { setLogoutReason(null); setView(target); }} />
+        )}
+      </div>
+    );
+  }
+
   if (loadError) {
     return (
       <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
@@ -1159,6 +1204,7 @@ export default function App() {
           <h2 className="font-display text-lg font-semibold fa-navy mb-2">Impossible de charger les données</h2>
           <p className="text-sm text-gray-500 mb-5">Vérifie ta connexion internet et réessaie. Tes données déjà enregistrées n'ont pas été touchées.</p>
           <button onClick={() => window.location.reload()} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">Réessayer</button>
+          <button onClick={() => deconnexion()} className="block mx-auto mt-4 text-xs text-gray-400 hover:fa-teal-text">Se déconnecter</button>
         </div>
       </div>
     );
@@ -1166,6 +1212,28 @@ export default function App() {
 
   if (loading || !data) {
     return <div className="min-h-screen flex items-center justify-center fa-bg-offwhite fa-teal-text">Chargement…</div>;
+  }
+
+  // Authentifié, données chargées, mais le second facteur reste à franchir
+  // pour l'administrateur et les mandataires. Il est exigé ici, au niveau de
+  // l'application : impossible de le contourner par un autre écran d'entrée.
+  if (pendingAuth) {
+    return (
+      <SecondFacteurGate
+        kind={pendingAuth.kind}
+        account={pendingAuth.account}
+        onUpdateAccount={(fields) => pendingAuth.kind === "admin"
+          ? updateAdmin(fields)
+          : updateMandataire(pendingAuth.account.id, fields)}
+        onCancel={() => deconnexion()}
+        onDone={() => {
+          const k = pendingAuth.kind; const a = pendingAuth.account;
+          setPendingAuth(null);
+          if (k === "admin") { setCurrentAdmin(true); setView("adminDash"); sauvegardeAuto(data); }
+          else { setCurrentMandataire(a); setView("mandataireDash"); }
+        }}
+      />
+    );
   }
 
   return (
@@ -1178,48 +1246,6 @@ export default function App() {
         </div>
       )}
 
-      {view === "landing" && (
-        <Landing
-          logoutReason={logoutReason}
-          onSelect={(target) => {
-            setLogoutReason(null);
-            // Détection propre au bac à sable Claude (jamais présente sur le vrai site déployé).
-            const isTestSandbox = typeof window !== "undefined" && !!window["storage"];
-            if (isTestSandbox && target === "adminLogin") {
-              setCurrentAdmin(true); setView("adminDash"); return;
-            }
-            if (isTestSandbox && target === "partnerLogin") {
-              const testPartner = data.partners.find(p => !p.deleted) || {
-                id: "test-partner", name: "Test", firstName: "Partenaire", company: "Démo",
-                email: "test@demo.fr", active: true, createdAt: Date.now(),
-              };
-              setCurrentPartner(testPartner); setView("partnerDash"); return;
-            }
-            setView(target);
-          }}
-        />
-      )}
-      {view === "partnerLogin" && (
-        <EmailPasswordLoginFlow
-          title="Espace partenaire"
-          accounts={data.partners.filter(p => !p.deleted)}
-          onUpdateAccount={updatePartner}
-          onBack={() => setView("landing")}
-          onSuccess={(p) => { setCurrentPartner(p); setView("partnerDash"); setStoredSession({ type: "partner", id: p.id }); }}
-          notFoundMessage="Adresse email non reconnue."
-        />
-      )}
-      {view === "adminLogin" && (
-        <FrangolaLoginFlow
-          admin={data.settings.admin}
-          mandataires={data.mandataires}
-          onUpdateAdmin={updateAdmin}
-          onUpdateMandataire={updateMandataire}
-          onBack={() => setView("landing")}
-                    onAdminSuccess={() => { setCurrentAdmin(true); setView("adminDash"); setStoredSession({ type: "admin" }); sauvegardeAuto(data); }}
-          onMandataireSuccess={(m) => { setCurrentMandataire(m); setView("mandataireDash"); setStoredSession({ type: "mandataire", id: m.id }); }}
-        />
-      )}
       {apercuPartnerId && (() => {
         const cible = data.partners.find(p => p.id === apercuPartnerId);
         if (!cible) return null;
@@ -1375,6 +1401,16 @@ function Landing({ onSelect, logoutReason }) {
           Vous avez été déconnecté après 1h d'inactivité, par sécurité.
         </div>
       )}
+      {logoutReason === "desactive" && (
+        <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
+          Votre accès a été suspendu. Contactez Frangola.
+        </div>
+      )}
+      {logoutReason === "sansFiche" && (
+        <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
+          Aucun espace n'est associé à cette adresse email. Contactez Frangola.
+        </div>
+      )}
       <header className="px-6 py-5 flex items-center justify-between fa-bg-offwhite">
         <Logo />
         <div className="flex items-center gap-4">
@@ -1469,113 +1505,151 @@ function PasswordField({ value, onChange, onKeyDown, placeholder, autoFocus, cla
   );
 }
 
-function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandataire, onBack, onAdminSuccess, onMandataireSuccess }) {
-  const [accountType, setAccountType] = useState(null); // "admin" | "mandataire"
-  const [step, setStep] = useState("email"); // email | createPassword | password | totpSetup | totpVerify
+// =============================================================================
+// ÉCRAN DE CONNEXION
+//
+// Le mot de passe n'est plus comparé dans le navigateur : il est vérifié par
+// Supabase, qui ne stocke qu'une empreinte et ne renvoie jamais le mot de
+// passe. Le rôle n'est pas choisi ici — il se déduit de l'adresse email une
+// fois la personne authentifiée.
+// =============================================================================
+function ConnexionFlow({ titre, variante, onBack }) {
+  const [etape, setEtape] = useState("password"); // password | activation
   const [email, setEmail] = useState("");
-  const [mandataire, setMandataire] = useState(null);
-  const [pendingSecret, setPendingSecret] = useState("");
-  const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
-  const [password2, setPassword2] = useState("");
+  const [code, setCode] = useState("");
+  const [nouveau, setNouveau] = useState("");
+  const [nouveau2, setNouveau2] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [generatedRecoveryCodes, setGeneratedRecoveryCodes] = useState([]);
-  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
-  const [recoveryCodeInput, setRecoveryCodeInput] = useState("");
 
-  // Generic helpers so TOTP/recovery-code logic works identically for admin and mandataire.
-  const account = accountType === "admin" ? admin : mandataire;
-  async function updateAccount(fields) {
-    if (accountType === "admin") await onUpdateAdmin(fields);
-    else await onUpdateMandataire(mandataire.id, fields);
-  }
-  function finishSuccess(extraFields) {
-    if (accountType === "admin") onAdminSuccess();
-    else onMandataireSuccess({ ...mandataire, ...extraFields });
-  }
+  const Icone = variante === "frangola" ? Shield : Users;
 
-  function submitEmail() {
-    const trimmed = email.trim().toLowerCase();
-    if (trimmed === admin.email.toLowerCase()) {
-      setAccountType("admin");
-      setError("");
-      setStep(admin.password ? "password" : "createPassword");
-      return;
-    }
-    const found = mandataires.find(m => !m.deleted && (m.email || "").toLowerCase() === trimmed);
-    if (found) {
-      if (found.active === false) { setError("Veuillez contacter Frangola."); return; }
-      setAccountType("mandataire");
-      setMandataire(found);
-      setError("");
-      setStep(found.password ? "password" : "createPassword");
-      return;
-    }
-    setError("Adresse email non reconnue.");
-  }
-
-  async function submitCreatePassword() {
-    if (password.length < 6) { setError("6 caractères minimum."); return; }
-    if (password !== password2) { setError("Les deux mots de passe ne correspondent pas."); return; }
+  async function seConnecter() {
+    const mail = email.trim().toLowerCase();
+    if (!mail || !password) { setError("Adresse email et mot de passe requis."); return; }
     setError(""); setBusy(true);
     try {
-      await updateAccount({ password });
-      if (account.totpEnabled && account.totpSecret) {
-        // Password reset on an account that already has TOTP configured — don't
-        // make them reconfigure their authenticator app, just let them in.
-        await updateAccount({ lastLoginAt: Date.now() });
-        finishSuccess({ password, lastLoginAt: Date.now() });
-      } else {
-        setPendingSecret(randomBase32Secret());
-        setStep("totpSetup");
-      }
-    } finally { setBusy(false); }
-  }
-
-  async function submitPassword() {
-    if (password !== account.password) { setError("Mot de passe incorrect."); return; }
-    setError("");
-    if (account.totpEnabled && account.totpSecret) setStep("totpVerify");
-    else { setPendingSecret(randomBase32Secret()); setStep("totpSetup"); }
-  }
-
-  function startForgotPassword() {
-    setError(""); setCode(""); setPassword(""); setPassword2("");
-    if (account.totpEnabled && account.totpSecret) {
-      setStep("forgotAdminTotp");
-    } else {
-      // No second factor configured yet — direct reset.
-      setStep("createPassword");
-    }
-  }
-
-  async function confirmForgotAdminTotp() {
-    setBusy(true); setError("");
-    try {
-      if (useRecoveryCode) {
-        const match = (account.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
-        if (!match) { setError("Code de récupération invalide ou déjà utilisé."); setBusy(false); return; }
-        const updatedCodes = account.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
-        await updateAccount({ recoveryCodes: updatedCodes });
-        setStep("createPassword");
+      const { error: err } = await supabase.auth.signInWithPassword({ email: mail, password });
+      if (err) {
+        setError(/invalid/i.test(err.message)
+          ? "Adresse email ou mot de passe incorrect."
+          : "Connexion impossible : " + err.message);
         return;
       }
-      const ok = await verifyTotp(account.totpSecret, code);
-      if (!ok) { setError("Code incorrect."); setBusy(false); return; }
-      setStep("createPassword");
+      // La suite est prise en charge par l'application : chargement des
+      // données, puis orientation vers le bon espace.
+    } catch (e) {
+      setError("Connexion impossible. Vérifiez votre accès internet.");
     } finally { setBusy(false); }
   }
+
+  async function activer() {
+    const mail = email.trim().toLowerCase();
+    if (!mail || !code.trim()) { setError("Adresse email et code d'activation requis."); return; }
+    if (nouveau.length < 8) { setError("8 caractères minimum pour le mot de passe."); return; }
+    if (nouveau !== nouveau2) { setError("Les deux mots de passe ne correspondent pas."); return; }
+    setError(""); setBusy(true);
+    try {
+      await appelerActivation({ email: mail, code: code.trim(), password: nouveau });
+      const { error: err } = await supabase.auth.signInWithPassword({ email: mail, password: nouveau });
+      if (err) { setError("Compte créé, mais la connexion a échoué. Réessayez avec votre nouveau mot de passe."); setEtape("password"); setPassword(""); }
+    } catch (e) {
+      setError(e.message);
+    } finally { setBusy(false); }
+  }
+
+  const champ = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3";
+
+  return (
+    <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
+      <div className="max-w-sm w-full bg-white border border-gray-200 rounded-2xl shadow-sm p-8">
+        <button onClick={etape === "password" ? onBack : () => { setEtape("password"); setError(""); }}
+          className="flex items-center gap-1 text-sm text-gray-400 hover:fa-teal-text mb-6">
+          <ArrowLeft size={15} /> Retour
+        </button>
+        <div className="flex items-center gap-2 mb-1">
+          <Icone className="fa-teal-text" size={20} />
+          <h2 className="font-display text-lg font-semibold fa-navy">{titre}</h2>
+        </div>
+
+        {etape === "password" && (
+          <>
+            <p className="text-sm text-gray-500 mb-5">Entrez vos identifiants.</p>
+            <input value={email} onChange={e => setEmail(e.target.value)} type="email" placeholder="vous@exemple.fr"
+              autoComplete="username" autoFocus className={champ} />
+            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && seConnecter()}
+              placeholder="Mot de passe" autoComplete="current-password" className={champ} />
+            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            <button onClick={seConnecter} disabled={busy}
+              className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+              {busy ? "Vérification…" : "Se connecter"}
+            </button>
+            <button onClick={() => { setEtape("activation"); setError(""); setPassword(""); setNouveau(""); setNouveau2(""); setCode(""); }}
+              className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
+              Première connexion, ou mot de passe oublié ?
+            </button>
+          </>
+        )}
+
+        {etape === "activation" && (
+          <>
+            <p className="text-sm text-gray-500 mb-4">
+              Entrez le code d'activation que Frangola vous a transmis, puis choisissez votre mot de passe.
+            </p>
+            <input value={email} onChange={e => setEmail(e.target.value)} type="email" placeholder="vous@exemple.fr"
+              autoComplete="username" autoFocus className={champ} />
+            <input value={code} onChange={e => setCode(e.target.value.toUpperCase().replace(/\s/g, ""))}
+              placeholder="Code d'activation"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
+            <PasswordField value={nouveau} onChange={e => setNouveau(e.target.value)}
+              placeholder="Mot de passe (8 caractères min.)" autoComplete="new-password" className={champ} />
+            <PasswordField value={nouveau2} onChange={e => setNouveau2(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && activer()}
+              placeholder="Confirmer le mot de passe" autoComplete="new-password" className={champ} />
+            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+            <button onClick={activer} disabled={busy}
+              className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+              {busy ? "Activation…" : "Activer mon accès"}
+            </button>
+            <p className="text-xs text-gray-400 mt-4 leading-relaxed">
+              Vous n'avez pas de code ? Demandez-le à votre interlocuteur Frangola : lui seul peut le délivrer.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// SECOND FACTEUR — exigé de l'administrateur et des mandataires
+//
+// Rendu par l'application elle-même une fois le mot de passe validé, et non
+// par l'écran de connexion : on ne peut donc pas l'éviter en entrant par une
+// autre porte.
+// =============================================================================
+function SecondFacteurGate({ kind, account, onUpdateAccount, onDone, onCancel }) {
+  const dejaConfigure = !!(account?.totpEnabled && account?.totpSecret);
+  const [etape, setEtape] = useState(dejaConfigure ? "verify" : "setup");
+  const [pendingSecret, setPendingSecret] = useState(() => dejaConfigure ? "" : randomBase32Secret());
+  const [code, setCode] = useState("");
+  const [recoveryCodeInput, setRecoveryCodeInput] = useState("");
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
+  const [generatedRecoveryCodes, setGeneratedRecoveryCodes] = useState([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function confirmSetup() {
     setBusy(true); setError("");
     try {
       const ok = await verifyTotp(pendingSecret, code);
-      if (!ok) { setError("Code incorrect — vérifie l'heure de ton téléphone et réessaie."); setBusy(false); return; }
+      if (!ok) { setError("Code incorrect — vérifie l'heure de ton téléphone et réessaie."); return; }
       const codes = generateRecoveryCodes();
-      await updateAccount({ totpSecret: pendingSecret, totpEnabled: true, lastLoginAt: Date.now(), recoveryCodes: codes });
+      await onUpdateAccount({ totpSecret: pendingSecret, totpEnabled: true, lastLoginAt: Date.now(), recoveryCodes: codes });
       setGeneratedRecoveryCodes(codes);
-      setStep("showRecoveryCodes");
+      setEtape("showRecoveryCodes");
     } finally { setBusy(false); }
   }
 
@@ -1584,106 +1658,33 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
     try {
       if (useRecoveryCode) {
         const match = (account.recoveryCodes || []).find(rc => !rc.used && rc.code === recoveryCodeInput.trim().toUpperCase());
-        if (!match) { setError("Code de récupération invalide ou déjà utilisé."); setBusy(false); return; }
+        if (!match) { setError("Code de récupération invalide ou déjà utilisé."); return; }
         const updatedCodes = account.recoveryCodes.map(rc => rc.code === match.code ? { ...rc, used: true } : rc);
-        await updateAccount({ recoveryCodes: updatedCodes, lastLoginAt: Date.now() });
-        finishSuccess({ lastLoginAt: Date.now() });
+        await onUpdateAccount({ recoveryCodes: updatedCodes, lastLoginAt: Date.now() });
+        onDone();
         return;
       }
       const ok = await verifyTotp(account.totpSecret, code);
-      if (!ok) { setError("Code incorrect."); setBusy(false); return; }
-      await updateAccount({ lastLoginAt: Date.now() });
-      finishSuccess({ lastLoginAt: Date.now() });
+      if (!ok) { setError("Code incorrect."); return; }
+      await onUpdateAccount({ lastLoginAt: Date.now() });
+      onDone();
     } finally { setBusy(false); }
   }
 
   return (
     <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
       <div className="max-w-sm w-full bg-white border border-gray-200 rounded-2xl shadow-sm p-8">
-        <button onClick={step === "email" ? onBack : () => { setStep("email"); setCode(""); setError(""); setAccountType(null); }}
-          className="flex items-center gap-1 text-sm text-gray-400 hover:fa-teal-text mb-6">
-          <ArrowLeft size={15} /> Retour
+        <button onClick={onCancel} className="flex items-center gap-1 text-sm text-gray-400 hover:fa-teal-text mb-6">
+          <ArrowLeft size={15} /> Se déconnecter
         </button>
         <div className="flex items-center gap-2 mb-1">
           <Shield className="fa-teal-text" size={20} />
-          <h2 className="font-display text-lg font-semibold fa-navy">Espace Frangola</h2>
+          <h2 className="font-display text-lg font-semibold fa-navy">
+            {kind === "admin" ? "Administration" : "Espace mandataire"}
+          </h2>
         </div>
 
-        {step === "email" && (
-          <>
-            <p className="text-sm text-gray-500 mb-5">Entrez votre adresse email.</p>
-            <input value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && submitEmail()}
-              type="email" placeholder="vous@exemple.fr" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={submitEmail} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">Continuer</button>
-          </>
-        )}
-
-        {step === "createPassword" && (
-          <>
-            <p className="text-sm text-gray-500 mb-5">{(accountType === "admin" ? admin.password : mandataire?.password) ? "Réinitialisez votre mot de passe." : "Première connexion — créez votre mot de passe."}</p>
-            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
-              placeholder="Nouveau mot de passe (6 caractères min.)" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            <PasswordField value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
-              placeholder="Confirmer le mot de passe"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={submitCreatePassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
-              {busy ? "Création…" : "Créer et continuer"}
-            </button>
-          </>
-        )}
-
-        {step === "password" && (
-          <>
-            <p className="text-sm text-gray-500 mb-5">Entrez votre mot de passe.</p>
-            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && submitPassword()}
-              placeholder="Mot de passe" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={submitPassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
-              {busy ? "Vérification…" : "Continuer"}
-            </button>
-            <button onClick={startForgotPassword} className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
-              Mot de passe oublié ?
-            </button>
-          </>
-        )}
-
-        {step === "forgotAdminTotp" && (
-          <>
-            <p className="text-sm text-gray-500 mb-5">
-              {useRecoveryCode
-                ? "Entrez l'un de vos codes de récupération (à usage unique)."
-                : "Pour réinitialiser votre mot de passe, confirmez avec le code de votre application d'authentification."}
-            </p>
-            {useRecoveryCode ? (
-              <input value={recoveryCodeInput} onChange={e => setRecoveryCodeInput(e.target.value.toUpperCase())}
-                onKeyDown={e => e.key === "Enter" && confirmForgotAdminTotp()}
-                placeholder="XXXX-XXXX" autoFocus
-                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            ) : (
-              <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                onKeyDown={e => e.key === "Enter" && confirmForgotAdminTotp()}
-                placeholder="000000" inputMode="numeric" autoFocus
-                className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            )}
-            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={confirmForgotAdminTotp} disabled={busy || (useRecoveryCode ? recoveryCodeInput.trim().length < 9 : code.length !== 6)}
-              className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
-              {busy ? "Vérification…" : "Confirmer et réinitialiser"}
-            </button>
-            <button onClick={() => { setUseRecoveryCode(v => !v); setError(""); setCode(""); setRecoveryCodeInput(""); }}
-              className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
-              {useRecoveryCode ? "J'ai accès à mon Authenticator" : "Je n'ai plus accès à mon Authenticator"}
-            </button>
-          </>
-        )}
-
-        {step === "totpSetup" && (
+        {etape === "setup" && (
           <>
             <p className="text-sm text-gray-500 mb-1">Configurez la double authentification.</p>
             <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 my-4 bg-gray-50 rounded-lg p-3">
@@ -1696,18 +1697,18 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
             </div>
             <p className="text-sm text-gray-500 mb-2">Entre ensuite le code à 6 chiffres généré par l'application :</p>
             <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              onKeyDown={e => e.key === "Enter" && confirmSetup()}
-              placeholder="000000" inputMode="numeric"
+              onKeyDown={e => e.key === "Enter" && code.length === 6 && confirmSetup()}
+              placeholder="000000" inputMode="numeric" autoFocus
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
             <button onClick={confirmSetup} disabled={busy || code.length !== 6}
               className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
-              {busy ? "Vérification…" : "Activer et se connecter"}
+              {busy ? "Vérification…" : "Activer et accéder"}
             </button>
           </>
         )}
 
-        {step === "showRecoveryCodes" && (
+        {etape === "showRecoveryCodes" && (
           <>
             <p className="text-sm fa-navy font-semibold mb-1">⚠️ Notez ces codes maintenant</p>
             <p className="text-sm text-gray-500 mb-4">
@@ -1719,13 +1720,13 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
                 <div key={rc.code} className="font-mono text-sm fa-navy text-center">{rc.code}</div>
               ))}
             </div>
-            <button onClick={() => finishSuccess({ lastLoginAt: Date.now() })} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">
+            <button onClick={onDone} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">
               J'ai noté mes codes — continuer
             </button>
           </>
         )}
 
-        {step === "totpVerify" && (
+        {etape === "verify" && (
           <>
             <p className="text-sm text-gray-500 mb-5">
               {useRecoveryCode ? "Entrez l'un de vos codes de récupération (à usage unique)." : "Entre le code de ton application d'authentification."}
@@ -1737,7 +1738,7 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
                 className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             ) : (
               <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                onKeyDown={e => e.key === "Enter" && confirmVerify()}
+                onKeyDown={e => e.key === "Enter" && code.length === 6 && confirmVerify()}
                 placeholder="000000" inputMode="numeric" autoFocus
                 className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-[0.4em] text-center focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
             )}
@@ -1757,129 +1758,55 @@ function FrangolaLoginFlow({ admin, mandataires, onUpdateAdmin, onUpdateMandatai
   );
 }
 
-function EmailPasswordLoginFlow({ title, accounts, onUpdateAccount, onBack, onSuccess, notFoundMessage }) {
-  const [step, setStep] = useState("email"); // email | createPassword | password
-  const [email, setEmail] = useState("");
-  const [account, setAccount] = useState(null);
-  const [password, setPassword] = useState("");
-  const [password2, setPassword2] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+// =============================================================================
+// CODE D'ACTIVATION — ce qu'un partenaire ou un mandataire doit recevoir pour
+// créer son mot de passe la première fois, ou le reprendre s'il l'a perdu.
+//
+// Le mot de passe n'apparaît nulle part : il est détenu par Supabase sous
+// forme d'empreinte. Personne, pas même l'administrateur, ne peut le lire.
+// =============================================================================
+function BlocAcces({ cible, onReinitialiser }) {
+  const [copie, setCopie] = useState(false);
+  const [confirme, setConfirme] = useState(false);
+  // Le code ne s'affiche que tant qu'il sert : première connexion en attente,
+  // ou accès réinitialisé par l'administrateur. Une fois consommé, il est
+  // effacé côté serveur et seul le bouton de réinitialisation subsiste.
+  const codeUtile = !!cible.code && (!cible.lastLoginAt || cible.accesReinitialise);
 
-  function submitEmail() {
-    const found = accounts.find(a => (a.email || "").toLowerCase() === email.trim().toLowerCase());
-    if (!found) { setError(notFoundMessage || "Adresse email introuvable."); return; }
-    if (found.active === false) { setError("Veuillez contacter Frangola."); return; }
-    setAccount(found);
-    setError("");
-    setStep(found.password ? "password" : "createPassword");
-  }
-
-  async function submitCreatePassword() {
-    if (password.length < 6) { setError("6 caractères minimum."); return; }
-    if (password !== password2) { setError("Les deux mots de passe ne correspondent pas."); return; }
-    setBusy(true);
+  function copier() {
     try {
-      await onUpdateAccount(account.id, { password, lastLoginAt: Date.now() });
-      onSuccess({ ...account, password, lastLoginAt: Date.now() });
-    } finally { setBusy(false); }
-  }
-
-  async function submitPassword() {
-    if (password !== account.password) { setError("Mot de passe incorrect."); return; }
-    setBusy(true);
-    try {
-      await onUpdateAccount(account.id, { lastLoginAt: Date.now() });
-      onSuccess({ ...account, lastLoginAt: Date.now() });
-    } finally { setBusy(false); }
+      navigator.clipboard.writeText(cible.code || "");
+      setCopie(true); setTimeout(() => setCopie(false), 1800);
+    } catch (e) { /* presse-papier indisponible */ }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
-      <div className="max-w-sm w-full bg-white border border-gray-200 rounded-2xl shadow-sm p-8">
-        <button onClick={step === "email" ? onBack : () => { setStep("email"); setError(""); }}
-          className="flex items-center gap-1 text-sm text-gray-400 hover:fa-teal-text mb-6">
-          <ArrowLeft size={15} /> Retour
-        </button>
-        <div className="flex items-center gap-2 mb-1">
-          <Users className="fa-teal-text" size={20} />
-          <h2 className="font-display text-lg font-semibold fa-navy">{title}</h2>
-        </div>
-
-        {step === "email" && (
-          <>
-            <p className="text-sm text-gray-500 mb-5">Entrez votre adresse email.</p>
-            <input value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && submitEmail()}
-              type="email" placeholder="vous@exemple.fr" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={submitEmail} className="w-full fa-bg-teal font-medium rounded-lg py-2.5 text-sm transition">Continuer</button>
-          </>
-        )}
-
-        {step === "createPassword" && (
-          <>
-            <p className="text-sm text-gray-500 mb-5">{account?.password ? "Réinitialisez votre mot de passe." : "Première connexion — créez votre mot de passe."}</p>
-            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
-              placeholder="Nouveau mot de passe (6 caractères min.)" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            <PasswordField value={password2} onChange={e => setPassword2(e.target.value)} onKeyDown={e => e.key === "Enter" && submitCreatePassword()}
-              placeholder="Confirmer le mot de passe"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={submitCreatePassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
-              {busy ? "Création…" : "Créer et accéder"}
-            </button>
-          </>
-        )}
-
-        {step === "password" && (
-          <>
-            <p className="text-sm text-gray-500 mb-5">Bonjour {account?.firstName || account?.name} — entrez votre mot de passe.</p>
-            <PasswordField value={password} onChange={e => setPassword(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && submitPassword()}
-              placeholder="Mot de passe" autoFocus
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3" />
-            {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-            <button onClick={submitPassword} disabled={busy} className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
-              {busy ? "Vérification…" : "Accéder"}
-            </button>
-            <button onClick={() => { setError(""); setPassword(""); setPassword2(""); setStep("createPassword"); }}
-              className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-3">
-              Mot de passe oublié ?
-            </button>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function LoginScreen({ role, code, setCode, error, onBack, onSubmit }) {
-  return (
-    <div className="min-h-screen flex items-center justify-center fa-bg-offwhite px-6">
-      <div className="max-w-sm w-full bg-white border border-gray-200 rounded-2xl shadow-sm p-8">
-        <button onClick={onBack} className="flex items-center gap-1 text-sm text-gray-400 hover:text-teal-700 mb-6">
-          <ArrowLeft size={15} /> Retour
-        </button>
-        <div className="flex items-center gap-2 mb-1">
-          {role === "partner" ? <Users className="fa-teal-text" size={20} /> : <Shield className="text-amber-500" size={20} />}
-          <h2 className="font-display text-lg font-semibold fa-navy">{role === "partner" ? "Espace partenaire" : "Espace Frangola"}</h2>
-        </div>
-        <p className="text-sm text-gray-500 mb-5">{role === "partner" ? "Entrez le code fourni par Frangola Assure." : "Entrez le code administrateur."}</p>
-        <input
-          value={code} onChange={e => setCode(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && onSubmit()}
-          placeholder="Code d'accès" autoFocus
-          className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono tracking-wider uppercase focus:outline-none focus:ring-2 focus:ring-teal-500 mb-3"
-        />
-        {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-        <button onClick={onSubmit}
-          className="w-full fa-bg-teal text-white font-medium rounded-lg py-2.5 text-sm transition">
-          Accéder
-        </button>
-      </div>
-    </div>
+    <span className="inline-flex items-center gap-2 flex-wrap">
+      {codeUtile && (
+        <span className="inline-flex items-center gap-1.5 text-xs bg-amber-50 border border-amber-200 text-amber-800 px-2.5 py-1 rounded-lg">
+          <Key size={12} />
+          <span>Code d'activation</span>
+          <button onClick={copier} title="Copier"
+            className="font-mono font-bold tracking-widest hover:underline">{cible.code}</button>
+          {copie && <span className="text-emerald-700">copié</span>}
+        </span>
+      )}
+      {!codeUtile && (
+        confirme ? (
+          <span className="inline-flex items-center gap-1.5 text-xs">
+            <span className="text-amber-800">Générer un nouveau code ?</span>
+            <button onClick={() => { setConfirme(false); onReinitialiser(); }} className="font-semibold text-amber-800 hover:underline">Oui</button>
+            <button onClick={() => setConfirme(false)} className="text-gray-500 hover:underline">Non</button>
+          </span>
+        ) : (
+          <button onClick={() => setConfirme(true)}
+            title="Délivre un nouveau code d'activation, avec lequel la personne choisira un nouveau mot de passe"
+            className="text-xs font-semibold bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200 px-2.5 py-1 rounded-lg transition">
+            Réinitialiser l'accès
+          </button>
+        )
+      )}
+    </span>
   );
 }
 
@@ -1920,7 +1847,10 @@ function ParrainageCard({ partner, onDeclarer }) {
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-6">
-      <div className="font-display font-bold fa-navy text-lg mb-1">🤝 PARRAINER C'EST GAGNER + !</div>
+      <div className="font-display font-bold fa-navy text-lg mb-1 flex items-center gap-2 flex-wrap">
+        🤝 Parrainer c'est gagner +
+        <TrendingUp size={20} className="text-emerald-600" strokeWidth={2.5} />
+      </div>
       <p className="text-sm fa-navy font-medium mb-1">
         Recevez {Math.round(PARRAINAGE_TAUX * 100)} % du chiffre d'affaires qu'il générera*
       </p>
@@ -3015,8 +2945,17 @@ function RegistreParrainages({ data, onTraiter }) {
           {traitees.map(d => (
             <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 text-xs py-1">
               <span className="fa-navy">{d.prenom} {(d.nom || "").toUpperCase()} · {nomParrainDe(d.parrainId)}</span>
-              <span className={d.statut === "valide" ? "text-emerald-700 font-semibold" : "text-red-700"}>
-                {d.statut === "valide" ? "Validée" : `Refusée — ${d.motif}`}
+              <span className="flex items-center gap-2">
+                <span className={d.statut === "valide" ? "text-emerald-700 font-semibold" : "text-red-700"}>
+                  {d.statut === "valide" ? "Validée" : `Refusée — ${d.motif}`}
+                </span>
+                {d.statut === "valide" && !d.partnerId && (
+                  <button onClick={() => onTraiter(d.id, "valide", "")}
+                    title="Aucune fiche partenaire n'a été créée pour ce filleul — la créer maintenant"
+                    className="text-xs font-semibold fa-navy fa-bg-gold px-2.5 py-1 rounded-lg transition">
+                    Créer la fiche
+                  </button>
+                )}
               </span>
             </div>
           ))}
@@ -3679,6 +3618,17 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
     await onUpdatePartner(id, { ...editForm, flatFee: editForm.flatFee !== "" ? Number(editForm.flatFee) : null });
     setEditingId(null);
   }
+  // Délivre (ou renouvelle) le code d'activation d'un accès. Le mot de passe
+  // lui-même vit chez Supabase : nous ne pouvons ni le lire ni le changer
+  // depuis ici — c'est précisément le but. Ce code permet à la personne de
+  // créer ou reprendre son mot de passe elle-même, une seule fois.
+  async function reinitialiserAcces(genre, id) {
+    const nouveauCode = genCode();
+    const champs = { code: nouveauCode, accesReinitialise: true, codeEmisLe: Date.now() };
+    if (genre === "partner") await onUpdatePartner(id, champs);
+    else await onUpdateMandataire(id, champs);
+  }
+
   async function toggleActive(p) {
     await onUpdatePartner(p.id, { active: p.active === false ? true : false });
   }
@@ -4698,6 +4648,51 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         <RegistreParrainages data={data} onTraiter={onTraiterParrainage} />
 
             <FacturesPartenaires data={data} onSetStatut={onSetFactureStatut} />
+
+            {(() => {
+              // Les fiches créées depuis une déclaration de parrainage arrivent
+              // incomplètes et sans département : sans ce raccourci elles se
+              // perdent dans un dossier replié.
+              const aCompleter = data.partners.filter(p => !p.deleted && !p.email);
+              if (aCompleter.length === 0) return null;
+              return (
+                <div className="bg-white border border-amber-200 rounded-2xl p-5 mb-4">
+                  <div className="font-display font-semibold fa-navy mb-1">
+                    ✎ Fiches à compléter
+                    <span className="ml-2 fa-bg-gold fa-navy text-xs font-bold px-2 py-0.5 rounded-full">{aCompleter.length}</span>
+                  </div>
+                  <p className="text-sm text-gray-500 mb-4">
+                    Ces partenaires n'ont pas encore d'adresse email : ils ne peuvent pas se connecter tant qu'elle manque.
+                  </p>
+                  <div className="space-y-2">
+                    {aCompleter.map(p => (
+                      <div key={p.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
+                        <div>
+                          <div className="text-sm fa-navy font-bold">
+                            {p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}
+                            {p.issuDuParrainage && <span className="ml-2 text-xs text-teal-700">issu du parrainage</span>}
+                          </div>
+                          <div className="text-xs text-gray-400">
+                            {p.company || "réseau non précisé"}
+                            {p.telephone && ` · ${p.telephone}`}
+                            {p.siret && ` · SIRET ${p.siret}`}
+                            {p.parrainId && nomParrain(p.parrainId) && ` · parrainé par ${nomParrain(p.parrainId)}`}
+                          </div>
+                        </div>
+                        <button onClick={() => {
+                          const com = p.commercial || "Sans commercial";
+                          const dep = p.departement || "Sans département";
+                          setOuverts(prev => new Set([...prev, "pcom:" + com, "pdep:" + com + ":" + dep]));
+                          startEdit(p);
+                        }} className="text-xs font-semibold fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition">
+                          Compléter la fiche
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Partenaires</h2>
               <div className="flex items-center gap-2">
@@ -4991,8 +4986,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           {p.active === false ? "Réactiver" : "Désactiver"}
                         </button>
                         <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
-                          {p.email || "email manquant"} · {p.password ? "accès activé" : "en attente de 1ère connexion"} · {p.lastLoginAt ? `dernière connexion ${fmtDate(p.lastLoginAt)}` : "jamais connecté"}
+                          {p.email || "email manquant"} · {p.lastLoginAt ? `dernière connexion ${fmtDate(p.lastLoginAt)}` : "jamais connecté"}
                         </span>
+                        <BlocAcces cible={p} onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
                         {confirmDeleteId === p.id ? (
                           <span className="flex items-center gap-1.5 text-xs">
                             <span className="text-red-700">Confirmer ?</span>
@@ -5753,7 +5749,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           {m.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                         </div>
                         <div className="text-xs text-gray-400">
-                          {m.email} · {m.password ? "Accès activé" : "En attente de 1ère connexion"} · {m.lastLoginAt ? `dernière connexion ${fmtDate(m.lastLoginAt)}` : "jamais connecté"}
+                          {m.email} · {m.lastLoginAt ? `dernière connexion ${fmtDate(m.lastLoginAt)}` : "jamais connecté"}
+                        </div>
+                        <div className="mt-1.5">
+                          <BlocAcces cible={m} onReinitialiser={() => reinitialiserAcces("mandataire", m.id)} />
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
