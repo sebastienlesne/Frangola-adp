@@ -494,6 +494,7 @@ export default function App() {
   const [currentAdmin, setCurrentAdmin] = useState(null);
   const [currentMandataire, setCurrentMandataire] = useState(null);
   const [globalError, setGlobalError] = useState("");
+  const [apercuPartnerId, setApercuPartnerId] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const [loadError, setLoadError] = useState(false);
@@ -716,13 +717,47 @@ export default function App() {
     }));
   }
 
+  // Valider une déclaration crée directement la fiche du filleul, déjà
+  // rattachée à son parrain : il ne reste qu'à compléter ce qui manque.
   async function traiterParrainage(id, statut, motif) {
-    await mutateData(base => ({
-      ...base,
-      parrainages: (base.parrainages || []).map(p => p.id === id
-        ? { ...p, statut, motif: motif || "", traiteAt: Date.now() }
-        : p),
-    }));
+    await mutateData(base => {
+      const decl = (base.parrainages || []).find(p => p.id === id);
+      let partners = base.partners;
+      let partnerId = null;
+
+      if (statut === "valide" && decl && !decl.partnerId) {
+        const parrain = base.partners.find(p => p.id === decl.parrainId);
+        const nouveau = {
+          id: uid(),
+          name: decl.nom || "",
+          firstName: decl.prenom || "",
+          company: decl.reseau || "",
+          telephone: decl.telephone || "",
+          siret: decl.siret || "",
+          email: "",
+          ville: "", postalCode: "", departement: "",
+          commercial: parrain?.commercial || "Sébastien",
+          parrainId: decl.parrainId || null,
+          issuDuParrainage: true,
+          active: true,
+          code: genCode(),
+          createdAt: Date.now(),
+        };
+        partnerId = nouveau.id;
+        partners = [...base.partners, nouveau];
+      }
+
+      const etiquette = decl ? `${decl.prenom || ""} ${(decl.nom || "").toUpperCase()}`.trim() : "";
+      return withLog({
+        ...base,
+        partners,
+        parrainages: (base.parrainages || []).map(p => p.id === id
+          ? { ...p, statut, motif: motif || "", traiteAt: Date.now(), ...(partnerId ? { partnerId } : {}) }
+          : p),
+      }, statut === "valide"
+        ? `a validé le parrainage de ${etiquette} et créé sa fiche partenaire`
+        : `a refusé le parrainage de ${etiquette}`);
+    });
   }
   async function setChallengeGoals(fields) {
     await mutateData(base => ({
@@ -1185,6 +1220,43 @@ export default function App() {
           onMandataireSuccess={(m) => { setCurrentMandataire(m); setView("mandataireDash"); setStoredSession({ type: "mandataire", id: m.id }); }}
         />
       )}
+      {apercuPartnerId && (() => {
+        const cible = data.partners.find(p => p.id === apercuPartnerId);
+        if (!cible) return null;
+        // Aperçu strictement consultatif : toute action d'écriture est neutralisée
+        // pour qu'un clic de curiosité n'écrive jamais au nom du partenaire.
+        const bloque = () => { setGlobalError("Aperçu en lecture seule — action désactivée."); return false; };
+        return (
+          <div className="fixed inset-0 z-50 bg-gray-50 overflow-y-auto">
+            <div className="sticky top-0 z-10 fa-bg-gold px-5 py-2.5 flex items-center justify-between flex-wrap gap-2">
+              <span className="text-sm fa-navy">
+                👁 Aperçu de l'espace de <strong>{cible.firstName ? `${cible.firstName} ${up(cible.name)}` : up(cible.name)}</strong> — lecture seule
+              </span>
+              <button onClick={() => setApercuPartnerId(null)}
+                className="text-xs font-semibold fa-navy bg-white/70 hover:bg-white px-3 py-1.5 rounded-lg transition">
+                Quitter l'aperçu
+              </button>
+            </div>
+            <PartnerDashboard
+              partner={cible}
+              dossiers={data.dossiers.filter(d => d.partnerId === cible.id)}
+              onLogout={() => setApercuPartnerId(null)}
+              onCreateDossier={bloque}
+              onDeclarerParrainage={bloque}
+              onAddExtraDoc={bloque}
+              onUploadRib={bloque}
+              onUploadFacture={bloque}
+              onSetGoal={bloque}
+              onMarkMessageRead={() => {}}
+              onUpdateDossierClient={bloque}
+              onUploadDocToSlot={bloque}
+              onRemoveDoc={bloque}
+              onRemoveExtraDoc={bloque}
+              busy={false}
+            />
+          </div>
+        );
+      })()}
       {view === "partnerDash" && currentPartner && (
         <PartnerDashboard
           partner={data.partners.find(p => p.id === currentPartner.id) || currentPartner}
@@ -1229,6 +1301,7 @@ export default function App() {
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
+                    onApercuPartner={setApercuPartnerId}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -1269,6 +1342,7 @@ export default function App() {
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
+                    onApercuPartner={setApercuPartnerId}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -2924,7 +2998,8 @@ function RegistreParrainages({ data, onTraiter }) {
               ) : (
                 <div className="flex gap-2">
                   <button onClick={() => onTraiter(d.id, "valide", "")}
-                    className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">Valider</button>
+                    title="Crée aussitôt la fiche partenaire du filleul, rattachée à son parrain"
+                    className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">Valider et créer la fiche</button>
                   <button onClick={() => setRefusId(d.id)}
                     className="text-xs font-semibold bg-white border border-gray-300 hover:border-red-300 text-gray-600 px-3 py-1.5 rounded-lg transition">Refuser</button>
                 </div>
@@ -3436,8 +3511,11 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
+  const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
+  const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
+  const actionsPartenaires = parrainagesEnAttente + facturesEnAttente;
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:adminTab", "accueil"));
@@ -3543,9 +3621,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
     const t = setInterval(() => setNowTick(Date.now()), 60000);
     return () => clearInterval(t);
   }, []);
-  const [collapsed, setCollapsed] = useState(new Set());
+  // Côté admin les dossiers sont pliés par défaut : on ne mémorise que ceux
+  // que l'utilisateur a ouverts. Une recherche les déplie tous temporairement.
+  const [ouverts, setOuverts] = useState(new Set());
+  const estPlie = (id) => !ouverts.has(id);
   function toggleFolder(id) {
-    setCollapsed(prev => {
+    setOuverts(prev => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
@@ -3803,6 +3884,15 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
           <button onClick={() => setTab("partenaires")}
             className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "partenaires" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             <Building2 size={15} /> Partenaires
+            {actionsPartenaires > 0 && (
+              <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full min-w-[20px] h-5 px-1.5 flex items-center justify-center"
+                title={[
+                  parrainagesEnAttente > 0 ? `${parrainagesEnAttente} déclaration${parrainagesEnAttente > 1 ? "s" : ""} de parrainage à traiter` : null,
+                  facturesEnAttente > 0 ? `${facturesEnAttente} facture${facturesEnAttente > 1 ? "s" : ""} à régler` : null,
+                ].filter(Boolean).join(" · ")}>
+                {actionsPartenaires}
+              </span>
+            )}
           </button>
           <button onClick={() => setTab("corbeille")}
             className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "corbeille" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
@@ -4033,7 +4123,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                 const deptDossiers = data.dossiers.filter(d => partnersInDeptAll.some(p => p.id === d.partnerId));
                 const deptNewCount = deptDossiers.filter(d => d.status === "Déposé").length;
                 const deptFolderKey = "dept:" + deptKey;
-                const isDeptCollapsed = filterActive ? false : collapsed.has(deptFolderKey);
+                const isDeptCollapsed = filterActive ? false : estPlie(deptFolderKey);
                 return (
                   <div key={deptFolderKey} className="rounded-2xl overflow-hidden border-2 border-teal-100 shadow-sm">
                     <button onClick={() => toggleFolder(deptFolderKey)}
@@ -4059,7 +4149,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           const partnerDossiersAll = data.dossiers.filter(d => d.partnerId === p.id).sort((a, b) => b.createdAt - a.createdAt);
                           const partnerDossiers = filterActive ? partnerDossiersAll.filter(matchesSearch) : partnerDossiersAll;
                           const newCount = partnerDossiersAll.filter(d => d.status === "Déposé").length;
-                          const isCollapsed = filterActive ? false : collapsed.has(p.id);
+                          const isCollapsed = filterActive ? false : estPlie(p.id);
                           return (
                             <div key={p.id} className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm">
                               <button onClick={() => toggleFolder(p.id)}
@@ -4738,12 +4828,12 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                     comCourant = com; depCourant = null;
                     lignes.push({ __header: "commercial", id: cleCom, nom: com, nb: tri.filter(x => cles(x)[0] === com).length });
                   }
-                  if (!filtreActif && collapsed.has(cleCom)) continue;
+                  if (!filtreActif && estPlie(cleCom)) continue;
                   if (dep !== depCourant) {
                     depCourant = dep;
                     lignes.push({ __header: "departement", id: cleDep, nom: dep, nb: tri.filter(x => cles(x)[0] === com && cles(x)[1] === dep).length });
                   }
-                  if (!filtreActif && collapsed.has(cleDep)) continue;
+                  if (!filtreActif && estPlie(cleDep)) continue;
                   lignes.push(p);
                 }
                 return lignes;
@@ -4752,21 +4842,21 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                   <button key={p.id} onClick={() => toggleFolder(p.id)}
                     className="w-full flex items-center justify-between px-5 py-3.5 rounded-xl fa-bg-pink hover:brightness-95 transition">
                     <div className="flex items-center gap-3">
-                      {collapsed.has(p.id) ? <Folder className="fa-navy" size={20} /> : <FolderOpen className="fa-navy" size={20} />}
+                      {estPlie(p.id) ? <Folder className="fa-navy" size={20} /> : <FolderOpen className="fa-navy" size={20} />}
                       <span className="font-display font-bold fa-navy">{commercialLabel(p.nom)}</span>
                       <span className="text-xs text-teal-900/70">{p.nb} partenaire{p.nb > 1 ? "s" : ""}</span>
                     </div>
-                    <ChevronDown size={16} className={`fa-navy transition-transform ${collapsed.has(p.id) ? "" : "rotate-180"}`} />
+                    <ChevronDown size={16} className={`fa-navy transition-transform ${estPlie(p.id) ? "" : "rotate-180"}`} />
                   </button>
                 ) : (
                   <button key={p.id} onClick={() => toggleFolder(p.id)}
                     className="w-full flex items-center justify-between pl-10 pr-5 py-2.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-50 transition">
                     <div className="flex items-center gap-2">
-                      {collapsed.has(p.id) ? <Folder className="fa-teal-text" size={16} /> : <FolderOpen className="fa-teal-text" size={16} />}
+                      {estPlie(p.id) ? <Folder className="fa-teal-text" size={16} /> : <FolderOpen className="fa-teal-text" size={16} />}
                       <span className="text-sm font-semibold fa-navy">{p.nom === "Sans département" ? p.nom : `Département ${p.nom}`}</span>
                       <span className="text-xs text-gray-400">{p.nb}</span>
                     </div>
-                    <ChevronDown size={14} className={`text-gray-400 transition-transform ${collapsed.has(p.id) ? "" : "rotate-180"}`} />
+                    <ChevronDown size={14} className={`text-gray-400 transition-transform ${estPlie(p.id) ? "" : "rotate-180"}`} />
                   </button>
                 )
               ) : (
@@ -4860,6 +4950,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                               🤝 Parrain de {filleulsDe(p.id).length}
                             </span>
                           )}
+                          {!p.email && (
+                            <span className="text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full">
+                              ✎ Fiche à compléter
+                            </span>
+                          )}
                           {p.parrainId && nomParrain(p.parrainId) && (
                             <span className="text-xs font-semibold bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full">
                               🤝 Filleul de {nomParrain(p.parrainId)}
@@ -4887,6 +4982,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           className="text-sm fa-navy fa-bg-gold px-3 py-1.5 rounded-lg font-medium transition">
                           {viewingPartnerId === p.id ? "Fermer" : "Voir"}
                         </button>
+                        <button onClick={() => onApercuPartner(p.id)}
+                          title="Voir son espace exactement comme lui le voit — en lecture seule"
+                          className="fa-tap text-sm fa-teal-text hover:underline px-2">👁 Son espace</button>
                         <button onClick={() => startEdit(p)} className="fa-tap text-sm fa-teal-text hover:underline px-2">Modifier</button>
                         <button onClick={() => toggleActive(p)}
                           className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${p.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
