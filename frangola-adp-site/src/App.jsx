@@ -787,6 +787,43 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
+  // Le partenaire dépose sa facture de commission ; l'admin en suit le paiement.
+  async function uploadFacture(partnerId, file, montant) {
+    if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
+    setBusy(true);
+    try {
+      const b64 = await fileToBase64(file);
+      const fileKey = "adp:file:" + uid();
+      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      const facture = {
+        id: uid(), name: file.name, key: fileKey, size: file.size,
+        at: Date.now(), statut: "Déposée", motif: "",
+        montant: montant === "" || montant == null ? null : Number(montant),
+      };
+      const ok = await mutateData(base => ({
+        ...base,
+        partners: base.partners.map(p => p.id === partnerId
+          ? { ...p, factures: [...(p.factures || []), facture] }
+          : p),
+      }));
+      return ok !== false;
+    } finally { setBusy(false); }
+  }
+
+  async function setFactureStatut(partnerId, factureId, statut, motif) {
+    await mutateData(base => ({
+      ...base,
+      partners: base.partners.map(p => p.id === partnerId
+        ? {
+            ...p,
+            factures: (p.factures || []).map(f => f.id === factureId
+              ? { ...f, statut, motif: motif || "", traiteAt: Date.now() }
+              : f),
+          }
+        : p),
+    }));
+  }
+
   async function uploadPartnerRib(partnerId, file) {
     if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
     setBusy(true);
@@ -1099,6 +1136,7 @@ export default function App() {
                     onDeclarerParrainage={declarerParrainage}
           onAddExtraDoc={addExtraDoc}
           onUploadRib={uploadPartnerRib}
+          onUploadFacture={uploadFacture}
           onSetGoal={setPartnerGoal}
           onMarkMessageRead={markDossierMessageRead}
           onUpdateDossierClient={updateDossierClient}
@@ -1131,6 +1169,7 @@ export default function App() {
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
                     onTraiterParrainage={traiterParrainage}
+                    onSetFactureStatut={setFactureStatut}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -1169,6 +1208,7 @@ export default function App() {
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
                     onTraiterParrainage={traiterParrainage}
+                    onSetFactureStatut={setFactureStatut}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -1810,7 +1850,7 @@ function ParrainageCard({ partner, onDeclarer }) {
     </div>
   );
 }
-function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -1861,6 +1901,19 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
       ? await onAddExtraDoc(dossierId, extraDocLabel.trim(), extraDocFile)
       : await onUploadDocToSlot(dossierId, extraDocType, extraDocFile);
     if (ok) { setExtraDocOpenId(null); setExtraDocLabel(""); setExtraDocFile(null); setExtraDocType("autre"); }
+  }
+
+  const [factureFile, setFactureFile] = useState(null);
+  const [factureMontant, setFactureMontant] = useState("");
+  const [factureBusy, setFactureBusy] = useState(false);
+  const [factureErreur, setFactureErreur] = useState("");
+  async function submitFacture() {
+    if (!factureFile) { setFactureErreur("Choisissez d'abord un fichier PDF."); return; }
+    setFactureErreur(""); setFactureBusy(true);
+    try {
+      const ok = await onUploadFacture(partner.id, factureFile, factureMontant);
+      if (ok) { setFactureFile(null); setFactureMontant(""); }
+    } finally { setFactureBusy(false); }
   }
 
   const [ribFile, setRibFile] = useState(null);
@@ -1934,6 +1987,13 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
           <button onClick={() => setTab("analytique")}
             className={`flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "analytique" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             <BarChart3 size={15} /> Ma Production
+          </button>
+          <button onClick={() => setTab("facturation")}
+            className={`flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "facturation" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+            <Download size={15} /> Facturation
+            {(partner.factures || []).some(f => f.statut === "À corriger") && (
+              <span className="w-2 h-2 rounded-full bg-red-500" title="Une facture est à corriger" />
+            )}
           </button>
           <button onClick={() => setTab("contrat")}
             className={`flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "contrat" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
@@ -2406,6 +2466,107 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                 {tab === "parrainage" && (
           <ParrainageCard partner={partner} onDeclarer={onDeclarerParrainage} />
         )}
+        {tab === "facturation" && (() => {
+          const bordereaux = dossiers
+            .filter(d => d.bordereau)
+            .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+          const factures = (partner.factures || []).slice().sort((a, b) => b.at - a.at);
+          const totalPaye = factures.filter(f => f.statut === "Payée").reduce((s, f) => s + (f.montant || 0), 0);
+          const totalAttente = factures.filter(f => f.statut === "Déposée").reduce((s, f) => s + (f.montant || 0), 0);
+          const couleurStatut = (s) => s === "Payée" ? "bg-emerald-50 text-emerald-700"
+            : s === "À corriger" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700";
+          return (
+            <div className="space-y-6">
+              <div>
+                <h1 className="font-display text-xl font-semibold fa-navy">Facturation</h1>
+                <p className="text-sm text-gray-500">Vos bordereaux de commission et les factures que vous nous adressez.</p>
+              </div>
+
+              <div className="bg-white border border-gray-200 rounded-2xl p-6">
+                <div className="font-display font-semibold fa-navy mb-1">Mes bordereaux de commission</div>
+                <p className="text-sm text-gray-500 mb-4">Émis par Frangola dès la souscription du dossier. Ils justifient le montant à facturer.</p>
+                {bordereaux.length === 0 ? (
+                  <div className="text-sm text-gray-400">Aucun bordereau pour l'instant.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {bordereaux.map(d => (
+                      <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
+                        <div>
+                          <div className="text-sm fa-navy font-bold">{clientName(d)}</div>
+                          <div className="text-xs text-gray-400">
+                            {d.status}{d.caAmount ? ` · commission ${fmtEuro(d.caAmount / 2)}` : ""}
+                          </div>
+                        </div>
+                        <button onClick={() => downloadStoredFile(d.bordereau.key, d.bordereau.name)}
+                          className="flex items-center gap-1.5 text-xs font-medium fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition">
+                          <Download size={14} /> Télécharger
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white border border-gray-200 rounded-2xl p-6">
+                <div className="font-display font-semibold fa-navy mb-1">Déposer une facture</div>
+                <p className="text-sm text-gray-500 mb-4">Au format PDF, 3,5 Mo maximum. Indiquez le montant TTC pour faciliter le rapprochement.</p>
+                <div className="grid sm:grid-cols-3 gap-3 mb-3">
+                  <div className="sm:col-span-2">
+                    <FileDrop label="Facture PDF" file={factureFile} onChange={setFactureFile} />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Montant TTC (€)</label>
+                    <input type="number" value={factureMontant} onChange={e => setFactureMontant(e.target.value)}
+                      placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                </div>
+                {factureErreur && <div className="text-xs text-red-600 mb-2">{factureErreur}</div>}
+                <button onClick={submitFacture} disabled={factureBusy || busy}
+                  className="fa-bg-teal disabled:opacity-50 text-sm font-medium px-5 py-2.5 rounded-lg transition">
+                  {factureBusy ? "Envoi…" : "Envoyer la facture"}
+                </button>
+              </div>
+
+              <div className="bg-white border border-gray-200 rounded-2xl p-6">
+                <div className="font-display font-semibold fa-navy mb-4">Mes factures</div>
+                {factures.length === 0 ? (
+                  <div className="text-sm text-gray-400">Vous n'avez encore déposé aucune facture.</div>
+                ) : (
+                  <>
+                    <div className="grid sm:grid-cols-2 gap-3 mb-4">
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">En attente de règlement</div>
+                        <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalAttente)}</div>
+                      </div>
+                      <div className="fa-bg-gold rounded-xl p-4">
+                        <div className="text-xs text-teal-900/70">Déjà réglé</div>
+                        <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalPaye)}</div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {factures.map(f => (
+                        <div key={f.id} className="fa-bg-offwhite rounded-lg px-3 py-2.5">
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <button onClick={() => downloadStoredFile(f.key, f.name)}
+                              className="text-sm fa-navy font-bold hover:underline text-left">{f.name}</button>
+                            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${couleurStatut(f.statut)}`}>{f.statut}</span>
+                          </div>
+                          <div className="text-xs text-gray-400 mt-0.5">
+                            Déposée le {fmtDate(f.at)}{f.montant != null ? ` · ${fmtEuro(f.montant)}` : ""}
+                          </div>
+                          {f.statut === "À corriger" && f.motif && (
+                            <div className="text-xs text-red-700 mt-1.5">{f.motif}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
         {tab === "contrat" && (
           <div className="space-y-6 max-w-xl">
             <div className="bg-white border border-gray-200 rounded-2xl p-6">
@@ -2890,6 +3051,91 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
     </div>
   );
 }
+function FacturesPartenaires({ data, onSetStatut }) {
+  const [corrigeId, setCorrigeId] = useState(null);
+  const [motif, setMotif] = useState("");
+
+  const lignes = [];
+  for (const p of data.partners) {
+    for (const f of (p.factures || [])) lignes.push({ p, f });
+  }
+  if (lignes.length === 0) return null;
+
+  const attente = lignes.filter(x => x.f.statut === "Déposée").sort((a, b) => a.f.at - b.f.at);
+  const traitees = lignes.filter(x => x.f.statut !== "Déposée").sort((a, b) => b.f.at - a.f.at).slice(0, 8);
+  const totalDu = attente.reduce((s, x) => s + (x.f.montant || 0), 0);
+  const nomDe = (p) => p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-4">
+      <div className="font-display font-semibold fa-navy mb-1">
+        Factures partenaires
+        {attente.length > 0 && (
+          <span className="ml-2 fa-bg-gold fa-navy text-xs font-bold px-2 py-0.5 rounded-full">
+            {attente.length} à régler · {fmtEuro(totalDu)}
+          </span>
+        )}
+      </div>
+      <p className="text-sm text-gray-500 mb-4">Factures de commission déposées par vos apporteurs.</p>
+
+      {attente.length === 0 && <div className="text-sm text-gray-400 mb-3">Aucune facture en attente.</div>}
+
+      <div className="space-y-2">
+        {attente.map(({ p, f }) => (
+          <div key={f.id} className="fa-bg-offwhite rounded-lg px-3 py-2.5">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+              <div>
+                <div className="text-sm fa-navy font-bold">{nomDe(p)}</div>
+                <div className="text-xs text-gray-400">
+                  Déposée le {fmtDate(f.at)}{f.montant != null ? ` · ${fmtEuro(f.montant)}` : " · montant non précisé"}
+                </div>
+              </div>
+              <button onClick={() => downloadStoredFile(f.key, f.name)}
+                className="flex items-center gap-1.5 text-xs font-medium fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition">
+                <Download size={14} /> {f.name}
+              </button>
+            </div>
+            {corrigeId === f.id ? (
+              <div className="space-y-2 mt-2">
+                <input value={motif} onChange={e => setMotif(e.target.value)}
+                  placeholder="Ce qui doit être corrigé — visible par le partenaire"
+                  className="w-full border border-gray-300 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                <div className="flex gap-2">
+                  <button onClick={() => { onSetStatut(p.id, f.id, "À corriger", motif.trim()); setCorrigeId(null); setMotif(""); }}
+                    className="text-xs font-semibold bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg transition">Confirmer</button>
+                  <button onClick={() => { setCorrigeId(null); setMotif(""); }}
+                    className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-2 mt-2">
+                <button onClick={() => onSetStatut(p.id, f.id, "Payée", "")}
+                  className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">Marquer payée</button>
+                <button onClick={() => setCorrigeId(f.id)}
+                  className="text-xs font-semibold bg-white border border-gray-300 hover:border-red-300 text-gray-600 px-3 py-1.5 rounded-lg transition">À corriger</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {traitees.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-100 space-y-1">
+          <div className="text-xs font-semibold fa-navy mb-1">Traitées récemment</div>
+          {traitees.map(({ p, f }) => (
+            <div key={f.id} className="flex items-center justify-between flex-wrap gap-2 text-xs py-1">
+              <span className="fa-navy">{nomDe(p)} · {fmtDate(f.at)}{f.montant != null ? ` · ${fmtEuro(f.montant)}` : ""}</span>
+              <span className={f.statut === "Payée" ? "text-emerald-700 font-semibold" : "text-red-700"}>
+                {f.statut === "Payée" ? "Payée" : `À corriger — ${f.motif}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SauvegardesPanel() {
   const [liste, setListe] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -2955,7 +3201,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -4125,6 +4371,8 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
         {tab === "partenaires" && (
           <div>
                         <RegistreParrainages data={data} onTraiter={onTraiterParrainage} />
+
+            <FacturesPartenaires data={data} onSetStatut={onSetFactureStatut} />
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Partenaires</h2>
               <div className="flex items-center gap-2">
@@ -4934,6 +5182,96 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                   ))}
                 </div>
               </div>
+
+              {(() => {
+                const decls = data.parrainages || [];
+                const parrains = data.partners.filter(p => !p.deleted && filleulsDe(p.id).length > 0);
+                const filleuls = data.partners.filter(p => !p.deleted && p.parrainId);
+                if (decls.length === 0 && filleuls.length === 0) return null;
+
+                const valides = decls.filter(d => d.statut === "valide").length;
+                const refusees = decls.filter(d => d.statut === "refuse").length;
+                const attente = decls.filter(d => d.statut === "en_attente").length;
+                const tauxValidation = decls.length ? Math.round((valides / decls.length) * 100) : 0;
+
+                const idsFilleuls = new Set(filleuls.map(p => p.id));
+                const caParrainage = data.dossiers
+                  .filter(d => d.status === "Payé" && idsFilleuls.has(d.partnerId))
+                  .reduce((s, d) => s + (d.caAmount || 0), 0);
+                const caTotal = data.dossiers
+                  .filter(d => d.status === "Payé")
+                  .reduce((s, d) => s + (d.caAmount || 0), 0);
+                const partCA = caTotal ? Math.round((caParrainage / caTotal) * 100) : 0;
+                const filleulsActifs = filleuls.filter(p => data.dossiers.some(d => d.partnerId === p.id)).length;
+                const tauxActivation = filleuls.length ? Math.round((filleulsActifs / filleuls.length) * 100) : 0;
+                const coutTotal = parrains.reduce((s, p) => s + bilanParrainage(p.id).gainTotal, 0);
+
+                const classement = parrains
+                  .map(p => ({ p, ...bilanParrainage(p.id) }))
+                  .sort((a, b) => b.caTotal - a.caTotal)
+                  .slice(0, 5);
+
+                return (
+                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
+                    <div className="font-display font-semibold fa-navy mb-1">Parrainage — performance</div>
+                    <p className="text-sm text-gray-500 mb-4">Ce que le bouche-à-oreille entre apporteurs rapporte réellement.</p>
+
+                    <div className="grid sm:grid-cols-4 gap-3 mb-4">
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">Déclarations reçues</div>
+                        <div className="font-display text-xl font-bold fa-navy">{decls.length}</div>
+                        <div className="text-[11px] text-gray-400 mt-0.5">{valides} validées · {refusees} refusées · {attente} en attente</div>
+                      </div>
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">Taux de validation</div>
+                        <div className="font-display text-xl font-bold fa-navy">{tauxValidation}%</div>
+                        <div className="text-[11px] text-gray-400 mt-0.5">des déclarations retenues</div>
+                      </div>
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">Filleuls rattachés</div>
+                        <div className="font-display text-xl font-bold fa-navy">{filleuls.length}</div>
+                        <div className="text-[11px] text-gray-400 mt-0.5">{filleulsActifs} actifs — {tauxActivation}%</div>
+                      </div>
+                      <div className="fa-bg-gold rounded-xl p-4">
+                        <div className="text-xs text-teal-900/70">CA issu du parrainage</div>
+                        <div className="font-display text-xl font-bold fa-navy">{fmtEuro(caParrainage)}</div>
+                        <div className="text-[11px] text-teal-900/70 mt-0.5">{partCA}% du CA encaissé</div>
+                      </div>
+                    </div>
+
+                    <div className="grid sm:grid-cols-2 gap-3 mb-4">
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">Coût du dispositif</div>
+                        <div className="font-display text-lg font-bold fa-navy">{fmtEuro(coutTotal)}</div>
+                        <div className="text-[11px] text-gray-400 mt-0.5">{Math.round(PARRAINAGE_TAUX * 100)} % reversés aux parrains</div>
+                      </div>
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-400">Net conservé sur ces dossiers</div>
+                        <div className="font-display text-lg font-bold text-emerald-600">{fmtEuro(caParrainage / 2 - coutTotal)}</div>
+                        <div className="text-[11px] text-gray-400 mt-0.5">après rétrocession apporteur et prime parrain</div>
+                      </div>
+                    </div>
+
+                    {classement.length > 0 && (
+                      <div>
+                        <div className="text-xs font-semibold fa-navy mb-2">Meilleurs parrains</div>
+                        <div className="space-y-1">
+                          {classement.map((x, i) => (
+                            <div key={x.p.id} className="flex items-center justify-between flex-wrap gap-2 text-sm py-1">
+                              <span className="fa-navy font-bold">
+                                {i + 1}. {x.p.firstName ? `${x.p.firstName} ${up(x.p.name)}` : up(x.p.name)}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA {fmtEuro(x.caTotal)} · prime {fmtEuro(x.gainTotal)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
                             <SauvegardesPanel />
 
