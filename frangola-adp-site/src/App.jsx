@@ -687,12 +687,12 @@ export default function App() {
     }
   }
   async function updateAdmin(fields) {
-    await saveData({ ...data, settings: { ...data.settings, admin: { ...data.settings.admin, ...fields } } });
+    await mutateData(base => ({ ...base, settings: { ...base.settings, admin: { ...base.settings.admin, ...fields } } }));
   }
 
   async function addMandataire(fields) {
     const m = { id: uid(), ...fields, password: null, active: true, createdAt: Date.now() };
-    await saveData(withLog({ ...data, mandataires: [...data.mandataires, m] }, `a ajouté le mandataire ${fields.name}`));
+    await mutateData(base => withLog({ ...base, mandataires: [...base.mandataires, m] }, `a ajouté le mandataire ${fields.name}`));
     return m;
   }
 
@@ -743,20 +743,24 @@ export default function App() {
     }, `a réinitialisé l'authentification de ${m?.name || ""}`));
   }
   async function deleteMandataire(id) {
-    const m = data.mandataires.find(m => m.id === id);
-    const mandataires = data.mandataires.map(m => m.id === id ? { ...m, deleted: true, deletedAt: Date.now() } : m);
-    await saveData(withLog({ ...data, mandataires }, `a supprimé le mandataire ${m?.name || ""}`));
+    await mutateData(base => {
+      const m = base.mandataires.find(m => m.id === id);
+      const mandataires = base.mandataires.map(m => m.id === id ? { ...m, deleted: true, deletedAt: Date.now() } : m);
+      return withLog({ ...base, mandataires }, `a supprimé le mandataire ${m?.name || ""}`);
+    });
   }
 
   async function restoreMandataire(id) {
-    const m = data.mandataires.find(m => m.id === id);
-    const mandataires = data.mandataires.map(m => m.id === id ? { ...m, deleted: false, deletedAt: null } : m);
-    await saveData(withLog({ ...data, mandataires }, `a restauré le mandataire ${m?.name || ""}`));
+    await mutateData(base => {
+      const m = base.mandataires.find(m => m.id === id);
+      const mandataires = base.mandataires.map(m => m.id === id ? { ...m, deleted: false, deletedAt: null } : m);
+      return withLog({ ...base, mandataires }, `a restauré le mandataire ${m?.name || ""}`);
+    });
   }
 
   async function addPartner(fields) {
     const p = { id: uid(), ...fields, active: true, code: genCode(), createdAt: Date.now() };
-    await saveData(withLog({ ...data, partners: [...data.partners, p] }, `a ajouté le partenaire ${fields.name}`));
+    await mutateData(base => withLog({ ...base, partners: [...base.partners, p] }, `a ajouté le partenaire ${fields.name}`));
     return p;
   }
 
@@ -768,8 +772,10 @@ export default function App() {
   }
 
   async function setPartnerGoal(partnerId, monthlyGoal) {
-    const partners = data.partners.map(p => p.id === partnerId ? { ...p, monthlyGoal } : p);
-    await saveData({ ...data, partners });
+    await mutateData(base => ({
+      ...base,
+      partners: base.partners.map(p => p.id === partnerId ? { ...p, monthlyGoal } : p),
+    }));
   }
 
   async function uploadPartnerContract(partnerId, file) {
@@ -779,10 +785,12 @@ export default function App() {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
       await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
-      const partners = data.partners.map(p => p.id === partnerId
-        ? { ...p, contractFile: { name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() } }
-        : p);
-      await saveData({ ...data, partners });
+      await mutateData(base => ({
+        ...base,
+        partners: base.partners.map(p => p.id === partnerId
+          ? { ...p, contractFile: { name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() } }
+          : p),
+      }));
       return true;
     } finally { setBusy(false); }
   }
@@ -810,6 +818,20 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
+  // Un versement s'ajoute à un historique daté : un simple cumul ne permet
+  // ni de justifier un paiement, ni de retrouver ce qui a été réglé quand.
+  async function addVersementParrainage(partnerId, montant, note) {
+    const valeur = Number(montant);
+    if (!valeur || valeur <= 0) return false;
+    const versement = { id: uid(), at: Date.now(), montant: valeur, note: (note || "").trim() };
+    return await mutateData(base => ({
+      ...base,
+      partners: base.partners.map(p => p.id === partnerId
+        ? { ...p, parrainageVersements: [...(p.parrainageVersements || []), versement] }
+        : p),
+    }));
+  }
+
   async function setFactureStatut(partnerId, factureId, statut, motif) {
     await mutateData(base => ({
       ...base,
@@ -831,10 +853,12 @@ export default function App() {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
       await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
-      const partners = data.partners.map(p => p.id === partnerId
-        ? { ...p, ribFile: { name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() } }
-        : p);
-      await saveData({ ...data, partners });
+      await mutateData(base => ({
+        ...base,
+        partners: base.partners.map(p => p.id === partnerId
+          ? { ...p, ribFile: { name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() } }
+          : p),
+      }));
       return true;
     } finally { setBusy(false); }
   }
@@ -846,31 +870,39 @@ export default function App() {
     setBusy(true);
     try {
       const dataUrl = await fileToDataURL(file);
-      const existing = data.reseaux.find(r => r.name.trim().toLowerCase() === name.toLowerCase());
-      const reseaux = existing
-        ? data.reseaux.map(r => r === existing ? { ...r, logoData: dataUrl, uploadedAt: Date.now() } : r)
-        : [...data.reseaux, { id: uid(), name, logoData: dataUrl, uploadedAt: Date.now() }];
-      await saveData({ ...data, reseaux });
+      await mutateData(base => {
+        const existing = base.reseaux.find(r => r.name.trim().toLowerCase() === name.toLowerCase());
+        const reseaux = existing
+          ? base.reseaux.map(r => r === existing ? { ...r, logoData: dataUrl, uploadedAt: Date.now() } : r)
+          : [...base.reseaux, { id: uid(), name, logoData: dataUrl, uploadedAt: Date.now() }];
+        return { ...base, reseaux };
+      });
       return true;
     } finally { setBusy(false); }
   }
 
   async function removeReseauLogo(reseauName) {
     const name = reseauName.trim().toLowerCase();
-    const reseaux = data.reseaux.filter(r => r.name.trim().toLowerCase() !== name);
-    await saveData({ ...data, reseaux });
+    await mutateData(base => ({
+      ...base,
+      reseaux: base.reseaux.filter(r => r.name.trim().toLowerCase() !== name),
+    }));
   }
 
   async function deletePartner(id) {
-    const p = data.partners.find(p => p.id === id);
-    const partners = data.partners.map(p => p.id === id ? { ...p, deleted: true, deletedAt: Date.now() } : p);
-    await saveData(withLog({ ...data, partners }, `a supprimé le partenaire ${p?.name || ""}`));
+    await mutateData(base => {
+      const p = base.partners.find(p => p.id === id);
+      const partners = base.partners.map(p => p.id === id ? { ...p, deleted: true, deletedAt: Date.now() } : p);
+      return withLog({ ...base, partners }, `a supprimé le partenaire ${p?.name || ""}`);
+    });
   }
 
   async function restorePartner(id) {
-    const p = data.partners.find(p => p.id === id);
-    const partners = data.partners.map(p => p.id === id ? { ...p, deleted: false, deletedAt: null } : p);
-    await saveData(withLog({ ...data, partners }, `a restauré le partenaire ${p?.name || ""}`));
+    await mutateData(base => {
+      const p = base.partners.find(p => p.id === id);
+      const partners = base.partners.map(p => p.id === id ? { ...p, deleted: false, deletedAt: null } : p);
+      return withLog({ ...base, partners }, `a restauré le partenaire ${p?.name || ""}`);
+    });
   }
 
   async function createDossier(clientFirstName, clientLastName, clientPhone, files, hasCoEmprunteur, coClientLastName, coClientFirstName, coClientPhone) {
@@ -901,35 +933,45 @@ export default function App() {
   }
 
   async function updateStatus(dossierId, newStatus) {
-    const target = data.dossiers.find(d => d.id === dossierId);
-    const dossiers = data.dossiers.map(d => {
-      if (d.id !== dossierId) return d;
-      const history = [...(d.history || []), { status: newStatus, at: Date.now() }];
-      return { ...d, status: newStatus, updatedAt: Date.now(), history };
+    await mutateData(base => {
+      const target = base.dossiers.find(d => d.id === dossierId);
+      const dossiers = base.dossiers.map(d => {
+        if (d.id !== dossierId) return d;
+        const history = [...(d.history || []), { status: newStatus, at: Date.now() }];
+        return { ...d, status: newStatus, updatedAt: Date.now(), history };
+      });
+      const cname = target ? `${target.clientLastName || ""} ${target.clientFirstName || ""}`.trim() || "(sans nom)" : "";
+      return withLog({ ...base, dossiers }, `a changé le statut de ${cname} → ${newStatus}`);
     });
-    const cname = target ? `${target.clientLastName || ""} ${target.clientFirstName || ""}`.trim() || "(sans nom)" : "";
-    await saveData(withLog({ ...data, dossiers }, `a changé le statut de ${cname} → ${newStatus}`));
   }
 
   async function updateDossierClient(dossierId, fields) {
-    const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, ...fields, updatedAt: Date.now() } : d);
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => d.id === dossierId ? { ...d, ...fields, updatedAt: Date.now() } : d),
+    }));
   }
 
   async function deleteDossierPermanently(dossierId) {
-    const target = data.dossiers.find(d => d.id === dossierId);
-    const dossiers = data.dossiers.filter(d => d.id !== dossierId);
-    await saveData(withLog({ ...data, dossiers }, `a supprimé le dossier ${target ? clientName(target) : ""}`));
+    await mutateData(base => {
+      const target = base.dossiers.find(d => d.id === dossierId);
+      const dossiers = base.dossiers.filter(d => d.id !== dossierId);
+      return withLog({ ...base, dossiers }, `a supprimé le dossier ${target ? clientName(target) : ""}`);
+    });
   }
 
   async function updateDossierNotes(dossierId, notes) {
-    const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, notes } : d);
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => d.id === dossierId ? { ...d, notes } : d),
+    }));
   }
 
   async function updateDossierSimulation(dossierId, fields) {
-    const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, simulation: { ...(d.simulation || {}), ...fields } } : d);
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => d.id === dossierId ? { ...d, simulation: { ...(d.simulation || {}), ...fields } } : d),
+    }));
   }
 
   async function analyzeDossierIA(dossierId) {
@@ -975,13 +1017,17 @@ export default function App() {
   }
 
   async function updateDossierPartnerMessage(dossierId, partnerMessage) {
-    const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, partnerMessage, partnerMessageRead: false } : d);
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => d.id === dossierId ? { ...d, partnerMessage, partnerMessageRead: false } : d),
+    }));
   }
 
   async function markDossierMessageRead(dossierId) {
-    const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, partnerMessageRead: true } : d);
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => d.id === dossierId ? { ...d, partnerMessageRead: true } : d),
+    }));
   }
 
   async function adminUploadDoc(dossierId, docKey, file) {
@@ -991,43 +1037,51 @@ export default function App() {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
       await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
-      const dossiers = data.dossiers.map(d => d.id === dossierId
-        ? { ...d, docs: { ...(d.docs || {}), [docKey]: { name: file.name, key: fileKey, size: file.size } } }
-        : d);
-      await saveData({ ...data, dossiers });
+      await mutateData(base => ({
+        ...base,
+        dossiers: base.dossiers.map(d => d.id === dossierId
+          ? { ...d, docs: { ...(d.docs || {}), [docKey]: { name: file.name, key: fileKey, size: file.size } } }
+          : d),
+      }));
       return true;
     } finally { setBusy(false); }
   }
 
   async function removeDoc(dossierId, docKey) {
-    const dossiers = data.dossiers.map(d => {
-      if (d.id !== dossierId) return d;
-      const docs = { ...(d.docs || {}) };
-      delete docs[docKey];
-      return { ...d, docs };
-    });
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => {
+        if (d.id !== dossierId) return d;
+        const docs = { ...(d.docs || {}) };
+        delete docs[docKey];
+        return { ...d, docs };
+      }),
+    }));
   }
 
   async function swapDocs(dossierId, keyA, keyB) {
-    const dossiers = data.dossiers.map(d => {
-      if (d.id !== dossierId) return d;
-      const docs = { ...(d.docs || {}) };
-      const tmp = docs[keyA];
-      if (docs[keyB]) docs[keyA] = docs[keyB]; else delete docs[keyA];
-      if (tmp) docs[keyB] = tmp; else delete docs[keyB];
-      return { ...d, docs };
-    });
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => {
+        if (d.id !== dossierId) return d;
+        const docs = { ...(d.docs || {}) };
+        const tmp = docs[keyA];
+        if (docs[keyB]) docs[keyA] = docs[keyB]; else delete docs[keyA];
+        if (tmp) docs[keyB] = tmp; else delete docs[keyB];
+        return { ...d, docs };
+      }),
+    }));
   }
 
   async function removeExtraDoc(dossierId, index) {
-    const dossiers = data.dossiers.map(d => {
-      if (d.id !== dossierId) return d;
-      const extraDocs = (d.extraDocs || []).filter((_, i) => i !== index);
-      return { ...d, extraDocs };
-    });
-    await saveData({ ...data, dossiers });
+    await mutateData(base => ({
+      ...base,
+      dossiers: base.dossiers.map(d => {
+        if (d.id !== dossierId) return d;
+        const extraDocs = (d.extraDocs || []).filter((_, i) => i !== index);
+        return { ...d, extraDocs };
+      }),
+    }));
   }
 
   async function addExtraDoc(dossierId, label, file) {
@@ -1038,8 +1092,10 @@ export default function App() {
       const fileKey = "adp:file:" + uid();
       await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
       const newDoc = { label: label || file.name, name: file.name, key: fileKey, size: file.size, addedAt: Date.now() };
-      const dossiers = data.dossiers.map(d => d.id === dossierId ? { ...d, extraDocs: [...(d.extraDocs || []), newDoc] } : d);
-      await saveData({ ...data, dossiers });
+      await mutateData(base => ({
+        ...base,
+        dossiers: base.dossiers.map(d => d.id === dossierId ? { ...d, extraDocs: [...(d.extraDocs || []), newDoc] } : d),
+      }));
       return true;
     } finally { setBusy(false); }
   }
@@ -1051,10 +1107,12 @@ export default function App() {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
       await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
-      const dossiers = data.dossiers.map(d => d.id === dossierId
-        ? { ...d, bordereau: { name: file.name, key: fileKey, size: file.size }, status: "Bordereau émis", updatedAt: Date.now(), history: [...(d.history || []), { status: "Bordereau émis", at: Date.now() }] }
-        : d);
-      await saveData({ ...data, dossiers });
+      await mutateData(base => ({
+        ...base,
+        dossiers: base.dossiers.map(d => d.id === dossierId
+          ? { ...d, bordereau: { name: file.name, key: fileKey, size: file.size }, status: "Bordereau émis", updatedAt: Date.now(), history: [...(d.history || []), { status: "Bordereau émis", at: Date.now() }] }
+          : d),
+      }));
     } finally { setBusy(false); }
   }
 
@@ -1170,6 +1228,7 @@ export default function App() {
                     onSetChallengeGoals={setChallengeGoals}
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
+                    onAddVersementParrainage={addVersementParrainage}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -1209,6 +1268,7 @@ export default function App() {
                     onSetChallengeGoals={setChallengeGoals}
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
+                    onAddVersementParrainage={addVersementParrainage}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -1786,9 +1846,12 @@ function ParrainageCard({ partner, onDeclarer }) {
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-6">
-      <div className="font-display font-semibold fa-navy mb-1">🤝 Parrainez un confrère</div>
-      <p className="text-sm text-gray-500 mb-4">
-        Présentez-nous un confrère qui ne travaille pas encore avec Frangola et percevez une part du chiffre d'affaires qu'il générera. Seuls les confrères inconnus de notre réseau sont éligibles.
+      <div className="font-display font-bold fa-navy text-lg mb-1">🤝 PARRAINER C'EST GAGNER + !</div>
+      <p className="text-sm fa-navy font-medium mb-1">
+        Recevez {Math.round(PARRAINAGE_TAUX * 100)} % du chiffre d'affaires qu'il générera*
+      </p>
+      <p className="text-xs text-gray-400 mb-4">
+        *Seuls les confrères inconnus de notre réseau sont éligibles.
       </p>
 
       {envoye && (
@@ -2268,6 +2331,9 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
           const ko = dossiers.filter(d => d.status === "KO");
           const totalRemuneration = paid.reduce((s, d) => s + (d.commissionAmount || 0), 0);
           const avgRemuneration = paid.length ? totalRemuneration / paid.length : (partner.flatFee != null ? partner.flatFee : 150);
+          const bilanPar = bilanParrainage(partner.id);
+          const revenuPassif = bilanPar.gainTotal;
+          const revenuGlobal = totalRemuneration + revenuPassif;
           const transformDenominator = total - ko.length;
           const transformRate = transformDenominator > 0 ? Math.round((paid.length / transformDenominator) * 100) : 0;
 
@@ -2328,11 +2394,23 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                 )}
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-4">
+              <div className={`grid gap-4 ${revenuPassif > 0 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                 <div className="fa-bg-teal rounded-2xl p-6">
                   <div className="text-xs text-white/80 mb-1">Rémunération totale perçue</div>
                   <div className="font-display text-3xl font-bold text-white">{fmtEuro(totalRemuneration)}</div>
+                  {revenuPassif > 0 && (
+                    <div className="text-xs text-white/70 mt-1">Avec le parrainage : {fmtEuro(revenuGlobal)}</div>
+                  )}
                 </div>
+                {revenuPassif > 0 && (
+                  <div className="fa-bg-pink rounded-2xl p-6">
+                    <div className="text-xs text-teal-900/70 mb-1">Revenus passifs — parrainage</div>
+                    <div className="font-display text-3xl font-bold fa-navy">{fmtEuro(revenuPassif)}</div>
+                    <div className="text-xs text-teal-900/70 mt-1">
+                      générés par {bilanPar.actifs} filleul{bilanPar.actifs > 1 ? "s" : ""} actif{bilanPar.actifs > 1 ? "s" : ""} — sans rien faire de plus
+                    </div>
+                  </div>
+                )}
                 <div className="fa-bg-gold rounded-2xl p-6">
                   <div className="text-xs text-teal-900/70 mb-1">Rémunération moyenne / dossier payé</div>
                   <div className="font-display text-3xl font-bold fa-navy">{fmtEuro(avgRemuneration)}</div>
@@ -3051,6 +3129,163 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
     </div>
   );
 }
+function VersementsParrainage({ data, onAddVersement }) {
+  const [ouvertId, setOuvertId] = useState(null);
+  const [montant, setMontant] = useState("");
+  const [note, setNote] = useState("");
+  const [detailId, setDetailId] = useState(null);
+
+  // Le cumul historique (ancien champ) reste pris en compte pour ne pas
+  // repartir de zéro sur ce qui a déjà été réglé avant l'historique daté.
+  const verseTotal = (p) => (p.parrainageVerse || 0)
+    + (p.parrainageVersements || []).reduce((s, v) => s + (v.montant || 0), 0);
+
+  const parrains = data.partners
+    .filter(p => !p.deleted && filleulsDe(p.id).length > 0)
+    .map(p => ({ p, ...bilanParrainage(p.id), verse: verseTotal(p) }))
+    .map(x => ({ ...x, reste: x.gainTotal - x.verse }))
+    .sort((a, b) => b.reste - a.reste);
+
+  if (parrains.length === 0) return null;
+
+  const totalDu = parrains.reduce((s, x) => s + x.gainTotal, 0);
+  const totalVerse = parrains.reduce((s, x) => s + x.verse, 0);
+  const aRegler = parrains.filter(x => x.reste > 0.5);
+  const nomDe = (p) => p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+
+  async function enregistrer(partnerId) {
+    const ok = await onAddVersement(partnerId, montant, note);
+    if (ok !== false) { setOuvertId(null); setMontant(""); setNote(""); }
+  }
+
+  // Dossiers payés d'un filleul : c'est ce qui justifie la prime.
+  const dossiersJustificatifs = (partnerId) => filleulsDe(partnerId).flatMap(f =>
+    data.dossiers
+      .filter(d => d.partnerId === f.id && d.status === "Payé")
+      .map(d => ({ d, filleul: f }))
+  ).sort((a, b) => (b.d.paymentDate ? new Date(b.d.paymentDate).getTime() : b.d.updatedAt)
+                 - (a.d.paymentDate ? new Date(a.d.paymentDate).getTime() : a.d.updatedAt));
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="font-display font-semibold fa-navy mb-1">
+        Parrainage — combien verser
+        {aRegler.length > 0 && (
+          <span className="ml-2 fa-bg-gold fa-navy text-xs font-bold px-2 py-0.5 rounded-full">
+            {aRegler.length} parrain{aRegler.length > 1 ? "s" : ""} à régler
+          </span>
+        )}
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        La prime est due sur les dossiers de vos filleuls déjà <strong>payés</strong> : {Math.round(PARRAINAGE_TAUX * 100)} % du chiffre d'affaires encaissé.
+      </p>
+
+      <div className="grid sm:grid-cols-3 gap-3 mb-4">
+        <div className="fa-bg-offwhite rounded-xl p-4">
+          <div className="text-xs text-gray-400">Dû depuis le début</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalDu)}</div>
+        </div>
+        <div className="fa-bg-offwhite rounded-xl p-4">
+          <div className="text-xs text-gray-400">Déjà versé</div>
+          <div className="font-display text-xl font-bold text-emerald-600">{fmtEuro(totalVerse)}</div>
+        </div>
+        <div className="fa-bg-gold rounded-xl p-4">
+          <div className="text-xs text-teal-900/70">Reste à payer</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuro(Math.max(0, totalDu - totalVerse))}</div>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        {parrains.map(x => {
+          const justificatifs = detailId === x.p.id ? dossiersJustificatifs(x.p.id) : [];
+          const versements = (x.p.parrainageVersements || []).slice().sort((a, b) => b.at - a.at);
+          return (
+            <div key={x.p.id} className="fa-bg-offwhite rounded-lg px-3 py-2.5">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="min-w-[160px]">
+                  <div className="text-sm fa-navy font-bold">{nomDe(x.p)}</div>
+                  <div className="text-xs text-gray-400">
+                    {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA encaissé {fmtEuro(x.caTotal)}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs text-gray-500">Dû {fmtEuro(x.gainTotal)} · versé {fmtEuro(x.verse)}</span>
+                  <span className={`text-sm font-bold px-2.5 py-1 rounded-full ${x.reste > 0.5 ? "fa-bg-gold fa-navy" : "bg-emerald-50 text-emerald-700"}`}>
+                    {x.reste > 0.5 ? `à verser ${fmtEuro(x.reste)}` : "à jour"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex gap-2 mt-2 flex-wrap">
+                {ouvertId !== x.p.id && (
+                  <button onClick={() => { setOuvertId(x.p.id); setMontant(x.reste > 0.5 ? String(Math.round(x.reste * 100) / 100) : ""); setNote(""); }}
+                    className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">
+                    Enregistrer un versement
+                  </button>
+                )}
+                <button onClick={() => setDetailId(detailId === x.p.id ? null : x.p.id)}
+                  className="text-xs font-semibold bg-white border border-gray-300 text-gray-600 px-3 py-1.5 rounded-lg transition">
+                  {detailId === x.p.id ? "Masquer le détail" : "Voir le détail"}
+                </button>
+              </div>
+
+              {ouvertId === x.p.id && (
+                <div className="flex gap-2 mt-2 flex-wrap items-center">
+                  <input type="number" value={montant} onChange={e => setMontant(e.target.value)} placeholder="Montant €"
+                    className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs w-28 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <input value={note} onChange={e => setNote(e.target.value)} placeholder="Référence du virement (facultatif)"
+                    className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs flex-1 min-w-[180px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <button onClick={() => enregistrer(x.p.id)}
+                    className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Valider</button>
+                  <button onClick={() => setOuvertId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                </div>
+              )}
+
+              {detailId === x.p.id && (
+                <div className="mt-3 pt-2 border-t border-gray-200 space-y-2">
+                  <div>
+                    <div className="text-xs font-semibold fa-navy mb-1">Dossiers payés qui ouvrent droit à la prime</div>
+                    {justificatifs.length === 0 ? (
+                      <div className="text-xs text-gray-400">Aucun dossier payé pour l'instant — rien n'est encore dû.</div>
+                    ) : justificatifs.map(({ d, filleul }) => (
+                      <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 text-xs py-0.5">
+                        <span className="text-gray-600">
+                          {clientName(d)} <span className="text-gray-400">— via {filleul.firstName ? `${filleul.firstName} ${up(filleul.name)}` : up(filleul.name)}</span>
+                        </span>
+                        <span className="fa-navy">
+                          CA {fmtEuro(d.caAmount || 0)} → prime {fmtEuro((d.caAmount || 0) * PARRAINAGE_TAUX)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold fa-navy mb-1">Versements effectués</div>
+                    {versements.length === 0 && !x.p.parrainageVerse ? (
+                      <div className="text-xs text-gray-400">Aucun versement enregistré.</div>
+                    ) : (
+                      <>
+                        {x.p.parrainageVerse > 0 && (
+                          <div className="text-xs text-gray-500 py-0.5">Report antérieur : {fmtEuro(x.p.parrainageVerse)}</div>
+                        )}
+                        {versements.map(v => (
+                          <div key={v.id} className="flex items-center justify-between flex-wrap gap-2 text-xs py-0.5">
+                            <span className="text-gray-600">{fmtDate(v.at)}{v.note ? ` — ${v.note}` : ""}</span>
+                            <span className="text-emerald-700 font-semibold">{fmtEuro(v.montant)}</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function FacturesPartenaires({ data, onSetStatut }) {
   const [corrigeId, setCorrigeId] = useState(null);
   const [motif, setMotif] = useState("");
@@ -3201,7 +3436,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
@@ -4620,8 +4855,14 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
                           {p.flatFee != null && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Forfait {p.flatFee}€</span>}
                           {filleulsDe(p.id).length > 0 && (
-                            <span className="text-xs font-semibold fa-bg-gold fa-navy px-2 py-0.5 rounded-full">
-                              🤝 {filleulsDe(p.id).length} filleul{filleulsDe(p.id).length > 1 ? "s" : ""}
+                            <span className="text-xs font-semibold fa-bg-gold fa-navy px-2 py-0.5 rounded-full"
+                              title={"Filleuls : " + filleulsDe(p.id).map(f => f.firstName ? `${f.firstName} ${up(f.name)}` : up(f.name)).join(", ")}>
+                              🤝 Parrain de {filleulsDe(p.id).length}
+                            </span>
+                          )}
+                          {p.parrainId && nomParrain(p.parrainId) && (
+                            <span className="text-xs font-semibold bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full">
+                              🤝 Filleul de {nomParrain(p.parrainId)}
                             </span>
                           )}
                           {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
@@ -4633,6 +4874,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         </div>
                         <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">
                           {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
+                          {filleulsDe(p.id).length > 0 && (
+                            <span className="w-full text-xs text-teal-700">
+                              Filleuls : {filleulsDe(p.id).map(f => f.firstName ? `${f.firstName} ${up(f.name)}` : up(f.name)).join(" · ")}
+                            </span>
+                          )}
                         </div>
                         {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
                       </div>
@@ -5275,64 +5521,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
 
                             <SauvegardesPanel />
 
-              {(() => {
-                const parrains = data.partners
-                  .filter(p => !p.deleted && filleulsDe(p.id).length > 0)
-                  .map(p => ({ p, ...bilanParrainage(p.id), verse: p.parrainageVerse || 0 }))
-                  .sort((a, b) => b.gainTotal - a.gainTotal);
-                if (parrains.length === 0) return null;
-                const totalDu = parrains.reduce((s, x) => s + x.gainTotal, 0);
-                const totalVerse = parrains.reduce((s, x) => s + x.verse, 0);
-                return (
-                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                    <div className="font-display font-semibold fa-navy mb-1">🤝 Parrainage — sommes à verser</div>
-                    <p className="text-sm text-gray-500 mb-4">
-                      {Math.round(PARRAINAGE_TAUX * 100)} % du CA généré par chaque filleul, dû à son parrain.
-                      Saisissez le montant déjà versé pour suivre le reste à payer.
-                    </p>
-                    <div className="grid sm:grid-cols-3 gap-3 mb-4">
-                      <div className="fa-bg-offwhite rounded-xl p-4">
-                        <div className="text-xs text-gray-400">Total dû depuis le début</div>
-                        <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalDu)}</div>
-                      </div>
-                      <div className="fa-bg-offwhite rounded-xl p-4">
-                        <div className="text-xs text-gray-400">Déjà versé</div>
-                        <div className="font-display text-xl font-bold text-emerald-600">{fmtEuro(totalVerse)}</div>
-                      </div>
-                      <div className="fa-bg-gold rounded-xl p-4">
-                        <div className="text-xs text-teal-900/70">Reste à payer</div>
-                        <div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalDu - totalVerse)}</div>
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      {parrains.map(x => {
-                        const reste = x.gainTotal - x.verse;
-                        return (
-                          <div key={x.p.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
-                            <div className="min-w-[150px]">
-                              <div className="text-sm fa-navy font-bold">
-                                {x.p.firstName ? `${x.p.firstName} ${up(x.p.name)}` : up(x.p.name)}
-                              </div>
-                              <div className="text-xs text-gray-400">
-                                {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA généré {fmtEuro(x.caTotal)}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs text-gray-500">Dû {fmtEuro(x.gainTotal)}</span>
-                              <input type="number" defaultValue={x.verse || ""} placeholder="versé"
-                                onBlur={e => onUpdatePartner(x.p.id, { parrainageVerse: e.target.value === "" ? 0 : Number(e.target.value) })}
-                                className="border border-gray-300 rounded-lg px-2 py-1 text-xs w-24 focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                              <span className={`text-sm font-bold px-2.5 py-1 rounded-full ${reste > 0 ? "fa-bg-gold fa-navy" : "bg-emerald-50 text-emerald-700"}`}>
-                                {reste > 0 ? `reste ${fmtEuro(reste)}` : "à jour"}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })()}
+              <VersementsParrainage data={data} onAddVersement={onAddVersementParrainage} />
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
                 <div className="font-display font-semibold fa-navy mb-4">Évolution du nombre de partenaires</div>
                 <div style={{ width: "100%", height: 200 }}>
