@@ -1374,6 +1374,8 @@ export default function App() {
           currentAdmin={currentAdmin}
           isFullAdmin={true}
           viewerLabel={currentMandataire.firstName || currentMandataire.name}
+          viewerTelephone={liveMandataire.telephone || ""}
+          onSetViewerTelephone={(tel) => updateMandataire(liveMandataire.id, { telephone: tel })}
           onLogout={logout}
           onAddPartner={addPartner}
           onUpdatePartner={updatePartner}
@@ -1415,6 +1417,8 @@ export default function App() {
           currentAdmin={currentAdmin}
           isFullAdmin={true}
           viewerLabel="Sébastien"
+          viewerTelephone={data.settings.admin.telephone || ""}
+          onSetViewerTelephone={(tel) => updateAdmin({ telephone: tel })}
           onLogout={logout}
           onAddPartner={addPartner}
           onUpdatePartner={updatePartner}
@@ -1852,7 +1856,20 @@ const SITE_URL = "https://frangola-adp.fr";
 // nouveau mandataire avec son code d'activation. Le contenu diffère : un
 // mandataire doit en plus configurer son application d'authentification.
 // =============================================================================
-function messageInvitation(cible, expediteur, genre) {
+function piedDeSignature(expediteur, telephone) {
+  const lignes = [
+    "À très vite,",
+    expediteur || "Sébastien",
+    "Frangola — Assurance de prêt",
+  ];
+  if ((telephone || "").trim()) lignes.push((telephone || "").trim());
+  lignes.push("");
+  lignes.push("FRANGOLA — Courtier en assurance · ORIAS n°26010830");
+  lignes.push("6 bis boulevard Berthelot, Bureau 3 — 34000 Montpellier");
+  return lignes;
+}
+
+function messageInvitation(cible, expediteur, genre, telephone) {
   const prenom = (cible.firstName || "").trim();
   const bonjour = prenom ? `Bonjour ${prenom},` : "Bonjour,";
   const email = (cible.email || "").trim();
@@ -1881,9 +1898,7 @@ function messageInvitation(cible, expediteur, genre) {
         "",
         "Une question ? Répondez simplement à ce message.",
         "",
-        "À très vite,",
-        expediteur || "Sébastien",
-        "Frangola — Assurance de prêt",
+        ...piedDeSignature(expediteur, telephone),
       ].join("\n"),
     };
   }
@@ -1912,9 +1927,7 @@ function messageInvitation(cible, expediteur, genre) {
       "",
       "Une question ? Répondez simplement à ce message, ou appelez-moi.",
       "",
-      "À très vite,",
-      expediteur || "Sébastien",
-      "Frangola — Assurance de prêt",
+      ...piedDeSignature(expediteur, telephone),
     ].join("\n"),
   };
 }
@@ -1926,18 +1939,48 @@ function messageInvitation(cible, expediteur, genre) {
 // Le mot de passe n'apparaît nulle part : il est détenu par Supabase sous
 // forme d'empreinte. Personne, pas même l'administrateur, ne peut le lire.
 // =============================================================================
-function BlocAcces({ cible, onReinitialiser, expediteur, genre = "partenaire" }) {
+// Numéro repris dans la signature des messages d'invitation. Chacun le sien :
+// c'est l'expéditeur du message qu'un partenaire doit pouvoir rappeler.
+function ChampTelephoneSignature({ valeur, onEnregistrer }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [saisie, setSaisie] = useState(valeur || "");
+  useEffect(() => { setSaisie(valeur || ""); }, [valeur]);
+
+  if (!onEnregistrer) return null;
+
+  if (!ouvert) {
+    return (
+      <button onClick={() => setOuvert(true)}
+        title="Numéro affiché dans la signature de vos messages d'invitation"
+        className="hidden sm:inline text-xs text-gray-400 hover:fa-teal-text underline underline-offset-2">
+        {valeur ? `☎ ${valeur}` : "☎ ajouter mon numéro"}
+      </button>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <input value={saisie} onChange={e => setSaisie(e.target.value)} type="tel" placeholder="06 12 34 56 78" autoFocus
+        onKeyDown={e => { if (e.key === "Enter") { onEnregistrer(saisie.trim()); setOuvert(false); } if (e.key === "Escape") setOuvert(false); }}
+        className="border border-gray-300 rounded-lg px-2 py-1 text-xs w-36 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+      <button onClick={() => { onEnregistrer(saisie.trim()); setOuvert(false); }}
+        className="text-xs font-semibold fa-teal-text hover:underline">OK</button>
+      <button onClick={() => setOuvert(false)} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
+    </span>
+  );
+}
+
+function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "partenaire" }) {
   const [copie, setCopie] = useState(false);
   const [copieMsg, setCopieMsg] = useState(false);
   const [confirme, setConfirme] = useState(false);
 
   function preparerEmail() {
-    const { sujet, corps } = messageInvitation(cible, expediteur, genre);
+    const { sujet, corps } = messageInvitation(cible, expediteur, genre, telephone);
     const lien = `mailto:${encodeURIComponent(cible.email || "")}?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(corps)}`;
     window.location.href = lien;
   }
   function copierMessage() {
-    const { corps } = messageInvitation(cible, expediteur, genre);
+    const { corps } = messageInvitation(cible, expediteur, genre, telephone);
     try {
       navigator.clipboard.writeText(corps);
       setCopieMsg(true); setTimeout(() => setCopieMsg(false), 2000);
@@ -3639,7 +3682,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -4010,6 +4053,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">{viewerLabel}</strong></span>
+          <ChampTelephoneSignature valeur={viewerTelephone} onEnregistrer={onSetViewerTelephone} />
           <button onClick={() => downloadJson(`frangola-adp-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`, data)}
             title="Sauvegarder toutes les données (JSON)"
             className="text-gray-400 hover:fa-teal-text transition">
@@ -5291,7 +5335,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                         <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
                           {p.email || "email manquant"} · {p.lastLoginAt ? `dernière connexion ${fmtDate(p.lastLoginAt)}` : "jamais connecté"}
                         </span>
-                        <BlocAcces cible={p} expediteur={viewerLabel} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
+                        <BlocAcces cible={p} expediteur={viewerLabel} telephone={viewerTelephone} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
                         {confirmDeleteId === p.id ? (
                           <span className="flex items-center gap-1.5 text-xs">
                             <span className="text-red-700">Confirmer ?</span>
@@ -6055,7 +6099,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, onLogout
                           {m.email} · {m.lastLoginAt ? `dernière connexion ${fmtDate(m.lastLoginAt)}` : "jamais connecté"}
                         </div>
                         <div className="mt-1.5">
-                          <BlocAcces cible={m} expediteur={viewerLabel} genre="mandataire" onReinitialiser={() => reinitialiserAcces("mandataire", m.id)} />
+                          <BlocAcces cible={m} expediteur={viewerLabel} telephone={viewerTelephone} genre="mandataire" onReinitialiser={() => reinitialiserAcces("mandataire", m.id)} />
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
