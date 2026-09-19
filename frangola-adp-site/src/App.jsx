@@ -4,7 +4,7 @@ import { supabase } from "./supabaseClient";
 import {
   Shield, Users, Building2, Upload, FileText, CheckCircle2, Clock,
   Bell, LogOut, Download, Plus, ArrowLeft, Copy, Check, AlertCircle,
-  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus, Sparkles, ArrowLeftRight, TrendingUp, Key
+  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus, Sparkles, ArrowLeftRight, TrendingUp, Key, Wallet
 } from "lucide-react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
@@ -265,6 +265,101 @@ function detecterDoublon(decl) {
 
   return { niveau, messages };
 }
+// =============================================================================
+// ÉCHÉANCIER D'ENCAISSEMENT
+//
+// Les honoraires ne rentrent pas à la signature. Soit Frangola facture le
+// client en direct — encaissement immédiat —, soit l'assureur les collecte
+// avec les mensualités et les reverse en 1 à 12 fois, la première un mois
+// après la date d'effet du contrat.
+//
+// La rétrocession du partenaire et la prime du parrain suivent le même
+// rythme : on ne verse que de l'argent réellement reçu.
+//
+// L'échéancier ne stocke que les DATES et ce qui est encaissé. Les montants
+// se recalculent à partir du total, pour qu'une correction d'honoraires se
+// répercute partout plutôt que de figer une valeur périmée.
+// =============================================================================
+const MODES_REGLEMENT = [
+  { valeur: "direct", libelle: "Facturé au client en direct" },
+  { valeur: "assureur", libelle: "Collecté par l'assureur" },
+];
+
+function libelleMode(valeur) {
+  return (MODES_REGLEMENT.find(m => m.valeur === valeur) || {}).libelle || "Mode non défini";
+}
+
+// Répartit une somme en n parts égales au centime près, le reliquat tombant
+// sur la dernière : 350 € en 12 fois donnent onze fois 29,17 € puis 29,13 €.
+function repartir(total, n) {
+  const centimes = Math.round((Number(total) || 0) * 100);
+  const nb = Math.max(1, Math.min(12, Math.round(n) || 1));
+  const part = Math.round(centimes / nb);
+  const parts = Array(nb).fill(part);
+  parts[nb - 1] = centimes - part * (nb - 1);
+  return parts.map(c => c / 100);
+}
+
+function ajouterMois(dateIso, mois) {
+  const d = new Date(dateIso + "T12:00:00");
+  if (isNaN(d.getTime())) return null;
+  const jour = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + mois);
+  // Un contrat à effet du 31 janvier n'a pas de 31 février : on retombe sur
+  // le dernier jour du mois plutôt que de déborder sur le mois suivant.
+  const dernier = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(jour, dernier));
+  return d.toISOString().slice(0, 10);
+}
+
+// Construit les dates prévisionnelles. En direct, une seule échéance à la
+// date d'effet. Par l'assureur, n échéances mensuelles à partir de
+// date d'effet + 1 mois.
+function genererEcheancier(dossier) {
+  const mode = dossier.modeReglement || "direct";
+  const nb = mode === "direct" ? 1 : Math.max(1, Math.min(12, dossier.nombreEcheances || 1));
+  const base = dossier.dateEffet || null;
+  const anciennes = dossier.echeances || [];
+  return Array.from({ length: nb }, (_, i) => {
+    const ancienne = anciennes[i];
+    // Une échéance déjà encaissée, ou dont la date a été corrigée à la main,
+    // n'est jamais réécrite par une régénération.
+    if (ancienne && (ancienne.encaisseLe || ancienne.dateForcee)) return ancienne;
+    const datePrevue = base ? (mode === "direct" ? base : ajouterMois(base, i + 1)) : null;
+    return { numero: i + 1, datePrevue, encaisseLe: null, dateForcee: false };
+  });
+}
+
+// Échéancier effectif d'un dossier. Les dossiers antérieurs à cette
+// mécanique n'en ont pas : leur statut « Payé » vaut alors encaissement
+// intégral, pour que l'historique reste juste.
+function echeancesDe(dossier) {
+  if (Array.isArray(dossier.echeances) && dossier.echeances.length > 0) return dossier.echeances;
+  const paye = dossier.status === "Payé";
+  return [{ numero: 1, datePrevue: dossier.paymentDate || null, encaisseLe: paye ? (dossier.paymentDate || null) : null, dateForcee: false, implicite: true, payeSansDate: paye }];
+}
+
+// Part encaissée d'un montant total, au prorata des échéances reçues.
+function partEncaissee(dossier, total) {
+  const ech = echeancesDe(dossier);
+  const parts = repartir(total, ech.length);
+  return ech.reduce((s, e, i) => s + ((e.encaisseLe || e.payeSansDate) ? parts[i] : 0), 0);
+}
+
+function partAVenir(dossier, total) {
+  const ech = echeancesDe(dossier);
+  const parts = repartir(total, ech.length);
+  return ech.reduce((s, e, i) => s + ((e.encaisseLe || e.payeSansDate) ? 0 : parts[i]), 0);
+}
+
+// Date du dernier encaissement constaté — sert à dater le C.A. dans le temps.
+function dernierEncaissement(dossier) {
+  const dates = echeancesDe(dossier).map(e => e.encaisseLe).filter(Boolean);
+  if (dates.length === 0) return null;
+  return dates.sort().slice(-1)[0];
+}
+
 const PARRAINAGE_TAUX = 0.10;
 
 function filleulsDe(partnerId) {
@@ -272,11 +367,43 @@ function filleulsDe(partnerId) {
   return _colorDataRef.partners.filter(p => !p.deleted && p.parrainId === partnerId);
 }
 
+// C.A. réellement encaissé grâce à ce partenaire. Un dossier réglé en douze
+// fois ne compte que pour les échéances déjà reçues : c'est ce qui autorise
+// à verser la prime du parrain sans avancer d'argent.
 function caGenerePar(partnerId) {
   if (!_colorDataRef) return 0;
   return _colorDataRef.dossiers
-    .filter(d => d.partnerId === partnerId && d.status === "Payé")
-    .reduce((s, d) => s + (d.caAmount || 0), 0);
+    .filter(d => d.partnerId === partnerId && d.status !== "KO")
+    .reduce((s, d) => s + partEncaissee(d, d.caAmount || 0), 0);
+}
+
+// Toutes les échéances de rétrocession d'un partenaire, mises à plat et
+// datées. C'est ce qui permet de lui montrer non seulement ce qu'il a touché,
+// mais ce qui va tomber et quand.
+function echeancesRetrocession(dossiers) {
+  return (dossiers || []).filter(d => d.status !== "KO").flatMap(d => {
+    const ech = echeancesDe(d);
+    const parts = repartir(d.commissionAmount || 0, ech.length);
+    return ech.map((e, i) => ({
+      cle: d.id + "-" + (e.numero || i + 1),
+      dossier: d,
+      numero: e.numero || i + 1,
+      total: ech.length,
+      montant: parts[i],
+      datePrevue: e.datePrevue,
+      encaisseLe: e.encaisseLe || null,
+      recu: !!(e.encaisseLe || e.payeSansDate),
+    }));
+  });
+}
+
+// Ce que le partenaire a déjà gagné, et ce qui lui reste à venir.
+function remunerationEncaissee(dossier) {
+  return partEncaissee(dossier, dossier.commissionAmount || 0);
+}
+function remunerationAVenir(dossier) {
+  if (dossier.status === "KO") return 0;
+  return partAVenir(dossier, dossier.commissionAmount || 0);
 }
 
 function bilanParrainage(partnerId) {
@@ -1869,6 +1996,50 @@ function piedDeSignature(expediteur, telephone) {
   return lignes;
 }
 
+// Le presse-papier accepte deux versions d'un même contenu : le texte brut
+// (WhatsApp, SMS) et le HTML (Gmail, Outlook). Le second porte la police.
+const POLICE_MAIL = "Verdana, Geneva, sans-serif";
+const TAILLE_MAIL = "14px";
+
+function echapperHtml(t) {
+  return String(t)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Transforme le message en HTML : police Verdana, taille moyenne, le code
+// d'activation mis en évidence pour qu'on ne le cherche pas dans le texte.
+function messageEnHtml(corps) {
+  const lignes = corps.split("\n").map(l => {
+    if (l.trim() === "") return '<div style="height:12px"></div>';
+    const m = l.match(/^Votre code d'activation : (.+)$/);
+    if (m) {
+      return `<div style="margin:14px 0"><span style="font-family:${POLICE_MAIL};font-size:${TAILLE_MAIL}">Votre code d'activation : </span>`
+        + `<span style="font-family:${POLICE_MAIL};font-size:16px;font-weight:bold;letter-spacing:2px;background:#FFE9A8;padding:4px 10px;border-radius:5px">${echapperHtml(m[1])}</span></div>`;
+    }
+    const url = l.match(/^(\d\. Rendez-vous sur )(https?:\/\/\S+)$/);
+    if (url) {
+      return `<div>${echapperHtml(url[1])}<a href="${url[2]}" style="color:#008BA8">${echapperHtml(url[2])}</a></div>`;
+    }
+    return `<div>${echapperHtml(l)}</div>`;
+  }).join("");
+  return `<div style="font-family:${POLICE_MAIL};font-size:${TAILLE_MAIL};line-height:1.55;color:#2b2b2b">${lignes}</div>`;
+}
+
+// Dépose les deux versions dans le presse-papier. Si le navigateur ne sait pas
+// faire, on retombe sur le texte brut plutôt que de ne rien copier du tout.
+async function copierRiche(html, texte) {
+  try {
+    if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([texte], { type: "text/plain" }),
+      })]);
+      return true;
+    }
+  } catch (e) { /* on tente le texte simple */ }
+  try { await navigator.clipboard.writeText(texte); return true; } catch (e) { return false; }
+}
+
 function messageInvitation(cible, expediteur, genre, telephone) {
   const prenom = (cible.firstName || "").trim();
   const bonjour = prenom ? `Bonjour ${prenom},` : "Bonjour,";
@@ -1971,20 +2142,17 @@ function ChampTelephoneSignature({ valeur, onEnregistrer }) {
 
 function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "partenaire" }) {
   const [copie, setCopie] = useState(false);
-  const [copieMsg, setCopieMsg] = useState(false);
+  const [pret, setPret] = useState(null); // "email" | "whatsapp" | "echec"
   const [confirme, setConfirme] = useState(false);
 
-  function preparerEmail() {
-    const { sujet, corps } = messageInvitation(cible, expediteur, genre, telephone);
-    const lien = `mailto:${encodeURIComponent(cible.email || "")}?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(corps)}`;
-    window.location.href = lien;
-  }
-  function copierMessage() {
+  // Un seul geste : le presse-papier reçoit les deux versions du message.
+  // Gmail et Outlook collent la version mise en forme, WhatsApp et les SMS
+  // prennent d'eux-mêmes la version texte. Rien ne s'ouvre, rien ne part.
+  async function copierLeMessage() {
     const { corps } = messageInvitation(cible, expediteur, genre, telephone);
-    try {
-      navigator.clipboard.writeText(corps);
-      setCopieMsg(true); setTimeout(() => setCopieMsg(false), 2000);
-    } catch (e) { /* presse-papier indisponible */ }
+    const ok = await copierRiche(messageEnHtml(corps), corps);
+    setPret(ok ? "ok" : "echec");
+    setTimeout(() => setPret(null), 4000);
   }
   // Le code ne s'affiche que tant qu'il sert : première connexion en attente,
   // ou accès réinitialisé par l'administrateur. Une fois consommé, il est
@@ -2009,20 +2177,15 @@ function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "par
           {copie && <span className="text-emerald-700">copié</span>}
         </span>
       )}
-      {codeUtile && cible.email && (
-        <button onClick={preparerEmail}
-          title="Ouvre votre messagerie avec le message d'accueil déjà rédigé"
-          className="text-xs font-semibold bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200 px-2.5 py-1 rounded-lg transition">
-          ✉ Préparer l'email
-        </button>
-      )}
       {codeUtile && (
-        <button onClick={copierMessage}
-          title="Copie le message d'accueil complet, à coller dans un SMS ou WhatsApp"
-          className="text-xs font-semibold bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200 px-2.5 py-1 rounded-lg transition">
-          {copieMsg ? "message copié" : "Copier le message"}
+        <button onClick={copierLeMessage}
+          title="Copie le message d'accueil complet — mise en forme conservée dans Gmail, texte simple dans WhatsApp"
+          className="text-xs font-semibold bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200 px-2.5 py-1 rounded-lg transition">
+          ✉ Copier le message d'accueil
         </button>
       )}
+      {pret === "ok" && <span className="text-xs text-emerald-700 font-medium">Message copié</span>}
+      {pret === "echec" && <span className="text-xs text-red-600 font-medium">Copie impossible — presse-papier bloqué par le navigateur</span>}
       {!codeUtile && (
         confirme ? (
           <span className="inline-flex items-center gap-1.5 text-xs">
@@ -2534,18 +2697,50 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                   <Download size={15} /> Télécharger le bordereau de commission
                 </button>
               )}
-              {d.status !== "KO" && d.commissionAmount != null && (
-                d.status === "Payé" ? (
-                  <div className="mt-3 flex items-center gap-2 text-sm font-semibold fa-navy fa-bg-gold px-3 py-2 rounded-lg w-fit">
-                    💶 Votre rémunération perçue : {fmtEuro(d.commissionAmount)}
-                    {d.paymentMethod && ` · ${d.paymentMethod}`}{d.paymentDate && ` · ${fmtDate(new Date(d.paymentDate).getTime())}`}
+              {d.status !== "KO" && d.commissionAmount != null && (() => {
+                // Le montant total et son rythme de versement sont montrés
+                // ENSEMBLE. Afficher « 500 € » puis virer 41,67 € est le plus
+                // sûr moyen de perdre la confiance d'un apporteur.
+                const lignes = echeancesRetrocession([d]);
+                const recues = lignes.filter(x => x.recu);
+                const aVenir = lignes.filter(x => !x.recu);
+                const percu = recues.reduce((sm, x) => sm + x.montant, 0);
+                const reste = aVenir.reduce((sm, x) => sm + x.montant, 0);
+                const fractionne = lignes.length > 1;
+                const prochaine = aVenir.filter(x => x.datePrevue)
+                  .sort((a, b) => a.datePrevue.localeCompare(b.datePrevue))[0];
+                const dateFr = (iso) => fmtDate(new Date(iso + "T12:00:00").getTime());
+
+                return (
+                  <div className={`mt-3 px-3 py-2.5 rounded-lg w-fit max-w-full ${percu > 0.005 ? "fa-bg-gold fa-navy" : "bg-teal-50 border border-teal-200 fa-teal-text"}`}>
+                    <div className="text-sm font-semibold">
+                      💶 Votre rémunération : {fmtEuroPrecis(d.commissionAmount)}
+                      {fractionne && <span className="font-normal"> — versée en {lignes.length} fois de {fmtEuroPrecis(lignes[0].montant)}</span>}
+                    </div>
+                    {fractionne && (
+                      <div className="text-xs mt-1 opacity-80">
+                        {recues.length > 0
+                          ? `${recues.length} versement${recues.length > 1 ? "s" : ""} déjà effectué${recues.length > 1 ? "s" : ""} — ${fmtEuroPrecis(percu)} perçus, ${fmtEuroPrecis(reste)} à venir.`
+                          : `Aucun versement pour l'instant — ${fmtEuroPrecis(reste)} à venir.`}
+                        {prochaine && ` Prochain le ${dateFr(prochaine.datePrevue)}.`}
+                      </div>
+                    )}
+                    {fractionne && (
+                      <div className="text-xs mt-1 opacity-70">
+                        L'assureur nous reverse ces honoraires au même rythme : nous vous les transmettons dès réception.
+                      </div>
+                    )}
+                    {!fractionne && percu > 0.005 && (
+                      <div className="text-xs mt-1 opacity-80">
+                        Versée{d.paymentMethod ? ` par ${d.paymentMethod.toLowerCase()}` : ""}{recues[0]?.encaisseLe ? ` le ${dateFr(recues[0].encaisseLe)}` : (d.paymentDate ? ` le ${dateFr(d.paymentDate)}` : "")}.
+                      </div>
+                    )}
+                    {!fractionne && percu < 0.005 && prochaine && (
+                      <div className="text-xs mt-1 opacity-80">Versement prévu le {dateFr(prochaine.datePrevue)}.</div>
+                    )}
                   </div>
-                ) : (
-                  <div className="mt-3 flex items-center gap-2 text-sm font-semibold fa-teal-text bg-teal-50 border border-teal-200 px-3 py-2 rounded-lg w-fit">
-                    💶 Rémunération estimée : {fmtEuro(d.commissionAmount)}
-                  </div>
-                )
-              )}
+                );
+              })()}
               {d.status === "KO" && (
                 <div className="mt-4 flex items-center gap-2 text-sm font-medium text-red-700 bg-red-50 px-3 py-2 rounded-lg">
                   <X size={15} /> Dossier clôturé sans suite
@@ -2565,8 +2760,16 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
           const won = dossiers.filter(d => d.status === "Souscrit" || d.status === "Bordereau émis" || d.status === "Payé");
           const paid = dossiers.filter(d => d.status === "Payé");
           const ko = dossiers.filter(d => d.status === "KO");
-          const totalRemuneration = paid.reduce((s, d) => s + (d.commissionAmount || 0), 0);
+          // La rémunération est comptée à l'encaissement, pas à la souscription :
+          // un dossier réglé en douze fois ne rapporte qu'un douzième par mois.
+          const echRetro = echeancesRetrocession(dossiers);
+          const echRecues = echRetro.filter(x => x.recu);
+          const echAVenir = echRetro.filter(x => !x.recu);
+          const totalRemuneration = echRecues.reduce((s, x) => s + x.montant, 0);
+          const totalAVenir = echAVenir.reduce((s, x) => s + x.montant, 0);
           const avgRemuneration = paid.length ? totalRemuneration / paid.length : (partner.flatFee != null ? partner.flatFee : 150);
+          const dateEch = (x) => x.encaisseLe ? new Date(x.encaisseLe + "T12:00:00").getTime()
+            : (x.dossier.paymentDate ? new Date(x.dossier.paymentDate).getTime() : (x.dossier.updatedAt || x.dossier.createdAt));
           const bilanPar = bilanParrainage(partner.id);
           const revenuPassif = bilanPar.gainTotal;
           const revenuGlobal = totalRemuneration + revenuPassif;
@@ -2575,10 +2778,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
 
           const now = new Date();
           const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-          const earnedThisMonth = paid.filter(d => {
-            const t = d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt || d.createdAt;
-            return t >= monthStart;
-          }).reduce((s, d) => s + (d.commissionAmount || 0), 0);
+          const earnedThisMonth = echRecues.filter(x => dateEch(x) >= monthStart).reduce((s, x) => s + x.montant, 0);
           const goalProgress = partner.monthlyGoal ? Math.min(100, Math.round((earnedThisMonth / partner.monthlyGoal) * 100)) : 0;
           const dossiersNeededForGoal = partner.monthlyGoal && avgRemuneration > 0 ? Math.ceil(partner.monthlyGoal / avgRemuneration) : null;
           const monthly = [];
@@ -2587,10 +2787,10 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
             const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
             monthly.push({
               name: start.toLocaleDateString("fr-FR", { month: "short", year: "2-digit" }),
-              "Rémunération (€)": paid.filter(d => {
-                const t = d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt || d.createdAt;
+              "Rémunération (€)": echRecues.filter(x => {
+                const t = dateEch(x);
                 return t >= start.getTime() && t < end.getTime();
-              }).reduce((s, d) => s + (d.commissionAmount || 0), 0),
+              }).reduce((s, x) => s + x.montant, 0),
             });
           }
 
@@ -2795,6 +2995,70 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                 <h1 className="font-display text-xl font-semibold fa-navy">Facturation</h1>
                 <p className="text-sm text-gray-500">Vos bordereaux de commission et les factures que vous nous adressez.</p>
               </div>
+
+              {(() => {
+                const ech = echeancesRetrocession(dossiers);
+                if (ech.length === 0) return null;
+                const recues = ech.filter(x => x.recu);
+                const aVenir = ech.filter(x => !x.recu)
+                  .sort((a, b) => (a.datePrevue || "9999").localeCompare(b.datePrevue || "9999"));
+                const totalRecu = recues.reduce((sm, x) => sm + x.montant, 0);
+                const totalAVenir = aVenir.reduce((sm, x) => sm + x.montant, 0);
+                if (totalRecu < 0.005 && totalAVenir < 0.005) return null;
+
+                // Regroupe les échéances à venir par mois : c'est la vue qui
+                // parle — « voilà ce qui tombe le mois prochain ».
+                const parMois = [];
+                for (const x of aVenir) {
+                  if (!x.datePrevue) continue;
+                  const cle = x.datePrevue.slice(0, 7);
+                  let ligne = parMois.find(m => m.cle === cle);
+                  if (!ligne) {
+                    ligne = { cle, montant: 0, nb: 0,
+                      libelle: new Date(x.datePrevue + "T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }) };
+                    parMois.push(ligne);
+                  }
+                  ligne.montant += x.montant; ligne.nb += 1;
+                }
+                const sansDate = aVenir.filter(x => !x.datePrevue);
+
+                return (
+                  <div className="bg-white border border-gray-200 rounded-2xl p-6">
+                    <div className="font-display font-semibold fa-navy mb-1">Mes rétrocessions</div>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Vos honoraires vous sont reversés au rythme où Frangola les encaisse. Selon le contrat,
+                      l'assureur les collecte en une fois ou les étale jusqu'à douze mois.
+                    </p>
+                    <div className="grid sm:grid-cols-2 gap-3 mb-4">
+                      <div className="fa-bg-offwhite rounded-xl p-4">
+                        <div className="text-xs text-gray-500 mb-1">Déjà perçu</div>
+                        <div className="font-display text-xl font-bold text-emerald-600">{fmtEuroPrecis(totalRecu)}</div>
+                      </div>
+                      <div className="fa-bg-gold rounded-xl p-4">
+                        <div className="text-xs text-teal-900/70 mb-1">À venir</div>
+                        <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(totalAVenir)}</div>
+                      </div>
+                    </div>
+                    {parMois.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-xs font-semibold fa-navy mb-1">Calendrier prévisionnel</div>
+                        {parMois.map(m => (
+                          <div key={m.cle} className="flex items-center justify-between fa-bg-offwhite rounded-lg px-3 py-2">
+                            <span className="text-sm fa-navy capitalize">{m.libelle}</span>
+                            <span className="text-xs text-gray-400">{m.nb} échéance{m.nb > 1 ? "s" : ""}</span>
+                            <span className="text-sm font-bold fa-navy">{fmtEuroPrecis(m.montant)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {sansDate.length > 0 && (
+                      <div className="text-xs text-gray-400 mt-2">
+                        {sansDate.length} échéance{sansDate.length > 1 ? "s" : ""} en attente de date d'effet.
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="bg-white border border-gray-200 rounded-2xl p-6">
                 <div className="font-display font-semibold fa-navy mb-1">Mes bordereaux de commission</div>
@@ -3532,6 +3796,303 @@ function VersementsParrainage({ data, onAddVersement }) {
   );
 }
 
+// =============================================================================
+// FACTURATION — vue d'ensemble des paiements, côté Frangola
+//
+// Répond à deux questions et à elles seules : qui dois-je payer, et qui ai-je
+// payé et quand. Les montants sont au centime : ce sont des sommes dues à
+// quelqu'un, pas des indicateurs de tableau de bord.
+// =============================================================================
+// =============================================================================
+// ÉCHÉANCIER D'UN DOSSIER — côté administration
+//
+// Trois réglages déterminent quand l'argent rentre : le mode de règlement, la
+// date d'effet du contrat, et le nombre d'échéances quand c'est l'assureur qui
+// collecte. Le reste se calcule. On coche ce qui est reçu au fur et à mesure.
+// =============================================================================
+function EcheancierDossier({ dossier, onUpdate }) {
+  const [ouvert, setOuvert] = useState(false);
+  const mode = dossier.modeReglement || "";
+  const echeances = Array.isArray(dossier.echeances) && dossier.echeances.length > 0
+    ? dossier.echeances : null;
+
+  const encaisse = partEncaissee(dossier, dossier.caAmount || 0);
+  const aVenir = partAVenir(dossier, dossier.caAmount || 0);
+  const nbRecues = echeances ? echeances.filter(e => e.encaisseLe).length : 0;
+
+  function majParametres(champs) {
+    const projete = { ...dossier, ...champs };
+    onUpdate(dossier.id, { ...champs, echeances: genererEcheancier(projete) });
+  }
+  function majEcheance(i, champs) {
+    const base = dossier.echeances || genererEcheancier(dossier);
+    onUpdate(dossier.id, { echeances: base.map((e, k) => k === i ? { ...e, ...champs } : e) });
+  }
+
+  const aujourdhui = () => new Date().toISOString().slice(0, 10);
+  const partsHono = repartir(dossier.caAmount || 0, echeances ? echeances.length : 1);
+  const partsPart = repartir(dossier.commissionAmount || 0, echeances ? echeances.length : 1);
+
+  const petitChamp = "text-xs border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500";
+
+  return (
+    <div className="mt-3 pt-3 border-t border-gray-100">
+      <button onClick={() => setOuvert(v => !v)}
+        className="flex items-center gap-1.5 text-xs font-semibold fa-navy hover:fa-teal-text transition">
+        <Wallet size={13} />
+        Échéancier
+        {!mode && <span className="font-normal text-amber-700">— mode de règlement à définir</span>}
+        {mode && echeances && (
+          <span className="font-normal text-gray-500">
+            — {nbRecues}/{echeances.length} encaissée{nbRecues > 1 ? "s" : ""} · reçu {fmtEuroPrecis(encaisse)} · à venir {fmtEuroPrecis(aVenir)}
+          </span>
+        )}
+        <ChevronDown size={13} className={ouvert ? "rotate-180 transition" : "transition"} />
+      </button>
+
+      {ouvert && (
+        <div className="mt-2 fa-bg-offwhite rounded-lg p-3 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <select value={mode} onChange={e => majParametres({ modeReglement: e.target.value })} className={petitChamp}>
+              <option value="">Mode de règlement…</option>
+              {MODES_REGLEMENT.map(m => <option key={m.valeur} value={m.valeur}>{m.libelle}</option>)}
+            </select>
+
+            <label className="text-xs text-gray-500 flex items-center gap-1.5">
+              Date d'effet
+              <input type="date" value={dossier.dateEffet || ""}
+                onChange={e => majParametres({ dateEffet: e.target.value })} className={petitChamp} />
+            </label>
+
+            {mode === "assureur" && (
+              <label className="text-xs text-gray-500 flex items-center gap-1.5">
+                Échéances
+                <select value={dossier.nombreEcheances || 1}
+                  onChange={e => majParametres({ nombreEcheances: Number(e.target.value) })} className={petitChamp}>
+                  {Array.from({ length: 12 }, (_, i) => i + 1).map(n => (
+                    <option key={n} value={n}>{n === 1 ? "1 fois" : `${n} fois`}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+
+          {!mode ? (
+            <div className="text-xs text-gray-500">
+              Choisissez le mode de règlement : en direct, les honoraires rentrent sous 48 h ;
+              par l'assureur, ils sont reversés à partir d'un mois après la date d'effet.
+            </div>
+          ) : !dossier.dateEffet ? (
+            <div className="text-xs text-amber-700">
+              Renseignez la date d'effet du contrat pour calculer les dates d'encaissement.
+            </div>
+          ) : !echeances ? null : (
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-[11px] text-gray-400 px-1">
+                <span className="w-6 shrink-0">N°</span>
+                <span className="w-32 shrink-0">Date prévue</span>
+                <span className="w-24 shrink-0 text-right">Honoraires</span>
+                <span className="w-24 shrink-0 text-right">Partenaire</span>
+                <span className="flex-1" />
+              </div>
+              {echeances.map((e, i) => (
+                <div key={e.numero} className={`flex items-center gap-2 flex-wrap rounded-lg px-1 py-1 ${e.encaisseLe ? "bg-emerald-50" : ""}`}>
+                  <span className="w-6 shrink-0 text-xs text-gray-500">{e.numero}</span>
+                  <input type="date" value={e.datePrevue || ""}
+                    onChange={ev => majEcheance(i, { datePrevue: ev.target.value, dateForcee: true })}
+                    className="w-32 shrink-0 text-xs border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <span className="w-24 shrink-0 text-right text-xs fa-navy font-medium">{fmtEuroPrecis(partsHono[i])}</span>
+                  <span className="w-24 shrink-0 text-right text-xs text-gray-500">{fmtEuroPrecis(partsPart[i])}</span>
+                  {e.encaisseLe ? (
+                    <span className="flex items-center gap-1.5 text-xs text-emerald-700 font-medium">
+                      <CheckCircle2 size={13} /> encaissé le {fmtDate(new Date(e.encaisseLe + "T12:00:00").getTime())}
+                      <button onClick={() => majEcheance(i, { encaisseLe: null })}
+                        className="text-gray-400 hover:text-red-600 ml-1" title="Annuler l'encaissement">✕</button>
+                    </span>
+                  ) : (
+                    <button onClick={() => majEcheance(i, { encaisseLe: aujourdhui() })}
+                      className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded-lg transition">
+                      Marquer encaissée
+                    </button>
+                  )}
+                </div>
+              ))}
+              <div className="pt-2 text-xs text-gray-500">
+                Reçu <strong className="fa-navy">{fmtEuroPrecis(encaisse)}</strong> sur {fmtEuroPrecis(dossier.caAmount || 0)}
+                {aVenir > 0.005 && <> · reste à percevoir <strong className="fa-navy">{fmtEuroPrecis(aVenir)}</strong></>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FacturationAdmin({ data, onSetStatut, onAddVersement }) {
+  const [toutHistorique, setToutHistorique] = useState(false);
+
+  const nomDe = (p) => p ? (p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)) : "—";
+  const vivants = data.partners.filter(p => !p.deleted);
+
+  // --- Encaissements : ce que nous avons réellement reçu, échéance par
+  //     échéance. Un dossier réglé en douze fois n'est pas un encaissement,
+  //     c'est douze.
+  const dossiersVivants = data.dossiers.filter(d => d.status !== "KO");
+  const encaisse = dossiersVivants.reduce((s, d) => s + partEncaissee(d, d.caAmount || 0), 0);
+
+  // --- À percevoir, réparti par mois : c'est la trésorerie qui arrive.
+  const aPercevoir = [];
+  for (const d of dossiersVivants) {
+    const ech = echeancesDe(d);
+    if (ech[0] && ech[0].implicite) continue; // dossier antérieur à l'échéancier
+    const parts = repartir(d.caAmount || 0, ech.length);
+    ech.forEach((e, i) => {
+      if (e.encaisseLe || parts[i] < 0.005) return;
+      aPercevoir.push({ montant: parts[i], datePrevue: e.datePrevue });
+    });
+  }
+  const totalAPercevoir = aPercevoir.reduce((s, x) => s + x.montant, 0);
+  const previsionnel = [];
+  for (const x of aPercevoir) {
+    const cle = x.datePrevue ? x.datePrevue.slice(0, 7) : "sans-date";
+    let ligne = previsionnel.find(m => m.cle === cle);
+    if (!ligne) {
+      ligne = { cle, montant: 0, nb: 0,
+        libelle: x.datePrevue
+          ? new Date(x.datePrevue + "T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" })
+          : "Date d'effet non renseignée" };
+      previsionnel.push(ligne);
+    }
+    ligne.montant += x.montant; ligne.nb += 1;
+  }
+  previsionnel.sort((a, b) => a.cle.localeCompare(b.cle));
+
+  // --- À payer
+  const facturesDues = vivants.flatMap(p =>
+    (p.factures || []).filter(f => f.statut === "Déposée")
+      .map(f => ({ genre: "facture", cle: "f" + f.id, qui: nomDe(p), partner: p, facture: f, montant: f.montant || 0, depuis: f.at })));
+
+  const retrocessionsDues = vivants
+    .filter(p => filleulsDe(p.id).length > 0)
+    .map(p => {
+      const du = bilanParrainage(p.id).gainTotal;
+      const verse = (p.parrainageVerse || 0) + (p.parrainageVersements || []).reduce((sm, v) => sm + (v.montant || 0), 0);
+      return { genre: "parrainage", cle: "r" + p.id, qui: nomDe(p), partner: p, montant: du - verse, depuis: p.createdAt };
+    })
+    .filter(x => x.montant > 0.5);
+
+  const aPayer = [...facturesDues, ...retrocessionsDues].sort((a, b) => (a.depuis || 0) - (b.depuis || 0));
+  const totalAPayer = aPayer.reduce((s, x) => s + x.montant, 0);
+
+  // --- Déjà payé, daté
+  const historique = [
+    ...vivants.flatMap(p => (p.factures || []).filter(f => f.statut === "Payée")
+      .map(f => ({ cle: "hf" + f.id, quand: f.traiteAt || f.at, qui: nomDe(p), montant: f.montant || 0,
+                   objet: "Facture partenaire", couleur: "bg-violet-100 text-violet-800", note: f.nom || "" }))),
+    ...vivants.flatMap(p => (p.parrainageVersements || [])
+      .map(v => ({ cle: "hv" + v.id, quand: v.at, qui: nomDe(p), montant: v.montant || 0,
+                   objet: "Rétrocession parrainage", couleur: "bg-amber-100 text-amber-800", note: v.note || "" }))),
+  ].sort((a, b) => (b.quand || 0) - (a.quand || 0));
+
+  const totalVerse = historique.reduce((s, x) => s + x.montant, 0);
+  const visibles = toutHistorique ? historique : historique.slice(0, 15);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="font-display text-xl font-semibold fa-navy">Facturation</h1>
+        <p className="text-sm text-gray-500">Qui reste à payer, et qui a été payé — factures partenaires et rétrocessions de parrainage.</p>
+      </div>
+
+      <div className="grid sm:grid-cols-3 gap-4">
+        <div className="bg-white border border-gray-200 rounded-2xl p-5">
+          <div className="text-xs text-gray-400 mb-1">Encaissé (dossiers payés)</div>
+          <div className="font-display text-2xl font-bold text-emerald-600">{fmtEuroPrecis(encaisse)}</div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-2xl p-5">
+          <div className="text-xs text-gray-400 mb-1">Déjà reversé</div>
+          <div className="font-display text-2xl font-bold fa-navy">{fmtEuroPrecis(totalVerse)}</div>
+        </div>
+        <div className={`rounded-2xl p-5 border ${totalAPayer > 0.5 ? "fa-bg-gold border-amber-300" : "bg-white border-gray-200"}`}>
+          <div className="text-xs text-gray-500 mb-1">Reste à payer</div>
+          <div className="font-display text-2xl font-bold fa-navy">{fmtEuroPrecis(totalAPayer)}</div>
+        </div>
+      </div>
+
+      {previsionnel.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-2xl p-5">
+          <div className="font-display font-semibold fa-navy mb-1">À percevoir</div>
+          <p className="text-sm text-gray-500 mb-4">
+            Honoraires acquis mais pas encore reçus — total <strong className="fa-navy">{fmtEuroPrecis(totalAPercevoir)}</strong>.
+            Ils conditionnent ce que tu pourras reverser aux partenaires et aux parrains.
+          </p>
+          <div className="space-y-1.5">
+            {previsionnel.map(m => (
+              <div key={m.cle} className={`flex items-center justify-between rounded-lg px-3 py-2 ${m.cle === "sans-date" ? "bg-amber-50 border border-amber-200" : "fa-bg-offwhite"}`}>
+                <span className="text-sm fa-navy capitalize">{m.libelle}</span>
+                <span className="text-xs text-gray-400">{m.nb} échéance{m.nb > 1 ? "s" : ""}</span>
+                <span className="text-sm font-bold fa-navy">{fmtEuroPrecis(m.montant)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white border border-gray-200 rounded-2xl p-5">
+        <div className="font-display font-semibold fa-navy mb-1">À payer</div>
+        <p className="text-sm text-gray-500 mb-4">La plus ancienne dette en premier.</p>
+        {aPayer.length === 0 ? (
+          <div className="text-sm text-gray-400">Rien en attente — tout le monde est à jour.</div>
+        ) : (
+          <div className="space-y-1.5">
+            {aPayer.map(x => (
+              <div key={x.cle} className="flex items-center gap-2 flex-wrap fa-bg-offwhite rounded-lg px-3 py-2.5">
+                <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${x.genre === "facture" ? "bg-violet-100 text-violet-800" : "bg-amber-100 text-amber-800"}`}>
+                  {x.genre === "facture" ? "Facture" : "Parrainage"}
+                </span>
+                <span className="text-sm fa-navy font-bold">{x.qui}</span>
+                <span className="text-xs text-gray-400">{joursDepuis(x.depuis)}</span>
+                <span className="ml-auto text-sm font-bold fa-navy">{fmtEuroPrecis(x.montant)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-2xl p-5">
+        <div className="font-display font-semibold fa-navy mb-1">Historique des paiements</div>
+        <p className="text-sm text-gray-500 mb-4">Du plus récent au plus ancien.</p>
+        {historique.length === 0 ? (
+          <div className="text-sm text-gray-400">Aucun paiement enregistré pour l'instant.</div>
+        ) : (
+          <>
+            <div className="space-y-1.5">
+              {visibles.map(h => (
+                <div key={h.cle} className="flex items-center gap-2 flex-wrap fa-bg-offwhite rounded-lg px-3 py-2">
+                  <span className="text-xs text-gray-500 w-24 shrink-0">{fmtDate(h.quand)}</span>
+                  <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${h.couleur}`}>{h.objet}</span>
+                  <span className="text-sm fa-navy font-medium">{h.qui}</span>
+                  {h.note && <span className="text-xs text-gray-400">{h.note}</span>}
+                  <span className="ml-auto text-sm font-bold text-emerald-700">{fmtEuroPrecis(h.montant)}</span>
+                </div>
+              ))}
+            </div>
+            {historique.length > 15 && (
+              <button onClick={() => setToutHistorique(v => !v)} className="text-xs fa-teal-text hover:underline mt-3">
+                {toutHistorique ? "Réduire" : `Voir les ${historique.length - 15} paiements plus anciens →`}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
+      <FacturesPartenaires data={data} onSetStatut={onSetStatut} />
+      <VersementsParrainage data={data} onAddVersement={onAddVersement} />
+    </div>
+  );
+}
+
 function FacturesPartenaires({ data, onSetStatut }) {
   const [corrigeId, setCorrigeId] = useState(null);
   const [motif, setMotif] = useState("");
@@ -4087,6 +4648,16 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               </span>
             )}
           </button>
+          <button onClick={() => setTab("facturation")}
+            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "facturation" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+            <Wallet size={15} /> Facturation
+            {(() => {
+              const n = data.partners.filter(p => !p.deleted).reduce((s2, p) => s2 + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
+              return n > 0 ? (
+                <span className="bg-amber-400 text-amber-950 text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{n}</span>
+              ) : null;
+            })()}
+          </button>
           <button onClick={() => setTab("corbeille")}
             className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "corbeille" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             <Trash2 size={15} /> Corbeille
@@ -4180,7 +4751,18 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
           const now = new Date();
           const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
           const dossiersActifs = liveDossiers.filter(d => !["KO", "Payé"].includes(d.status)).length;
-          const caduMois = liveDossiers.filter(d => d.status === "Payé" && (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) >= monthStart).reduce((s, d) => s + (d.caAmount || 0), 0);
+          // Encaissé ce mois : les échéances effectivement reçues, pas les
+          // dossiers souscrits. Un dossier réglé en douze fois ne gonfle plus
+          // le mois de la signature.
+          const caduMois = liveDossiers.filter(d => d.status !== "KO").reduce((s, d) => {
+            const ech = echeancesDe(d);
+            const parts = repartir(d.caAmount || 0, ech.length);
+            return s + ech.reduce((s2, e, i) => {
+              const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
+                : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
+              return s2 + (quand !== null && quand >= monthStart ? parts[i] : 0);
+            }, 0);
+          }, 0);
           const partenairesActifs = data.partners.filter(p => !p.deleted && p.active !== false).length;
 
           return (
@@ -4200,7 +4782,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                   <div className="font-display text-2xl font-bold text-amber-600">{newDeposits}</div>
                 </div>
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                  <div className="text-xs text-gray-400 mb-1">CA du mois (encaissé)</div>
+                  <div className="text-xs text-gray-400 mb-1">Encaissé ce mois</div>
                   <div className="font-display text-2xl font-bold text-emerald-600">{fmtEuro(caduMois)}</div>
                 </div>
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
@@ -4600,6 +5182,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                                         )}
                                       </div>
 
+                                      {["Souscrit", "Bordereau émis", "Payé"].includes(d.status) && (
+                                        <EcheancierDossier dossier={d} onUpdate={onUpdateDossierClient} />
+                                      )}
+
                                       <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100">
                                         <button onClick={() => simOpenId === d.id ? setSimOpenId(null) : openSim(d)}
                                           className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
@@ -4955,7 +5541,6 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
           <div>
                         <RegistreParrainages data={data} onTraiter={onTraiterParrainage} />
 
-            <FacturesPartenaires data={data} onSetStatut={onSetFactureStatut} />
 
             {(() => {
               // Les fiches créées depuis une déclaration de parrainage arrivent
@@ -5962,7 +6547,6 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
 
                             <SauvegardesPanel />
 
-              <VersementsParrainage data={data} onAddVersement={onAddVersementParrainage} />
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
                 <div className="font-display font-semibold fa-navy mb-4">Évolution du nombre de partenaires</div>
                 <div style={{ width: "100%", height: 200 }}>
@@ -5992,7 +6576,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
           );
         })()}
 
-              {tab === "challenge" && (
+              {tab === "facturation" && (
+          <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} />
+        )}
+        {tab === "challenge" && (
           <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
             onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
         )}
