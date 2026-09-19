@@ -3991,6 +3991,166 @@ function EcheancierDossier({ dossier, onUpdate }) {
 // deux partis pris — on montre toujours sur quoi le calcul repose, et on
 // refuse de projeter quand l'échantillon est trop mince.
 // =============================================================================
+// =============================================================================
+// OBJECTIFS — le calcul à l'envers
+//
+// La projection part de la production pour arriver à un chiffre. Ici on part
+// du chiffre voulu et on remonte à ce qu'il faut : combien de dossiers,
+// combien de partenaires actifs, combien à recruter.
+//
+// Les quatre hypothèses sont préremplies par l'observation puis modifiables :
+// c'est un outil de pilotage, il doit fonctionner avant même d'avoir des
+// données, sur les chiffres que Sébastien estime justes.
+// =============================================================================
+function ObjectifsCA({ data }) {
+  const vivants = data.partners.filter(p => !p.deleted);
+  const tous = data.dossiers;
+  const gagnes = tous.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
+  const ko = tous.filter(d => d.status === "KO");
+  const actifs = vivants.filter(p => tous.some(d => d.partnerId === p.id));
+
+  const avecMontant = gagnes.filter(d => (d.caAmount || 0) > 0);
+  const caMoyenObserve = avecMontant.length > 0
+    ? Math.round(avecMontant.reduce((s, d) => s + (d.caAmount || 0), 0) / avecMontant.length)
+    : 500;
+  const arbitres = gagnes.length + ko.length;
+  const transfoObservee = arbitres > 0 ? Math.round((gagnes.length / arbitres) * 100) : 60;
+  const activationObservee = vivants.length > 0 ? Math.round((actifs.length / vivants.length) * 100) : 40;
+
+  const [caMoyen, setCaMoyen] = useState(null);
+  const [transfo, setTransfo] = useState(null);
+  const [prod, setProd] = useState(1);          // 12 dossiers par an et par partenaire
+  const [activation, setActivation] = useState(null);
+  const [objectifLibre, setObjectifLibre] = useState("");
+
+  const vCa = caMoyen === null ? caMoyenObserve : (Number(caMoyen) || 0);
+  const vTransfo = transfo === null ? transfoObservee : (Number(transfo) || 0);
+  const vProd = Number(prod) || 0;
+  const vActivation = activation === null ? activationObservee : (Number(activation) || 0);
+
+  const calculable = vCa > 0 && vTransfo > 0 && vProd > 0 && vActivation > 0;
+
+  const objectifs = [100000, 200000, 300000, 500000, 1000000];
+  const libre = Number(String(objectifLibre).replace(/\s/g, "")) || 0;
+  const liste = libre > 0 ? [...objectifs, libre].sort((a, b) => a - b) : objectifs;
+
+  function besoinsPour(cible) {
+    const dossiersGagnes = cible / vCa;
+    const dossiersDeposes = dossiersGagnes / (vTransfo / 100);
+    const parMois = dossiersDeposes / 12;
+    const partenairesActifs = parMois / vProd;
+    const partenairesTotal = partenairesActifs / (vActivation / 100);
+    return { dossiersGagnes, dossiersDeposes, parMois, partenairesActifs, partenairesTotal };
+  }
+
+  const champ = "w-20 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const arrondi = (n) => Math.ceil(n - 0.0001);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="font-display font-semibold fa-navy mb-1">Combien pour atteindre mon objectif</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Le calcul à l'envers : vous fixez le chiffre d'affaires visé sur douze mois, l'outil remonte au nombre
+        de dossiers et de partenaires nécessaires.
+      </p>
+
+      <div className="fa-bg-offwhite rounded-lg px-3 py-3 mb-4">
+        <div className="text-xs font-semibold fa-navy mb-2">Hypothèses</div>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-gray-600">
+          <label className="flex items-center gap-2">
+            <input type="number" min="0" step="10" value={vCa} onChange={e => setCaMoyen(e.target.value)} className={champ} />
+            € de C.A. par dossier gagné
+            <span className="text-xs text-gray-400">
+              ({avecMontant.length > 0 ? `observé : ${caMoyenObserve} €` : "aucune donnée, valeur à fixer"})
+            </span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="number" min="1" max="100" step="1" value={vTransfo} onChange={e => setTransfo(e.target.value)} className={champ} />
+            % de dossiers qui aboutissent
+            <span className="text-xs text-gray-400">
+              ({arbitres > 0 ? `observé : ${transfoObservee} %` : "aucune donnée"})
+            </span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="number" min="0" step="0.1" value={vProd} onChange={e => setProd(e.target.value)} className={champ} />
+            dossiers/mois par partenaire actif
+            <span className="text-xs text-gray-400">(1,00 = 12 par an)</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="number" min="1" max="100" step="1" value={vActivation} onChange={e => setActivation(e.target.value)} className={champ} />
+            % de partenaires qui produisent
+            <span className="text-xs text-gray-400">
+              ({vivants.length > 0 ? `observé : ${activationObservee} %` : "aucune donnée"})
+            </span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="number" min="0" step="10000" value={objectifLibre} onChange={e => setObjectifLibre(e.target.value)}
+              placeholder="250000" className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            objectif personnalisé (€)
+          </label>
+        </div>
+      </div>
+
+      {!calculable ? (
+        <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
+          Renseignez les quatre hypothèses pour obtenir le tableau.
+        </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-400 text-left border-b border-gray-200">
+                  <th className="font-medium py-2">C.A. visé</th>
+                  <th className="font-medium py-2 text-right">Dossiers gagnés</th>
+                  <th className="font-medium py-2 text-right">Dossiers déposés</th>
+                  <th className="font-medium py-2 text-right">Par mois</th>
+                  <th className="font-medium py-2 text-right">Partenaires actifs</th>
+                  <th className="font-medium py-2 text-right">Partenaires à avoir</th>
+                </tr>
+              </thead>
+              <tbody>
+                {liste.map((cible, i) => {
+                  const b = besoinsPour(cible);
+                  const manquants = Math.max(0, arrondi(b.partenairesTotal) - vivants.length);
+                  return (
+                    <tr key={cible} className={i % 2 ? "fa-bg-offwhite" : ""}>
+                      <td className="py-2 font-bold fa-navy">{fmtEuro(cible)}</td>
+                      <td className="py-2 text-right text-gray-600">{arrondi(b.dossiersGagnes)}</td>
+                      <td className="py-2 text-right text-gray-600">{arrondi(b.dossiersDeposes)}</td>
+                      <td className="py-2 text-right text-gray-600">{b.parMois.toFixed(1)}</td>
+                      <td className="py-2 text-right fa-navy font-medium">{arrondi(b.partenairesActifs)}</td>
+                      <td className="py-2 text-right">
+                        <span className="fa-navy font-bold">{arrondi(b.partenairesTotal)}</span>
+                        {manquants > 0 && <span className="text-xs text-amber-700 block">+{manquants} à recruter</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="text-xs text-gray-500 mt-3 space-y-1">
+            <div>
+              <strong className="fa-navy">Comment lire :</strong> pour {fmtEuro(liste[1] || liste[0])}, il faut
+              {" "}{arrondi(besoinsPour(liste[1] || liste[0]).dossiersGagnes)} dossiers gagnés, donc
+              {" "}{arrondi(besoinsPour(liste[1] || liste[0]).dossiersDeposes)} déposés puisque
+              {" "}{100 - vTransfo} % n'aboutissent pas — soit {besoinsPour(liste[1] || liste[0]).parMois.toFixed(1)} par mois,
+              ce qui demande {arrondi(besoinsPour(liste[1] || liste[0]).partenairesActifs)} partenaires qui produisent,
+              et donc {arrondi(besoinsPour(liste[1] || liste[0]).partenairesTotal)} partenaires au total
+              puisque {100 - vActivation} % ne déposeront jamais.
+            </div>
+            <div className="text-gray-400">
+              Vous avez aujourd'hui {vivants.length} partenaire{vivants.length > 1 ? "s" : ""} dont {actifs.length} actif{actifs.length > 1 ? "s" : ""}.
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ProjectionCA({ data }) {
   const [fenetre, setFenetre] = useState(90);
   const [scenario, setScenario] = useState(false);
@@ -4028,12 +4188,14 @@ function ProjectionCA({ data }) {
   const [recrutement, setRecrutement] = useState(null);
   const [activation, setActivation] = useState(null);
   const [delai, setDelai] = useState(1);
+  const [prodSaisie, setProdSaisie] = useState(null);
   const recrutementUtilise = recrutement === null ? recrutementObserve : Number(recrutement) || 0;
   const activationUtilisee = activation === null ? activationObservee : Number(activation) || 0;
 
   // Production par partenaire actif : le socle observé rapporté à ceux qui
   // produisent réellement. C'est ce qu'apportera chaque nouvel actif.
-  const productivite = actifs.length > 0 ? rythmeMensuel / actifs.length : 0;
+  const productiviteObservee = actifs.length > 0 ? rythmeMensuel / actifs.length : 0;
+  const productivite = prodSaisie === null ? productiviteObservee : (Number(prodSaisie) || 0);
 
   const now = new Date();
   const debutAnnee = new Date(now.getFullYear(), 0, 1).getTime();
@@ -4141,14 +4303,20 @@ function ProjectionCA({ data }) {
                   onChange={e => setDelai(Math.max(0, Number(e.target.value) || 0))} className={champHypo} />
                 mois avant le premier dossier
               </label>
-              {(recrutement !== null || activation !== null || delai !== 1) && (
-                <button onClick={() => { setRecrutement(null); setActivation(null); setDelai(1); }}
+              <label className="flex items-center gap-2">
+                <input type="number" min="0" step="0.1" value={productivite.toFixed(2)}
+                  onChange={e => setProdSaisie(e.target.value)} className={champHypo} />
+                dossiers/mois par partenaire actif
+                <span className="text-xs text-gray-400">(observé : {productiviteObservee.toFixed(2)} · 12/an = 1,00)</span>
+              </label>
+              {(recrutement !== null || activation !== null || delai !== 1 || prodSaisie !== null) && (
+                <button onClick={() => { setRecrutement(null); setActivation(null); setDelai(1); setProdSaisie(null); }}
                   className="text-xs fa-teal-text hover:underline">réinitialiser</button>
               )}
             </div>
             <div className="text-xs text-gray-400 mt-2">
-              Un partenaire actif dépose en moyenne {productivite.toFixed(2)} dossier par mois.
-              C'est ce qu'ajoutera chaque nouvel actif.
+              C'est la productivité par partenaire qui porte le résultat : mesurée sur {actifs.length} partenaire{actifs.length > 1 ? "s" : ""},
+              elle est la plus fragile des quatre. Votre propre hypothèse de 12 dossiers par an correspond à 1,00.
             </div>
           </div>
 
@@ -6660,6 +6828,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                   une caisse par département. */}
               <Vision360 data={data} />
               <ProjectionCA data={data} />
+              <ObjectifsCA data={data} />
 
               <div className="flex flex-wrap items-center gap-2">
                 <select value={statsDepartementFilter} onChange={e => setStatsDepartementFilter(e.target.value)}
