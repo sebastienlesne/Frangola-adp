@@ -150,6 +150,38 @@ function fileToBase64(file) {
     reader.readAsDataURL(file);
   });
 }
+// Réduit un logo avant de le ranger dans les données. Il est affiché en
+// petit : le conserver en pleine définition alourdirait chaque enregistrement,
+// puisque le bloc de données est relu et réécrit à chaque action.
+// La transparence est préservée (PNG) ; une photo est convertie en JPEG.
+function reduireImage(file, largeurMax = 320) {
+  return new Promise((resolve, reject) => {
+    const lecteur = new FileReader();
+    lecteur.onerror = reject;
+    lecteur.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        try {
+          const ratio = Math.min(1, largeurMax / (img.width || largeurMax));
+          const l = Math.max(1, Math.round((img.width || largeurMax) * ratio));
+          const h = Math.max(1, Math.round((img.height || largeurMax) * ratio));
+          const toile = document.createElement("canvas");
+          toile.width = l; toile.height = h;
+          const ctx = toile.getContext("2d");
+          ctx.drawImage(img, 0, 0, l, h);
+          const transparent = /png|webp|svg/i.test(file.type || "");
+          const reduit = toile.toDataURL(transparent ? "image/png" : "image/jpeg", 0.85);
+          // Si la réduction n'apporte rien (déjà minuscule), on garde l'original.
+          resolve(reduit.length < lecteur.result.length ? reduit : lecteur.result);
+        } catch (e) { resolve(lecteur.result); }
+      };
+      img.src = lecteur.result;
+    };
+    lecteur.readAsDataURL(file);
+  });
+}
+
 function fileToDataURL(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1105,10 +1137,13 @@ export default function App() {
   async function uploadReseauLogo(reseauName, file) {
     const name = reseauName.trim();
     if (!name) return false;
-    if (file.size > 1024 * 1024) { setGlobalError(`"${file.name}" dépasse 1 Mo — utilise une image plus légère pour un logo.`); return false; }
+    if (!/^image\//.test(file.type || "")) { setGlobalError(`"${file.name}" n'est pas une image.`); return false; }
+    if (file.size > 8 * 1024 * 1024) { setGlobalError(`"${file.name}" dépasse 8 Mo — utilise une image plus légère.`); return false; }
     setBusy(true);
     try {
-      const dataUrl = await fileToDataURL(file);
+      let dataUrl;
+      try { dataUrl = await reduireImage(file); }
+      catch (e) { dataUrl = await fileToDataURL(file); }
       await mutateData(base => {
         const existing = base.reseaux.find(r => r.name.trim().toLowerCase() === name.toLowerCase());
         const reseaux = existing
@@ -2713,9 +2748,12 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
 
                 return (
                   <div className={`mt-3 px-3 py-2.5 rounded-lg w-fit max-w-full ${percu > 0.005 ? "fa-bg-gold fa-navy" : "bg-teal-50 border border-teal-200 fa-teal-text"}`}>
-                    <div className="text-sm font-semibold">
-                      💶 Votre rémunération : {fmtEuroPrecis(d.commissionAmount)}
-                      {fractionne && <span className="font-normal"> — versée en {lignes.length} fois de {fmtEuroPrecis(lignes[0].montant)}</span>}
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span className="text-xs font-medium opacity-70">💶 Votre rémunération</span>
+                      <span className="font-display text-2xl font-bold">{fmtEuroPrecis(d.commissionAmount)}</span>
+                      {fractionne && (
+                        <span className="text-xs opacity-80">versée en {lignes.length} fois de {fmtEuroPrecis(lignes[0].montant)}</span>
+                      )}
                     </div>
                     {fractionne && (
                       <div className="text-xs mt-1 opacity-80">
@@ -2767,7 +2805,12 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
           const echAVenir = echRetro.filter(x => !x.recu);
           const totalRemuneration = echRecues.reduce((s, x) => s + x.montant, 0);
           const totalAVenir = echAVenir.reduce((s, x) => s + x.montant, 0);
-          const avgRemuneration = paid.length ? totalRemuneration / paid.length : (partner.flatFee != null ? partner.flatFee : 150);
+          // La moyenne se calcule sur la commission TOTALE des dossiers gagnés,
+          // pas sur ce qui est déjà encaissé : un dossier réglé en douze fois
+          // rapporte autant qu'un autre, il le rapporte simplement plus tard.
+          // Sans ça la moyenne s'effondrerait pour un partenaire récent.
+          const remunerationAcquise = won.reduce((sm, d) => sm + (d.commissionAmount || 0), 0);
+          const avgRemuneration = won.length ? remunerationAcquise / won.length : (partner.flatFee != null ? partner.flatFee : 150);
           const dateEch = (x) => x.encaisseLe ? new Date(x.encaisseLe + "T12:00:00").getTime()
             : (x.dossier.paymentDate ? new Date(x.dossier.paymentDate).getTime() : (x.dossier.updatedAt || x.dossier.createdAt));
           const bilanPar = bilanParrainage(partner.id);
@@ -2820,7 +2863,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                     </div>
                     {dossiersNeededForGoal && (
                       <div className="text-xs text-gray-400 mt-2">
-                        Soit environ {dossiersNeededForGoal} dossier{dossiersNeededForGoal > 1 ? "s" : ""} gagné{dossiersNeededForGoal > 1 ? "s" : ""} à votre moyenne actuelle ({fmtEuro(avgRemuneration)}/dossier).
+                        Soit environ {dossiersNeededForGoal} dossier{dossiersNeededForGoal > 1 ? "s" : ""} gagné{dossiersNeededForGoal > 1 ? "s" : ""} à votre moyenne actuelle ({fmtEuroPrecis(avgRemuneration)}/dossier).
                       </div>
                     )}
                     {goalProgress >= 100 && <div className="text-xs text-emerald-600 font-semibold mt-2">🎉 Objectif atteint !</div>}
@@ -2833,9 +2876,12 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
               <div className={`grid gap-4 ${revenuPassif > 0 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                 <div className="fa-bg-teal rounded-2xl p-6">
                   <div className="text-xs text-white/80 mb-1">Rémunération totale perçue</div>
-                  <div className="font-display text-3xl font-bold text-white">{fmtEuro(totalRemuneration)}</div>
+                  <div className="font-display text-3xl font-bold text-white">{fmtEuroPrecis(totalRemuneration)}</div>
+                  {totalAVenir > 0.005 && (
+                    <div className="text-xs text-white/80 mt-1">+ {fmtEuroPrecis(totalAVenir)} à venir sur vos dossiers en cours</div>
+                  )}
                   {revenuPassif > 0 && (
-                    <div className="text-xs text-white/70 mt-1">Avec le parrainage : {fmtEuro(revenuGlobal)}</div>
+                    <div className="text-xs text-white/70 mt-1">Avec le parrainage : {fmtEuroPrecis(revenuGlobal)}</div>
                   )}
                 </div>
                 {revenuPassif > 0 && (
@@ -2848,8 +2894,8 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                   </div>
                 )}
                 <div className="fa-bg-gold rounded-2xl p-6">
-                  <div className="text-xs text-teal-900/70 mb-1">Rémunération moyenne / dossier payé</div>
-                  <div className="font-display text-3xl font-bold fa-navy">{fmtEuro(avgRemuneration)}</div>
+                  <div className="text-xs text-teal-900/70 mb-1">Rémunération moyenne / dossier gagné</div>
+                  <div className="font-display text-3xl font-bold fa-navy">{fmtEuroPrecis(avgRemuneration)}</div>
                 </div>
               </div>
 
@@ -2968,8 +3014,8 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                 <div className="fa-bg-pink rounded-2xl p-5">
                   <div className="font-display font-semibold fa-navy mb-1">📈 À vous de jouer</div>
                   <p className="text-sm text-teal-900/80">
-                    En moyenne, chaque dossier gagné vous rapporte <strong>{fmtEuro(avgRemuneration)}</strong>.
-                    Un dossier de plus par mois, c'est environ <strong>{fmtEuro(avgRemuneration * 12)}</strong> de plus sur l'année.
+                    En moyenne, chaque dossier gagné vous rapporte <strong>{fmtEuroPrecis(avgRemuneration)}</strong>.
+                    Un dossier de plus par mois, c'est environ <strong>{fmtEuroPrecis(avgRemuneration * 12)}</strong> de plus sur l'année.
                   </p>
                 </div>
               )}
@@ -3923,6 +3969,265 @@ function EcheancierDossier({ dossier, onUpdate }) {
               </div>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
+// VISION 360 DE LA TRÉSORERIE
+//
+// Ce qui est rentré, ce qui va rentrer et quand, ce qui est engagé envers le
+// réseau, et ce qui reste réellement à Frangola. Le fond de roulement se joue
+// dans l'écart entre l'encaissé et les engagements : une partie de ce qui est
+// en banque est déjà due à quelqu'un.
+// =============================================================================
+// =============================================================================
+// PROJECTION DE CHIFFRE D'AFFAIRES
+//
+// Extrapole la production au rythme observé. Une projection n'est pas une
+// prévision : elle dit « si rien ne change », ce qui n'arrive jamais. D'où
+// deux partis pris — on montre toujours sur quoi le calcul repose, et on
+// refuse de projeter quand l'échantillon est trop mince.
+// =============================================================================
+function ProjectionCA({ data }) {
+  const [fenetre, setFenetre] = useState(90);
+  const JOUR = 86400000;
+  const depuis = Date.now() - fenetre * JOUR;
+
+  const tous = data.dossiers;
+  const gagnes = tous.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
+  const ko = tous.filter(d => d.status === "KO");
+
+  // Le rythme se mesure sur les DÉPÔTS : c'est la seule date indiscutable.
+  const deposesPeriode = tous.filter(d => d.createdAt >= depuis).length;
+  const mois = fenetre / 30.44;
+  const rythmeMensuel = deposesPeriode / mois;
+
+  // Transformation et panier moyen se mesurent sur tout l'historique : sur une
+  // fenêtre courte, les dossiers encore en cours fausseraient le taux.
+  const trancheDenominateur = gagnes.length + ko.length;
+  const tauxTransfo = trancheDenominateur > 0 ? gagnes.length / trancheDenominateur : null;
+  const avecMontant = gagnes.filter(d => (d.caAmount || 0) > 0);
+  const caMoyen = avecMontant.length > 0
+    ? avecMontant.reduce((s, d) => s + (d.caAmount || 0), 0) / avecMontant.length
+    : null;
+
+  const assezDeDonnees = deposesPeriode >= 3 && avecMontant.length >= 3 && tauxTransfo !== null;
+
+  const now = new Date();
+  const finAnnee = new Date(now.getFullYear(), 11, 31, 23, 59, 59).getTime();
+  const moisRestants = Math.max(0, (finAnnee - Date.now()) / JOUR / 30.44);
+  const debutAnnee = new Date(now.getFullYear(), 0, 1).getTime();
+  const caAcquisAnnee = gagnes.filter(d => d.createdAt >= debutAnnee).reduce((s, d) => s + (d.caAmount || 0), 0);
+
+  const caMensuelProjete = assezDeDonnees ? rythmeMensuel * tauxTransfo * caMoyen : null;
+  const finAnneeProjete = assezDeDonnees ? caAcquisAnnee + caMensuelProjete * moisRestants : null;
+  const douzeMois = assezDeDonnees ? caMensuelProjete * 12 : null;
+
+  const actifs = data.partners.filter(p => !p.deleted && tous.some(d => d.partnerId === p.id)).length;
+  const parPartenaire = assezDeDonnees && actifs > 0 ? douzeMois / actifs : null;
+
+  const bouton = (v, libelle) => (
+    <button key={v} onClick={() => setFenetre(v)}
+      className={`text-xs font-medium px-3 py-1 rounded-full transition ${fenetre === v ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+      {libelle}
+    </button>
+  );
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div className="font-display font-semibold fa-navy">Projection de chiffre d'affaires</div>
+        <div className="flex gap-1.5">
+          {bouton(30, "30 jours")}{bouton(90, "90 jours")}{bouton(180, "6 mois")}
+        </div>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        Si le rythme des {fenetre} derniers jours se poursuit, sans nouveau partenaire ni ralentissement.
+      </p>
+
+      {!assezDeDonnees ? (
+        <div className="text-sm text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
+          <strong className="fa-navy">Pas assez de données pour projeter.</strong>
+          <div className="text-xs mt-1">
+            Il faut au moins trois dossiers déposés sur la période et trois dossiers gagnés avec un montant renseigné.
+            Aujourd'hui : {deposesPeriode} dépôt{deposesPeriode > 1 ? "s" : ""} sur {fenetre} jours, {avecMontant.length} dossier{avecMontant.length > 1 ? "s" : ""} gagné{avecMontant.length > 1 ? "s" : ""} valorisé{avecMontant.length > 1 ? "s" : ""}.
+            Toute projection à ce stade serait du bruit.
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="grid sm:grid-cols-3 gap-3 mb-4">
+            <div className="fa-bg-offwhite rounded-xl p-4">
+              <div className="text-xs text-gray-500 mb-1">Production mensuelle projetée</div>
+              <div className="font-display text-xl font-bold fa-navy">{fmtEuro(caMensuelProjete)}</div>
+              <div className="text-[11px] text-gray-400 mt-0.5">de chiffre d'affaires</div>
+            </div>
+            <div className="fa-bg-gold rounded-xl p-4">
+              <div className="text-xs text-teal-900/70 mb-1">Fin {now.getFullYear()}</div>
+              <div className="font-display text-xl font-bold fa-navy">{fmtEuro(finAnneeProjete)}</div>
+              <div className="text-[11px] text-teal-900/60 mt-0.5">
+                dont {fmtEuro(caAcquisAnnee)} déjà acquis
+              </div>
+            </div>
+            <div className="fa-bg-offwhite rounded-xl p-4">
+              <div className="text-xs text-gray-500 mb-1">Sur 12 mois</div>
+              <div className="font-display text-xl font-bold fa-navy">{fmtEuro(douzeMois)}</div>
+              <div className="text-[11px] text-gray-400 mt-0.5">au rythme actuel</div>
+            </div>
+          </div>
+
+          <div className="text-xs text-gray-500 fa-bg-offwhite rounded-lg px-3 py-2.5 space-y-1">
+            <div className="font-semibold fa-navy">Sur quoi repose ce calcul</div>
+            <div>
+              {deposesPeriode} dossier{deposesPeriode > 1 ? "s" : ""} déposé{deposesPeriode > 1 ? "s" : ""} en {fenetre} jours,
+              soit <strong className="fa-navy">{rythmeMensuel.toFixed(1)} par mois</strong>.
+            </div>
+            <div>
+              Taux de transformation observé : <strong className="fa-navy">{Math.round(tauxTransfo * 100)} %</strong>
+              <span className="text-gray-400"> ({gagnes.length} gagné{gagnes.length > 1 ? "s" : ""} sur {trancheDenominateur} arbitré{trancheDenominateur > 1 ? "s" : ""})</span>.
+            </div>
+            <div>
+              Chiffre d'affaires moyen par dossier gagné : <strong className="fa-navy">{fmtEuroPrecis(caMoyen)}</strong>
+              <span className="text-gray-400"> (sur {avecMontant.length} dossier{avecMontant.length > 1 ? "s" : ""} valorisé{avecMontant.length > 1 ? "s" : ""})</span>.
+            </div>
+          </div>
+
+          {parPartenaire !== null && (
+            <div className="text-sm fa-navy bg-teal-50 border border-teal-200 rounded-lg px-3 py-2.5 mt-3">
+              À {actifs} partenaire{actifs > 1 ? "s" : ""} ayant déjà déposé, chacun pèse en moyenne
+              {" "}<strong>{fmtEuro(parPartenaire)}</strong> de chiffre d'affaires par an.
+              <span className="block text-xs text-gray-500 mt-0.5">
+                C'est ce que vaut, en euros, un partenaire de plus qui se met à produire.
+              </span>
+            </div>
+          )}
+
+          <p className="text-xs text-gray-400 mt-3">
+            Cette projection suppose que rien ne change. Elle ne tient compte ni des partenaires
+            recrutés depuis, ni de la saisonnalité du marché immobilier. Elle vaut comme ordre de
+            grandeur et comme point de comparaison d'une semaine sur l'autre, pas comme prévision.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Vision360({ data }) {
+  const [detail, setDetail] = useState(false);
+  const vivants = data.dossiers.filter(d => d.status !== "KO");
+  const gagnes = vivants.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
+
+  // --- Entrées
+  const encaisse = gagnes.reduce((s, d) => s + partEncaissee(d, d.caAmount || 0), 0);
+  const aPercevoir = gagnes.reduce((s, d) => s + partAVenir(d, d.caAmount || 0), 0);
+
+  // Dossiers gagnés dont l'échéancier n'est pas encore paramétré : le montant
+  // est acquis, mais aucune date ne peut être annoncée.
+  const sansCalendrier = gagnes.filter(d => {
+    const e = echeancesDe(d);
+    return e.some(x => !x.encaisseLe && !x.datePrevue);
+  });
+
+  // --- Engagements envers le réseau
+  const retroAcquise = gagnes.reduce((s, d) => s + partEncaissee(d, d.commissionAmount || 0), 0);
+  const retroAVenir = gagnes.reduce((s, d) => s + partAVenir(d, d.commissionAmount || 0), 0);
+
+  const parrainDe = (partnerId) => {
+    const p = data.partners.find(x => x.id === partnerId);
+    return p && p.parrainId ? p.parrainId : null;
+  };
+  const primeAcquise = gagnes.reduce((s, d) => s + (parrainDe(d.partnerId) ? partEncaissee(d, d.caAmount || 0) * PARRAINAGE_TAUX : 0), 0);
+  const primeAVenir = gagnes.reduce((s, d) => s + (parrainDe(d.partnerId) ? partAVenir(d, d.caAmount || 0) * PARRAINAGE_TAUX : 0), 0);
+
+  // --- Déjà sorti de la caisse
+  const facturesReglees = data.partners.filter(p => !p.deleted)
+    .reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Payée").reduce((s2, f) => s2 + (f.montant || 0), 0), 0);
+  const versementsParrains = data.partners.filter(p => !p.deleted)
+    .reduce((s, p) => s + (p.parrainageVerse || 0) + (p.parrainageVersements || []).reduce((s2, v) => s2 + (v.montant || 0), 0), 0);
+  const dejaRegle = facturesReglees + versementsParrains;
+
+  const engage = Math.max(0, retroAcquise + primeAcquise - dejaRegle);
+  const libre = encaisse - retroAcquise - primeAcquise;
+  const margeAVenir = aPercevoir - retroAVenir - primeAVenir;
+
+  const Ligne = ({ libelle, montant, ton = "", note }) => (
+    <div className="flex items-baseline justify-between gap-3 py-1.5 border-b border-gray-100 last:border-0">
+      <span className="text-sm text-gray-600">{libelle}{note && <span className="block text-xs text-gray-400">{note}</span>}</span>
+      <span className={`text-sm font-bold shrink-0 ${ton}`}>{fmtEuroPrecis(montant)}</span>
+    </div>
+  );
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div className="font-display font-semibold fa-navy">Trésorerie — vue d'ensemble</div>
+        <button onClick={() => setDetail(v => !v)} className="text-xs fa-teal-text hover:underline">
+          {detail ? "Masquer le détail" : "Voir le détail"}
+        </button>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        Une partie de ce qui est encaissé est déjà due au réseau. Le fond de roulement, c'est ce qui reste après.
+      </p>
+
+      <div className="grid sm:grid-cols-4 gap-3 mb-4">
+        <div className="fa-bg-offwhite rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">Encaissé à ce jour</div>
+          <div className="font-display text-xl font-bold text-emerald-600">{fmtEuroPrecis(encaisse)}</div>
+        </div>
+        <div className="fa-bg-gold rounded-xl p-4">
+          <div className="text-xs text-teal-900/70 mb-1">À percevoir</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(aPercevoir)}</div>
+          <div className="text-[11px] text-teal-900/60 mt-0.5">acquis, pas encore reçu</div>
+        </div>
+        <div className="fa-bg-offwhite rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">Engagé envers le réseau</div>
+          <div className="font-display text-xl font-bold text-violet-700">{fmtEuroPrecis(engage)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">dû et pas encore versé</div>
+        </div>
+        <div className={`rounded-xl p-4 border ${libre < 0 ? "bg-red-50 border-red-200" : "bg-white border-gray-200"}`}>
+          <div className="text-xs text-gray-500 mb-1">Marge sur l'encaissé</div>
+          <div className={`font-display text-xl font-bold ${libre < 0 ? "text-red-700" : "fa-navy"}`}>{fmtEuroPrecis(libre)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">après rétrocessions et primes</div>
+        </div>
+      </div>
+
+      {sansCalendrier.length > 0 && (
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+          {sansCalendrier.length} dossier{sansCalendrier.length > 1 ? "s" : ""} gagné{sansCalendrier.length > 1 ? "s" : ""} sans date d'effet :
+          leur montant est acquis, mais aucune date d'encaissement ne peut être annoncée tant que l'échéancier n'est pas renseigné.
+        </div>
+      )}
+
+      {detail && (
+        <div className="grid sm:grid-cols-2 gap-5">
+          <div>
+            <div className="text-xs font-semibold fa-navy mb-1 uppercase tracking-wide">Ce qui rentre</div>
+            <Ligne libelle="Honoraires encaissés" montant={encaisse} ton="text-emerald-700" />
+            <Ligne libelle="Honoraires à percevoir" montant={aPercevoir} ton="fa-navy" note="échéances datées, non encore reçues" />
+            <Ligne libelle="Total acquis" montant={encaisse + aPercevoir} ton="fa-navy" />
+          </div>
+          <div>
+            <div className="text-xs font-semibold fa-navy mb-1 uppercase tracking-wide">Ce qui sort</div>
+            <Ligne libelle="Rétrocessions acquises aux partenaires" montant={retroAcquise} ton="text-violet-700" note="sur les honoraires déjà encaissés" />
+            <Ligne libelle="Primes de parrainage acquises" montant={primeAcquise} ton="text-violet-700" />
+            <Ligne libelle="Déjà réglé" montant={dejaRegle} ton="text-emerald-700" note="factures payées et versements aux parrains" />
+            <Ligne libelle="Reste à régler" montant={engage} ton="text-violet-700" />
+          </div>
+          <div>
+            <div className="text-xs font-semibold fa-navy mb-1 uppercase tracking-wide">Engagements futurs</div>
+            <Ligne libelle="Rétrocessions à venir" montant={retroAVenir} ton="text-gray-600" note="dues quand les échéances rentreront" />
+            <Ligne libelle="Primes de parrainage à venir" montant={primeAVenir} ton="text-gray-600" />
+          </div>
+          <div>
+            <div className="text-xs font-semibold fa-navy mb-1 uppercase tracking-wide">Ce qui reste à Frangola</div>
+            <Ligne libelle="Marge sur l'encaissé" montant={libre} ton={libre < 0 ? "text-red-700" : "fa-navy"} />
+            <Ligne libelle="Marge à venir" montant={margeAVenir} ton="fa-navy" note="sur les échéances pas encore reçues" />
+            <Ligne libelle="Marge totale attendue" montant={libre + margeAVenir} ton="fa-navy" />
+          </div>
         </div>
       )}
     </div>
@@ -6253,6 +6558,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
 
           return (
             <div className="space-y-8">
+              {/* Vue trésorerie : volontairement hors filtres, on ne pilote pas
+                  une caisse par département. */}
+              <Vision360 data={data} />
+              <ProjectionCA data={data} />
+
               <div className="flex flex-wrap items-center gap-2">
                 <select value={statsDepartementFilter} onChange={e => setStatsDepartementFilter(e.target.value)}
                   className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500">
