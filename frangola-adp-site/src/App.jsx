@@ -1049,6 +1049,22 @@ export default function App() {
     }));
   }
 
+  // Contrat de partenariat commun à tout le réseau. Déposé une fois, il sert
+  // à tous : à cent partenaires, on ne gère pas cent PDF différents.
+  async function uploadContratType(file) {
+    if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
+    setBusy(true);
+    try {
+      const b64 = await fileToBase64(file);
+      const key = "adp:file:" + uid();
+      await storage.set(key, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      return await mutateData(base => ({
+        ...base,
+        settings: { ...base.settings, contratType: { name: file.name, key, at: Date.now() } },
+      }));
+    } finally { setBusy(false); }
+  }
+
   async function uploadPartnerContract(partnerId, file) {
     if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
     setBusy(true);
@@ -1179,7 +1195,7 @@ export default function App() {
     });
   }
 
-  async function createDossier(clientFirstName, clientLastName, clientPhone, files, hasCoEmprunteur, coClientLastName, coClientFirstName, coClientPhone) {
+  async function createDossier(clientFirstName, clientLastName, clientPhone, files, hasCoEmprunteur, coClientLastName, coClientFirstName, coClientPhone, clientInforme) {
     setBusy(true); setGlobalError("");
     try {
       const docs = {};
@@ -1194,6 +1210,7 @@ export default function App() {
       }
       const dossier = {
         id: uid(), partnerId: currentPartner.id, clientFirstName, clientLastName, clientPhone, status: "Déposé",
+        clientInformeLe: clientInforme ? Date.now() : null,
         hasCoEmprunteur: !!hasCoEmprunteur,
         coClientLastName: hasCoEmprunteur ? coClientLastName : "",
         coClientFirstName: hasCoEmprunteur ? coClientFirstName : "",
@@ -1459,6 +1476,21 @@ export default function App() {
     );
   }
 
+  // Le partenaire doit avoir accepté le contrat de partenariat avant d'entrer.
+  // Tant qu'aucun contrat type n'est déposé, aucune porte ne se ferme.
+  const contratType = data.settings?.contratType || null;
+  const partenaireVivant = currentPartner ? (data.partners.find(p => p.id === currentPartner.id) || currentPartner) : null;
+  if (view === "partnerDash" && partenaireVivant && contratType && !partenaireVivant.contratAccepteLe) {
+    return (
+      <AcceptationContrat
+        partner={partenaireVivant}
+        contrat={contratType}
+        onAccepter={() => updatePartner(partenaireVivant.id, { contratAccepteLe: Date.now() })}
+        onLogout={() => deconnexion()}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen fa-bg-offwhite font-body">
       <style>{BRAND_STYLES}</style>
@@ -1542,6 +1574,7 @@ export default function App() {
           onAddPartner={addPartner}
           onUpdatePartner={updatePartner}
           onUploadPartnerContract={uploadPartnerContract}
+          onUploadContratType={uploadContratType}
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
           onAddMandataire={addMandataire}
@@ -1585,6 +1618,7 @@ export default function App() {
           onAddPartner={addPartner}
           onUpdatePartner={updatePartner}
           onUploadPartnerContract={uploadPartnerContract}
+          onUploadContratType={uploadContratType}
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
           onAddMandataire={addMandataire}
@@ -2175,6 +2209,125 @@ function ChampTelephoneSignature({ valeur, onEnregistrer }) {
   );
 }
 
+// =============================================================================
+// ACCEPTATION DU CONTRAT DE PARTENARIAT
+//
+// Une case cochée ne vaut pas une signature manuscrite, mais elle est datée,
+// horodatée et opposable comme commencement de preuve — et c'est le seul
+// dispositif qui tienne à cent partenaires. Le contrat reste consultable et
+// téléchargeable à tout moment depuis son espace.
+// =============================================================================
+// Dépôt du contrat de partenariat commun, et suivi de qui l'a accepté.
+function ContratTypePanel({ contrat, partners, onUpload, canEdit, busy }) {
+  const champ = useRef(null);
+  const vivants = (partners || []).filter(p => !p.deleted);
+  const acceptes = vivants.filter(p => p.contratAccepteLe).length;
+  const manquants = vivants.length - acceptes;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <div className="font-display font-semibold fa-navy">Contrat de partenariat</div>
+          <div className="text-sm text-gray-500">
+            {contrat
+              ? <>Déposé le {fmtDate(contrat.at)} — <strong className="fa-navy">{contrat.name}</strong>. Chaque partenaire doit l'accepter à sa première connexion.</>
+              : "Aucun contrat déposé. Tant qu'il manque, les partenaires accèdent à leur espace sans rien signer."}
+          </div>
+          {contrat && vivants.length > 0 && (
+            <div className="text-xs mt-1">
+              <span className="text-emerald-700 font-medium">{acceptes} accepté{acceptes > 1 ? "s" : ""}</span>
+              {manquants > 0 && <span className="text-red-700 font-medium"> · {manquants} en attente</span>}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {contrat && (
+            <button onClick={() => downloadStoredFile(contrat.key, contrat.name)}
+              className="flex items-center gap-1.5 text-xs font-medium fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition">
+              <Download size={14} /> Télécharger
+            </button>
+          )}
+          {canEdit && (
+            <>
+              <button onClick={() => champ.current?.click()} disabled={busy}
+                className="text-xs font-semibold bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200 px-3 py-1.5 rounded-lg transition disabled:opacity-50">
+                {contrat ? "Remplacer" : "Déposer le contrat"}
+              </button>
+              <input type="file" accept="application/pdf" className="hidden" ref={champ}
+                onChange={e => e.target.files?.[0] && onUpload(e.target.files[0])} />
+            </>
+          )}
+        </div>
+      </div>
+      {contrat && (
+        <p className="text-xs text-gray-400 mt-3">
+          Remplacer le contrat ne remet pas les acceptations à zéro : les partenaires déjà entrés resteront
+          sur la version qu'ils ont acceptée. Pour une nouvelle version opposable, il faut leur redemander.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function AcceptationContrat({ partner, contrat, onAccepter, onLogout }) {
+  const [lu, setLu] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [telecharge, setTelecharge] = useState(false);
+
+  async function valider() {
+    setBusy(true);
+    try { await onAccepter(); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="min-h-screen fa-bg-offwhite flex items-center justify-center px-6 py-10">
+      <div className="max-w-lg w-full bg-white border border-gray-200 rounded-2xl shadow-sm p-8">
+        <div className="flex items-center gap-2 mb-1">
+          <FileCheck2 className="fa-teal-text" size={20} />
+          <h2 className="font-display text-lg font-semibold fa-navy">Contrat de partenariat</h2>
+        </div>
+        <p className="text-sm text-gray-500 mb-5">
+          Bonjour {partner.firstName || up(partner.name)}. Avant d'accéder à votre espace, merci de prendre
+          connaissance du contrat qui encadre notre collaboration.
+        </p>
+
+        <button
+          onClick={() => { downloadStoredFile(contrat.key, contrat.name); setTelecharge(true); }}
+          className="w-full flex items-center justify-center gap-2 text-sm font-medium fa-navy fa-bg-gold px-4 py-3 rounded-lg transition mb-5">
+          <Download size={16} /> Lire le contrat — {contrat.name}
+        </button>
+
+        <label className="flex items-start gap-2.5 text-sm text-gray-600 mb-5 cursor-pointer select-none">
+          <input type="checkbox" checked={lu} onChange={e => setLu(e.target.checked)} className="mt-0.5 accent-teal-600" />
+          <span>
+            J'ai lu et j'accepte le contrat de partenariat Frangola.
+            <span className="block text-xs text-gray-400 mt-0.5">
+              Votre acceptation sera enregistrée avec la date et l'heure.
+            </span>
+          </span>
+        </label>
+
+        {!telecharge && lu && (
+          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+            Vous n'avez pas encore ouvert le contrat. Prenez le temps de le lire — il reste consultable
+            depuis votre espace ensuite.
+          </div>
+        )}
+
+        <button onClick={valider} disabled={!lu || busy}
+          className="w-full fa-bg-teal disabled:opacity-50 font-medium rounded-lg py-2.5 text-sm transition">
+          {busy ? "Enregistrement…" : "Accepter et accéder à mon espace"}
+        </button>
+
+        <button onClick={onLogout} className="w-full text-center text-xs text-gray-400 hover:fa-teal-text mt-4">
+          Se déconnecter
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "partenaire" }) {
   const [copie, setCopie] = useState(false);
   const [pret, setPret] = useState(null); // "email" | "whatsapp" | "echec"
@@ -2359,19 +2512,24 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
   const [coClientLastName, setCoClientLastName] = useState("");
   const [coClientPhone, setCoClientPhone] = useState("");
   const [files, setFiles] = useState({ offre: null, tableau: null, cni: null });
+  // Déclaration du partenaire : le client sait que ses pièces nous sont
+  // transmises. L'accord se noue entre eux ; ici on l'enregistre, daté.
+  const [clientInforme, setClientInforme] = useState(false);
 
   function isFormComplete() {
-    return true;
+    return clientInforme;
   }
   async function submit() {
     if (!isFormComplete()) return;
     const ok = await onCreateDossier(
       clientFirstName.trim(), clientLastName.trim(), clientPhone.trim(), files,
-      hasCoEmprunteur, coClientLastName.trim(), coClientFirstName.trim(), coClientPhone.trim()
+      hasCoEmprunteur, coClientLastName.trim(), coClientFirstName.trim(), coClientPhone.trim(),
+      true
     );
     if (ok) {
       setShowForm(false); setClientFirstName(""); setClientLastName(""); setClientPhone(""); setFiles({ offre: null, tableau: null, cni: null });
       setHasCoEmprunteur(false); setCoClientFirstName(""); setCoClientLastName(""); setCoClientPhone("");
+      setClientInforme(false);
     }
   }
 
@@ -2568,8 +2726,20 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
               <FileDrop label="Tableau d'amortissement" file={files.tableau} onChange={f => setFiles(s => ({ ...s, tableau: f }))} />
               <FileDrop label="Carte d'identité" file={files.cni} onChange={f => setFiles(s => ({ ...s, cni: f }))} />
             </div>
+            <label className="flex items-start gap-2.5 text-sm text-gray-600 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2.5 mb-4 cursor-pointer select-none">
+              <input type="checkbox" checked={clientInforme} onChange={e => setClientInforme(e.target.checked)}
+                className="mt-0.5 accent-teal-600" />
+              <span>
+                Le client est informé que ses coordonnées et ses pièces sont transmises à Frangola pour
+                l'étude de son assurance de prêt, et ne s'y oppose pas.
+                <span className="block text-xs text-gray-400 mt-0.5">
+                  Obligatoire. Votre déclaration est enregistrée avec la date du dépôt.
+                </span>
+              </span>
+            </label>
             <div className="flex gap-3 items-center">
               <button onClick={submit} disabled={busy || !isFormComplete()}
+                title={!clientInforme ? "Cochez la déclaration ci-dessus pour déposer le dossier" : ""}
                 className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
                 {busy ? "Envoi…" : "Déposer le dossier"}
               </button>
@@ -5004,7 +5174,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUploadContratType, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -5499,6 +5669,17 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               depuis: x.p.createdAt,
               aller: () => setTab("partenaires"),
             })),
+            ...(data.settings?.contratType
+              ? data.partners.filter(p => !p.deleted && p.email && !p.contratAccepteLe).map(p => ({
+                  cle: "c-" + p.id,
+                  categorie: "Contrat",
+                  couleur: "bg-red-100 text-red-800",
+                  titre: nomPartenaire(p.id),
+                  detail: "contrat de partenariat pas encore accepté",
+                  depuis: p.createdAt,
+                  aller: () => setTab("partenaires"),
+                }))
+              : []),
             ...data.partners.filter(p => !p.deleted && !p.email).map(p => ({
               cle: "i-" + p.id,
               categorie: "Fiche",
@@ -5806,6 +5987,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                                             <div className="text-xs text-gray-400">
                                               Déposé le {fmtDate(d.createdAt)}
                                               {d.clientPhone && <> · <a href={`tel:${d.clientPhone}`} className="fa-teal-text hover:underline">{d.clientPhone}</a></>}
+                                              {d.clientInformeLe && (
+                                                <> · <span className="text-emerald-700" title="Le partenaire a déclaré que le client est informé de la transmission de ses pièces">
+                                                  client informé ✓
+                                                </span></>
+                                              )}
                                             </div>
                                           </div>
                                         )}
@@ -6268,6 +6454,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
           <div>
                         <RegistreParrainages data={data} onTraiter={onTraiterParrainage} />
 
+            <ContratTypePanel contrat={data.settings?.contratType} partners={data.partners}
+              onUpload={onUploadContratType} canEdit={isFullAdmin} busy={busy} />
+
 
             {(() => {
               // Les fiches créées depuis une déclaration de parrainage arrivent
@@ -6648,6 +6837,17 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                           {p.email || "email manquant"} · {p.lastLoginAt ? `dernière connexion ${fmtDate(p.lastLoginAt)}` : "jamais connecté"}
                         </span>
                         <BlocAcces cible={p} expediteur={viewerLabel} telephone={viewerTelephone} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
+                        {data.settings?.contratType && (
+                          p.contratAccepteLe ? (
+                            <span className="text-xs bg-emerald-50 border border-emerald-200 text-emerald-700 px-2.5 py-1 rounded-lg">
+                              Contrat accepté le {fmtDate(p.contratAccepteLe)}
+                            </span>
+                          ) : (
+                            <span className="text-xs bg-red-50 border border-red-200 text-red-700 px-2.5 py-1 rounded-lg">
+                              Contrat non accepté
+                            </span>
+                          )
+                        )}
                         {confirmDeleteId === p.id ? (
                           <span className="flex items-center gap-1.5 text-xs">
                             <span className="text-red-700">Confirmer ?</span>
