@@ -3993,41 +3993,85 @@ function EcheancierDossier({ dossier, onUpdate }) {
 // =============================================================================
 function ProjectionCA({ data }) {
   const [fenetre, setFenetre] = useState(90);
+  const [scenario, setScenario] = useState(false);
   const JOUR = 86400000;
   const depuis = Date.now() - fenetre * JOUR;
 
   const tous = data.dossiers;
+  const vivants = data.partners.filter(p => !p.deleted);
   const gagnes = tous.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
   const ko = tous.filter(d => d.status === "KO");
 
   // Le rythme se mesure sur les DÉPÔTS : c'est la seule date indiscutable.
   const deposesPeriode = tous.filter(d => d.createdAt >= depuis).length;
-  const mois = fenetre / 30.44;
-  const rythmeMensuel = deposesPeriode / mois;
+  const moisFenetre = fenetre / 30.44;
+  const rythmeMensuel = deposesPeriode / moisFenetre;
 
   // Transformation et panier moyen se mesurent sur tout l'historique : sur une
   // fenêtre courte, les dossiers encore en cours fausseraient le taux.
-  const trancheDenominateur = gagnes.length + ko.length;
-  const tauxTransfo = trancheDenominateur > 0 ? gagnes.length / trancheDenominateur : null;
+  const arbitres = gagnes.length + ko.length;
+  const tauxTransfo = arbitres > 0 ? gagnes.length / arbitres : null;
   const avecMontant = gagnes.filter(d => (d.caAmount || 0) > 0);
   const caMoyen = avecMontant.length > 0
-    ? avecMontant.reduce((s, d) => s + (d.caAmount || 0), 0) / avecMontant.length
+    ? avecMontant.reduce((s2, d) => s2 + (d.caAmount || 0), 0) / avecMontant.length
     : null;
 
   const assezDeDonnees = deposesPeriode >= 3 && avecMontant.length >= 3 && tauxTransfo !== null;
 
+  // --- Réseau : recrutement observé, activation observée
+  const actifs = vivants.filter(p => tous.some(d => d.partnerId === p.id));
+  const recrutesPeriode = vivants.filter(p => p.createdAt >= depuis).length;
+  const recrutementObserve = Math.round((recrutesPeriode / moisFenetre) * 10) / 10;
+  const activationObservee = vivants.length > 0 ? Math.round((actifs.length / vivants.length) * 100) : 30;
+
+  // Hypothèses du scénario, préremplies par l'observation puis modifiables.
+  const [recrutement, setRecrutement] = useState(null);
+  const [activation, setActivation] = useState(null);
+  const [delai, setDelai] = useState(1);
+  const recrutementUtilise = recrutement === null ? recrutementObserve : Number(recrutement) || 0;
+  const activationUtilisee = activation === null ? activationObservee : Number(activation) || 0;
+
+  // Production par partenaire actif : le socle observé rapporté à ceux qui
+  // produisent réellement. C'est ce qu'apportera chaque nouvel actif.
+  const productivite = actifs.length > 0 ? rythmeMensuel / actifs.length : 0;
+
   const now = new Date();
-  const finAnnee = new Date(now.getFullYear(), 11, 31, 23, 59, 59).getTime();
-  const moisRestants = Math.max(0, (finAnnee - Date.now()) / JOUR / 30.44);
   const debutAnnee = new Date(now.getFullYear(), 0, 1).getTime();
-  const caAcquisAnnee = gagnes.filter(d => d.createdAt >= debutAnnee).reduce((s, d) => s + (d.caAmount || 0), 0);
+  const caAcquisAnnee = gagnes.filter(d => d.createdAt >= debutAnnee).reduce((s2, d) => s2 + (d.caAmount || 0), 0);
+  const caParDossier = assezDeDonnees ? tauxTransfo * caMoyen : 0;
+  const caMensuelActuel = assezDeDonnees ? rythmeMensuel * caParDossier : null;
 
-  const caMensuelProjete = assezDeDonnees ? rythmeMensuel * tauxTransfo * caMoyen : null;
-  const finAnneeProjete = assezDeDonnees ? caAcquisAnnee + caMensuelProjete * moisRestants : null;
-  const douzeMois = assezDeDonnees ? caMensuelProjete * 12 : null;
+  // Trajectoire : la production du mois en cours est un PLANCHER. Chaque mois
+  // on y ajoute ce qu'apportent les partenaires activés depuis, avec un délai
+  // de démarrage — un apporteur recruté en mars ne produit pas en mars.
+  const trajectoire = [];
+  if (assezDeDonnees) {
+    let cumul = 0;
+    for (let m = 1; m <= 12; m++) {
+      const vaguesActives = Math.max(0, m - delai);
+      const nouveauxActifs = vaguesActives * recrutementUtilise * (activationUtilisee / 100);
+      const dossiersMois = rythmeMensuel + nouveauxActifs * productivite;
+      const caMois = dossiersMois * caParDossier;
+      cumul += caMois;
+      const d = new Date(now.getFullYear(), now.getMonth() + m, 1);
+      trajectoire.push({
+        mois: d.toLocaleDateString("fr-FR", { month: "short", year: "2-digit" }),
+        actifs: Math.round(actifs.length + nouveauxActifs),
+        dossiers: dossiersMois,
+        ca: caMois,
+        cumul,
+      });
+    }
+  }
 
-  const actifs = data.partners.filter(p => !p.deleted && tous.some(d => d.partnerId === p.id)).length;
-  const parPartenaire = assezDeDonnees && actifs > 0 ? douzeMois / actifs : null;
+  const total12Gele = assezDeDonnees ? caMensuelActuel * 12 : null;
+  const total12Scenario = trajectoire.length ? trajectoire[11].cumul : null;
+
+  const moisRestants = 11 - now.getMonth();
+  const finAnneeGele = assezDeDonnees ? caAcquisAnnee + caMensuelActuel * moisRestants : null;
+  const finAnneeScenario = assezDeDonnees && moisRestants > 0
+    ? caAcquisAnnee + trajectoire.slice(0, moisRestants).reduce((s2, x) => s2 + x.ca, 0)
+    : caAcquisAnnee;
 
   const bouton = (v, libelle) => (
     <button key={v} onClick={() => setFenetre(v)}
@@ -4035,6 +4079,7 @@ function ProjectionCA({ data }) {
       {libelle}
     </button>
   );
+  const champHypo = "w-16 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500";
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
@@ -4045,7 +4090,7 @@ function ProjectionCA({ data }) {
         </div>
       </div>
       <p className="text-sm text-gray-500 mb-4">
-        Si le rythme des {fenetre} derniers jours se poursuit, sans nouveau partenaire ni ralentissement.
+        Mesurée sur les {fenetre} derniers jours.
       </p>
 
       {!assezDeDonnees ? (
@@ -4059,56 +4104,109 @@ function ProjectionCA({ data }) {
         </div>
       ) : (
         <>
-          <div className="grid sm:grid-cols-3 gap-3 mb-4">
+          <div className="grid sm:grid-cols-2 gap-3 mb-4">
             <div className="fa-bg-offwhite rounded-xl p-4">
-              <div className="text-xs text-gray-500 mb-1">Production mensuelle projetée</div>
-              <div className="font-display text-xl font-bold fa-navy">{fmtEuro(caMensuelProjete)}</div>
-              <div className="text-[11px] text-gray-400 mt-0.5">de chiffre d'affaires</div>
-            </div>
-            <div className="fa-bg-gold rounded-xl p-4">
-              <div className="text-xs text-teal-900/70 mb-1">Fin {now.getFullYear()}</div>
-              <div className="font-display text-xl font-bold fa-navy">{fmtEuro(finAnneeProjete)}</div>
-              <div className="text-[11px] text-teal-900/60 mt-0.5">
-                dont {fmtEuro(caAcquisAnnee)} déjà acquis
+              <div className="text-xs text-gray-500 mb-1">Au rythme actuel — réseau figé</div>
+              <div className="font-display text-2xl font-bold fa-navy">{fmtEuro(total12Gele)}</div>
+              <div className="text-[11px] text-gray-400 mt-0.5">
+                sur 12 mois · {rythmeMensuel.toFixed(1)} dossiers/mois · fin {now.getFullYear()} : {fmtEuro(finAnneeGele)}
               </div>
             </div>
-            <div className="fa-bg-offwhite rounded-xl p-4">
-              <div className="text-xs text-gray-500 mb-1">Sur 12 mois</div>
-              <div className="font-display text-xl font-bold fa-navy">{fmtEuro(douzeMois)}</div>
-              <div className="text-[11px] text-gray-400 mt-0.5">au rythme actuel</div>
+            <div className="fa-bg-gold rounded-xl p-4">
+              <div className="text-xs text-teal-900/70 mb-1">Avec la croissance du réseau</div>
+              <div className="font-display text-2xl font-bold fa-navy">{fmtEuro(total12Scenario)}</div>
+              <div className="text-[11px] text-teal-900/60 mt-0.5">
+                sur 12 mois · {trajectoire[11].actifs} partenaires actifs en fin de période · fin {now.getFullYear()} : {fmtEuro(finAnneeScenario)}
+              </div>
             </div>
           </div>
+
+          <div className="fa-bg-offwhite rounded-lg px-3 py-3 mb-3">
+            <div className="text-xs font-semibold fa-navy mb-2">Hypothèses du scénario</div>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-gray-600">
+              <label className="flex items-center gap-2">
+                <input type="number" min="0" step="1" value={recrutementUtilise}
+                  onChange={e => setRecrutement(e.target.value)} className={champHypo} />
+                partenaires recrutés par mois
+                <span className="text-xs text-gray-400">(observé : {recrutementObserve})</span>
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="number" min="0" max="100" step="1" value={activationUtilisee}
+                  onChange={e => setActivation(e.target.value)} className={champHypo} />
+                % qui déposent au moins un dossier
+                <span className="text-xs text-gray-400">(observé : {activationObservee} %)</span>
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="number" min="0" max="6" step="1" value={delai}
+                  onChange={e => setDelai(Math.max(0, Number(e.target.value) || 0))} className={champHypo} />
+                mois avant le premier dossier
+              </label>
+              {(recrutement !== null || activation !== null || delai !== 1) && (
+                <button onClick={() => { setRecrutement(null); setActivation(null); setDelai(1); }}
+                  className="text-xs fa-teal-text hover:underline">réinitialiser</button>
+              )}
+            </div>
+            <div className="text-xs text-gray-400 mt-2">
+              Un partenaire actif dépose en moyenne {productivite.toFixed(2)} dossier par mois.
+              C'est ce qu'ajoutera chaque nouvel actif.
+            </div>
+          </div>
+
+          <button onClick={() => setScenario(v => !v)} className="text-xs fa-teal-text hover:underline mb-2">
+            {scenario ? "Masquer la trajectoire" : "Voir la trajectoire mois par mois"}
+          </button>
+
+          {scenario && (
+            <div className="overflow-x-auto mb-3">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-400 text-left">
+                    <th className="font-medium py-1">Mois</th>
+                    <th className="font-medium py-1 text-right">Partenaires actifs</th>
+                    <th className="font-medium py-1 text-right">Dossiers</th>
+                    <th className="font-medium py-1 text-right">C.A. du mois</th>
+                    <th className="font-medium py-1 text-right">Cumul</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trajectoire.map((t, i2) => (
+                    <tr key={t.mois} className={i2 % 2 ? "fa-bg-offwhite" : ""}>
+                      <td className="py-1 fa-navy capitalize">{t.mois}</td>
+                      <td className="py-1 text-right text-gray-500">{t.actifs}</td>
+                      <td className="py-1 text-right text-gray-500">{t.dossiers.toFixed(1)}</td>
+                      <td className="py-1 text-right fa-navy font-medium">{fmtEuro(t.ca)}</td>
+                      <td className="py-1 text-right fa-navy font-bold">{fmtEuro(t.cumul)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <div className="text-xs text-gray-500 fa-bg-offwhite rounded-lg px-3 py-2.5 space-y-1">
             <div className="font-semibold fa-navy">Sur quoi repose ce calcul</div>
             <div>
               {deposesPeriode} dossier{deposesPeriode > 1 ? "s" : ""} déposé{deposesPeriode > 1 ? "s" : ""} en {fenetre} jours,
-              soit <strong className="fa-navy">{rythmeMensuel.toFixed(1)} par mois</strong>.
+              soit <strong className="fa-navy">{rythmeMensuel.toFixed(1)} par mois</strong> — ce rythme sert de plancher, il n'est jamais revu à la baisse.
             </div>
             <div>
-              Taux de transformation observé : <strong className="fa-navy">{Math.round(tauxTransfo * 100)} %</strong>
-              <span className="text-gray-400"> ({gagnes.length} gagné{gagnes.length > 1 ? "s" : ""} sur {trancheDenominateur} arbitré{trancheDenominateur > 1 ? "s" : ""})</span>.
+              Taux de transformation : <strong className="fa-navy">{Math.round(tauxTransfo * 100)} %</strong>
+              <span className="text-gray-400"> ({gagnes.length} gagné{gagnes.length > 1 ? "s" : ""} sur {arbitres} arbitré{arbitres > 1 ? "s" : ""})</span>.
             </div>
             <div>
-              Chiffre d'affaires moyen par dossier gagné : <strong className="fa-navy">{fmtEuroPrecis(caMoyen)}</strong>
+              C.A. moyen par dossier gagné : <strong className="fa-navy">{fmtEuroPrecis(caMoyen)}</strong>
               <span className="text-gray-400"> (sur {avecMontant.length} dossier{avecMontant.length > 1 ? "s" : ""} valorisé{avecMontant.length > 1 ? "s" : ""})</span>.
+            </div>
+            <div>
+              Réseau : <strong className="fa-navy">{actifs.length}</strong> partenaire{actifs.length > 1 ? "s" : ""} actif{actifs.length > 1 ? "s" : ""} sur {vivants.length}.
             </div>
           </div>
 
-          {parPartenaire !== null && (
-            <div className="text-sm fa-navy bg-teal-50 border border-teal-200 rounded-lg px-3 py-2.5 mt-3">
-              À {actifs} partenaire{actifs > 1 ? "s" : ""} ayant déjà déposé, chacun pèse en moyenne
-              {" "}<strong>{fmtEuro(parPartenaire)}</strong> de chiffre d'affaires par an.
-              <span className="block text-xs text-gray-500 mt-0.5">
-                C'est ce que vaut, en euros, un partenaire de plus qui se met à produire.
-              </span>
-            </div>
-          )}
-
           <p className="text-xs text-gray-400 mt-3">
-            Cette projection suppose que rien ne change. Elle ne tient compte ni des partenaires
-            recrutés depuis, ni de la saisonnalité du marché immobilier. Elle vaut comme ordre de
-            grandeur et comme point de comparaison d'une semaine sur l'autre, pas comme prévision.
+            Ce n'est pas une prévision mais une arithmétique conditionnelle : elle suppose que le rythme
+            tient, que les nouveaux partenaires s'activent au taux indiqué, et ignore la saisonnalité du
+            marché immobilier. Regardez surtout laquelle des trois hypothèses fait bouger le résultat —
+            c'est le levier sur lequel agir.
           </p>
         </>
       )}
