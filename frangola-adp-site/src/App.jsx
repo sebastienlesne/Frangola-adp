@@ -4002,6 +4002,196 @@ function EcheancierDossier({ dossier, onUpdate }) {
 // c'est un outil de pilotage, il doit fonctionner avant même d'avoir des
 // données, sur les chiffres que Sébastien estime justes.
 // =============================================================================
+// Date à laquelle un dossier a été gagné, lue dans l'historique des statuts
+// plutôt que devinée d'après la date de dépôt : un dossier déposé en février
+// et souscrit en mars appartient à mars.
+function dateGain(dossier) {
+  const h = dossier.history || [];
+  const gagnants = ["Souscrit", "Bordereau émis", "Payé"];
+  const trouve = h.find(e => gagnants.includes(e.status));
+  if (trouve) return trouve.at;
+  return gagnants.includes(dossier.status) ? (dossier.updatedAt || dossier.createdAt) : null;
+}
+
+// =============================================================================
+// PRODUCTION DU MOIS
+//
+// Répond à une seule question : suis-je dans les temps. D'où le repère de
+// rythme — être à 18 sur 30 le 5 du mois et le 28 n'a rien à voir — et les
+// écarts exprimés en dossiers plutôt qu'en pourcentages : « il en manque 4 »
+// se traite, « 88 % du rythme » ne se traite pas.
+//
+// La barre est segmentée par commercial : le total et la répartition se lisent
+// dans le même geste.
+// =============================================================================
+function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
+  const [edition, setEdition] = useState(false);
+  const [brouillon, setBrouillon] = useState({});
+
+  const objectifs = data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
+  const now = new Date();
+  const debut = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const fin = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+  const avancement = Math.min(1, Math.max(0, (Date.now() - debut) / (fin - debut)));
+  const joursRestants = Math.max(0, Math.ceil((fin - Date.now()) / 86400000));
+
+  const commercialDuDossier = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
+
+  // --- Réalisé, ventilé par commercial
+  const parCommercial = (extracteur) => {
+    const m = new Map(commerciaux.map(c => [c, 0]));
+    extracteur((c, v) => { if (m.has(c)) m.set(c, m.get(c) + v); });
+    return commerciaux.map(c => ({ nom: c, valeur: m.get(c) || 0 })).filter(x => x.valeur > 0);
+  };
+
+  const partenaires = parCommercial(ajoute => {
+    for (const p of data.partners) {
+      if (p.deleted || p.createdAt < debut || p.createdAt >= fin) continue;
+      ajoute(p.commercial, 1);
+    }
+  });
+
+  const dossiers = parCommercial(ajoute => {
+    for (const d of data.dossiers) {
+      const t = dateGain(d);
+      if (t === null || t < debut || t >= fin) continue;
+      ajoute(commercialDuDossier(d), 1);
+    }
+  });
+
+  const ca = parCommercial(ajoute => {
+    for (const d of data.dossiers) {
+      if (d.status === "KO") continue;
+      const ech = echeancesDe(d);
+      const parts = repartir(d.caAmount || 0, ech.length);
+      ech.forEach((e, i) => {
+        const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
+          : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
+        if (quand !== null && quand >= debut && quand < fin) ajoute(commercialDuDossier(d), parts[i]);
+      });
+    }
+  });
+
+  function enregistrer() {
+    const champs = {};
+    for (const k of ["partenaires", "dossiers", "ca"]) {
+      const v = Number(brouillon[k]);
+      if (!isNaN(v) && v >= 0) champs[k] = v;
+    }
+    onSetGoals(champs);
+    setEdition(false);
+  }
+
+  const Jauge = ({ titre, segments, objectif, format }) => {
+    const realise = segments.reduce((s, x) => s + x.valeur, 0);
+    const attendu = objectif * avancement;
+    const ecart = realise - attendu;
+    const finDeMois = avancement > 0.02 ? realise / avancement : null;
+    const ratio = objectif > 0 ? realise / objectif : 0;
+    const enRetard = ecart < 0;
+    const grosRetard = objectif > 0 && ecart < -objectif * 0.2;
+    const couleurTexte = grosRetard ? "text-red-700" : enRetard ? "text-amber-700" : "text-emerald-700";
+    const f = format || ((n) => Math.round(n));
+
+    return (
+      <div>
+        <div className="flex items-baseline justify-between gap-2 mb-1.5">
+          <span className="text-sm font-semibold fa-navy">{titre}</span>
+          <span className="text-sm fa-navy">
+            <strong className="font-display text-lg">{f(realise)}</strong>
+            <span className="text-gray-400"> / {f(objectif)}</span>
+          </span>
+        </div>
+
+        <div className="relative h-4 bg-gray-100 rounded-full overflow-hidden">
+          <div className="flex h-full">
+            {segments.map(seg => (
+              <div key={seg.nom}
+                title={`${commercialLabel(seg.nom)} — ${f(seg.valeur)}`}
+                style={{
+                  width: `${objectif > 0 ? Math.min(100, (seg.valeur / objectif) * 100) : 0}%`,
+                  backgroundColor: COMMERCIAL_COLORS[seg.nom] || "#999",
+                }} />
+            ))}
+          </div>
+          {/* Repère : là où il faudrait en être aujourd'hui. */}
+          <div className="absolute top-0 bottom-0 w-0.5 bg-gray-800/70"
+            style={{ left: `${avancement * 100}%` }} title="Rythme attendu à date" />
+        </div>
+
+        <div className={`text-xs mt-1 ${couleurTexte}`}>
+          {objectif <= 0 ? "Aucun objectif fixé." : enRetard
+            ? `Il manque ${f(Math.abs(ecart))} pour être dans les temps.`
+            : `${f(ecart)} d'avance sur le rythme.`}
+          {finDeMois !== null && objectif > 0 && (
+            <span className="text-gray-400"> · à ce rythme, fin de mois à {f(finDeMois)}</span>
+          )}
+          {ratio >= 1 && <span className="text-emerald-700 font-semibold"> · objectif atteint</span>}
+        </div>
+      </div>
+    );
+  };
+
+  const euros = (n) => fmtEuro(n);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div className="font-display font-semibold fa-navy">Production du mois</div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-400">
+            {joursRestants} jour{joursRestants > 1 ? "s" : ""} restant{joursRestants > 1 ? "s" : ""} · {Math.round(avancement * 100)} % du mois écoulé
+          </span>
+          {canEdit && !edition && (
+            <button onClick={() => { setBrouillon({ partenaires: objectifs.partenaires, dossiers: objectifs.dossiers, ca: objectifs.ca }); setEdition(true); }}
+              className="text-xs fa-teal-text hover:underline">Modifier les objectifs</button>
+          )}
+        </div>
+      </div>
+
+      {edition ? (
+        <div className="flex flex-wrap items-center gap-2 my-3">
+          {[["partenaires", "Partenaires"], ["dossiers", "Dossiers"], ["ca", "C.A. (€)"]].map(([k, lib]) => (
+            <label key={k} className="text-xs text-gray-500 flex items-center gap-1.5">
+              {lib}
+              <input type="number" min="0" value={brouillon[k] ?? ""}
+                onChange={e => setBrouillon(b => ({ ...b, [k]: e.target.value }))}
+                className="w-24 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            </label>
+          ))}
+          <button onClick={enregistrer} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
+          <button onClick={() => setEdition(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+        </div>
+      ) : (
+        <p className="text-sm text-gray-500 mb-4">
+          Le trait sombre marque où vous devriez en être aujourd'hui. Chaque couleur est un commercial.
+        </p>
+      )}
+
+      <div className="space-y-4">
+        <Jauge titre="Nouveaux partenaires" segments={partenaires} objectif={objectifs.partenaires || 0} />
+        <Jauge titre="Dossiers gagnés" segments={dossiers} objectif={objectifs.dossiers || 0} />
+        <Jauge titre="C.A. encaissé" segments={ca} objectif={objectifs.ca || 0} format={euros} />
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-4 pt-3 border-t border-gray-100">
+        {commerciaux.map(c => {
+          const pa = partenaires.find(x => x.nom === c)?.valeur || 0;
+          const dos = dossiers.find(x => x.nom === c)?.valeur || 0;
+          const mt = ca.find(x => x.nom === c)?.valeur || 0;
+          return (
+            <div key={c} className="flex items-center gap-1.5 text-xs">
+              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COMMERCIAL_COLORS[c] || "#999" }} />
+              <span className="fa-navy font-medium">{commercialLabel(c)}</span>
+              <span className="text-gray-400">{pa} part. · {dos} doss. · {fmtEuro(mt)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ObjectifsCA({ data }) {
   const vivants = data.partners.filter(p => !p.deleted);
   const tous = data.dossiers;
@@ -5342,6 +5532,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                 <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
                 <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
               </div>
+
+              <ProductionDuMois data={data} commerciaux={COMMERCIAUX}
+                onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
 
               <div className="grid sm:grid-cols-4 gap-4">
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
