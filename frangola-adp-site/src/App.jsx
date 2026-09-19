@@ -614,6 +614,43 @@ function StatusBadge({ status }) {
   );
 }
 
+// Un dossier au statut « Payé » dont les honoraires rentrent en douze fois
+// n'est pas soldé. Afficher « Payé » seul ferait croire au partenaire que tout
+// est versé, et le premier relevé bancaire démentirait l'application.
+function PaiementBadge({ dossier }) {
+  if (!dossier || dossier.status === "KO") return null;
+  if (!["Souscrit", "Bordereau émis", "Payé"].includes(dossier.status)) return null;
+  const total = dossier.caAmount || 0;
+  if (total <= 0) return null;
+
+  const ech = echeancesDe(dossier);
+  const recu = partEncaissee(dossier, total);
+  const pct = Math.round((recu / total) * 100);
+  const fractionne = ech.length > 1;
+
+  if (pct >= 100) {
+    return (
+      <span className="inline-block text-xs font-semibold px-2.5 py-1 rounded-full border bg-emerald-50 text-emerald-700 border-emerald-300">
+        Soldé
+      </span>
+    );
+  }
+  if (recu > 0.005) {
+    return (
+      <span className="inline-block text-xs font-semibold px-2.5 py-1 rounded-full border bg-amber-50 text-amber-800 border-amber-300"
+        title={`${fmtEuroPrecis(recu)} reçus sur ${fmtEuroPrecis(total)}`}>
+        Paiement partiel {pct} %
+      </span>
+    );
+  }
+  return (
+    <span className="inline-block text-xs font-semibold px-2.5 py-1 rounded-full border bg-gray-100 text-gray-600 border-gray-300"
+      title={fractionne ? `Réglé en ${ech.length} fois — rien encore reçu` : "Aucun encaissement enregistré"}>
+      Paiement à venir
+    </span>
+  );
+}
+
 function Stepper({ status }) {
   if (status === "KO") {
     const koSteps = ["Déposé", "En vérification", "Devis en cours", "KO"];
@@ -2809,6 +2846,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                     <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.clientPhone && ` · ${d.clientPhone}`}</div>
                   </div>
                   <StatusBadge status={d.status} />
+                  <PaiementBadge dossier={d} />
                 </div>
               )}
               {d.status === "KO" && d.koReason && (
@@ -6002,6 +6040,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                                             </span>
                                           )}
                                           <StatusBadge status={d.status} />
+                                          <PaiementBadge dossier={d} />
                                         </div>
                                       </div>
                                       <Stepper status={d.status} />
@@ -6912,6 +6951,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                                       <Upload size={13} />
                                     </button>
                                     <StatusBadge status={d.status} />
+                                    <PaiementBadge dossier={d} />
                                     <span>{fmtDate(d.createdAt)}</span>
                                     {d.commissionAmount != null && <span className="fa-teal-text font-semibold">{fmtEuro(d.commissionAmount)}</span>}
                                   </div>
