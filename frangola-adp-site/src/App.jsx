@@ -144,18 +144,50 @@ function setStoredTab(key, value) {
 // Catalogue de référence : c'est lui qui fait foi. L'ordre choisi par
 // l'utilisateur n'est qu'une liste d'identifiants rangée à côté, ce qui permet
 // d'ajouter un onglet plus tard sans casser la personnalisation existante.
-const ONGLETS_ADMIN = [
-  { id: "accueil", label: "Accueil", icone: "Home" },
-  { id: "dossiers", label: "Dossiers", icone: "FileText" },
-  { id: "partenaires", label: "Partenaires", icone: "Building2" },
-  { id: "facturation", label: "Facturation", icone: "Wallet" },
-  { id: "corbeille", label: "Corbeille", icone: "Trash2" },
-  { id: "stats", label: "Statistiques", icone: "BarChart3" },
-  { id: "challenge", label: "Challenge", emoji: "🏆" },
-  { id: "mandataires", label: "Mandataires", icone: "Landmark", fullAdmin: true },
+// Quatre familles au lieu de huit onglets à plat. L'identifiant d'écran (le
+// « feuillet ») ne change pas : tous les blocs existants continuent de se
+// reconnaître à la même valeur, seule la navigation par-dessus est nouvelle.
+const CATEGORIES_ADMIN = [
+  {
+    id: "accueil", label: "Accueil", icone: "Home",
+    feuillets: [{ id: "accueil", label: "Pilotage" }],
+  },
+  {
+    id: "production", label: "Production", icone: "FileText",
+    feuillets: [
+      { id: "dossiers", label: "Dossiers" },
+      { id: "partenaires", label: "Partenaires" },
+      { id: "analyses", label: "Analyses" },
+      { id: "challenge", label: "Challenges" },
+    ],
+  },
+  {
+    id: "ca", label: "C.A.", icone: "Wallet",
+    feuillets: [
+      { id: "tresorerie", label: "Temps réel" },
+      { id: "facturation", label: "À payer" },
+      { id: "projections", label: "Projections" },
+      { id: "recurrence", label: "Récurrence" },
+    ],
+  },
+  {
+    id: "logistique", label: "Logistique", icone: "Landmark",
+    feuillets: [
+      { id: "mandataires", label: "Mandataires", fullAdmin: true },
+      { id: "journal", label: "Journal" },
+      { id: "corbeille", label: "Corbeille" },
+    ],
+  },
 ];
 const ICONES_ONGLETS = { Home, FileText, Building2, Wallet, Trash2, BarChart3, Landmark };
-const ORDRE_ONGLETS_DEFAUT = ONGLETS_ADMIN.map(o => o.id);
+const ORDRE_ONGLETS_DEFAUT = CATEGORIES_ADMIN.map(c => c.id);
+// À quelle famille appartient un écran donné.
+function categorieDe(feuillet) {
+  return CATEGORIES_ADMIN.find(c => c.feuillets.some(f => f.id === feuillet)) || CATEGORIES_ADMIN[0];
+}
+function feuilletsVisibles(cat, isFullAdmin) {
+  return (cat?.feuillets || []).filter(f => !f.fullAdmin || isFullAdmin);
+}
 function lireOrdreOnglets() {
   try {
     const brut = JSON.parse(localStorage.getItem("adp:ordreOnglets") || "null");
@@ -5679,6 +5711,53 @@ function boostsDuDossier(d) {
   });
 }
 
+// Bilan économique d'un challenge : ce qu'il a coûté face à ce qu'il a fait
+// produire EN PLUS. Le coût brut ne dit rien tout seul — si les partenaires
+// avaient produit autant sans l'opération, l'argent est perdu. On compare donc
+// leur production pendant à leur rythme des 90 jours précédents.
+const FENETRE_RYTHME_JOURS = 90;
+function bilanChallenge(data, ch) {
+  const { debut, fin, valide } = bornesChallenge(ch);
+  if (!valide) return null;
+  const JOUR = 86400000;
+  const vises = (data?.partners || []).filter(p => !p.deleted && challengeCible(ch, p.id));
+  const ids = new Set(vises.map(p => p.id));
+  const gagnesEntre = (a, b) => (data?.dossiers || []).filter(d => {
+    if (!ids.has(d.partnerId) || d.status === "KO") return false;
+    const t = dateGain(d);
+    return t !== null && t >= a && t <= b;
+  });
+  // On s'arrête à aujourd'hui pour un challenge encore en cours : comparer une
+  // période entamée à une période complète fausserait tout.
+  const borneHaute = Math.min(fin, Date.now());
+  const ecoule = Math.max(1, (borneHaute - debut) / JOUR);
+  const pendant = gagnesEntre(debut, borneHaute);
+  const avant = gagnesEntre(debut - FENETRE_RYTHME_JOURS * JOUR, debut - 1);
+  const rythme = (avant.length / FENETRE_RYTHME_JOURS) * ecoule;
+  const surplus = pendant.length - rythme;
+
+  // Marge nette par dossier, observée sur la période — à défaut, sur l'avant.
+  const base = pendant.length > 0 ? pendant : avant;
+  const margeMoy = base.length > 0
+    ? (base.reduce((s2, d) => s2 + ((d.caAmount || 0) - (d.commissionAmount || 0)), 0) * (1 - PART_MANDATAIRE)) / base.length
+    : 0;
+
+  let cout = 0;
+  let gagnants = 0;
+  if (estBoost(ch)) {
+    cout = pendant.reduce((s2, d) => s2 + bonusDossier(ch, d), 0);
+  } else {
+    const prix = Number(ch.coutRecompense) || 0;
+    gagnants = vises.filter(p => souscritsSurPeriode(data.dossiers, p.id, debut, fin) >= objectifChallenge(ch, p.id)).length;
+    cout = gagnants * prix;
+  }
+  const margeSurplus = Math.max(0, surplus) * margeMoy;
+  return {
+    cout, gagnants, dossiers: pendant.length, rythme, surplus, margeMoy,
+    margeSurplus, bilan: margeSurplus - cout, vises: vises.length, ecoule,
+  };
+}
+
 // Un challenge peut viser tout le monde ou une sélection de partenaires, avec
 // un objectif propre à chacun : deux apporteurs ne rapportent pas le même
 // montant par dossier, un objectif unique serait injuste pour l'un et non
@@ -6022,6 +6101,254 @@ function FicheAdmin({ admin, onUpdate }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// =============================================================================
+// COÛT DES CHALLENGES — ce qu'ils coûtent, ce qu'ils rapportent
+// =============================================================================
+function CoutChallenges({ data }) {
+  const [simType, setSimType] = useState(TYPE_BOOST);
+  const [simBonus, setSimBonus] = useState("10");
+  const [simMode, setSimMode] = useState("pourcent");
+  const [simNb, setSimNb] = useState("12");
+  const [simJours, setSimJours] = useState("30");
+  const [simPrix, setSimPrix] = useState("250");
+
+  const JOUR = 86400000;
+  const lignes = challengesDe(data)
+    .map(c => ({ c, b: bilanChallenge(data, c) }))
+    .filter(x => x.b !== null && etatChallenge(x.c) !== "brouillon")
+    .sort((a, b2) => (bornesChallenge(b2.c).debut || 0) - (bornesChallenge(a.c).debut || 0));
+
+  const tot = lignes.reduce((a, x) => ({
+    cout: a.cout + x.b.cout,
+    dossiers: a.dossiers + x.b.dossiers,
+    rythme: a.rythme + x.b.rythme,
+    surplus: a.surplus + x.b.surplus,
+    margeSurplus: a.margeSurplus + x.b.margeSurplus,
+    bilan: a.bilan + x.b.bilan,
+  }), { cout: 0, dossiers: 0, rythme: 0, surplus: 0, margeSurplus: 0, bilan: 0 });
+
+  // ── Simulateur ─────────────────────────────────────────────────────────────
+  // Rythme de production par partenaire actif, observé sur la fenêtre de
+  // référence : c'est lui qui donne le nombre de dossiers attendus.
+  const depuis = Date.now() - FENETRE_RYTHME_JOURS * JOUR;
+  const recents = (data.dossiers || []).filter(d => {
+    if (d.status === "KO") return false;
+    const t = dateGain(d);
+    return t !== null && t >= depuis;
+  });
+  const actifs = new Set(recents.map(d => d.partnerId)).size;
+  const parPartenaireParJour = actifs > 0 ? recents.length / actifs / FENETRE_RYTHME_JOURS : 0;
+  const caMoyen = recents.length > 0 ? recents.reduce((s, d) => s + (d.caAmount || 0), 0) / recents.length : CA_MINIMUM_REFERENCE;
+  const comMoyenne = recents.length > 0
+    ? recents.reduce((s, d) => s + (d.commissionAmount || 0), 0) / recents.length
+    : caMoyen * TAUX_RETROCESSION_DEFAUT;
+  const margeMoyenne = (caMoyen - comMoyenne) * (1 - PART_MANDATAIRE);
+
+  const nbSim = Math.max(0, Number(simNb) || 0);
+  const joursSim = Math.max(1, Number(simJours) || 1);
+  const attendus = parPartenaireParJour * nbSim * joursSim;
+  const vBonus = Math.max(0, Number(simBonus) || 0);
+  const prixSim = Math.max(0, Number(simPrix) || 0);
+  const bonusParDossier = simMode === "euros" ? vBonus
+    : simMode === "points" ? (caMoyen * vBonus) / 100
+    : (comMoyenne * vBonus) / 100;
+
+  const estBoostSim = simType === TYPE_BOOST;
+  // Un boost se paie sur TOUS les dossiers, y compris ceux qu'on aurait eus
+  // sans lui. Le seuil de rentabilité s'en trouve nettement relevé :
+  //   surplus × marge ≥ (attendus + surplus) × bonus
+  const coutSim = estBoostSim ? attendus * bonusParDossier : nbSim * prixSim;
+  const seuil = estBoostSim
+    ? (margeMoyenne > bonusParDossier ? (attendus * bonusParDossier) / (margeMoyenne - bonusParDossier) : null)
+    : (margeMoyenne > 0 ? coutSim / margeMoyenne : null);
+
+  const eur = (n) => fmtEuro(n);
+  const cellule = "py-2 px-2 text-right border-t border-gray-200";
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+      <div className="font-display font-semibold fa-navy mb-1">Ce que mes challenges m'ont coûté</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Le coût réel de chaque opération, face à la marge nette qu'elle a rapportée.
+      </p>
+
+      {lignes.length === 0 ? (
+        <div className="text-sm text-gray-400 py-4 text-center border border-dashed border-gray-200 rounded-xl mb-4">
+          Aucun challenge publié pour l'instant.
+        </div>
+      ) : (
+        <>
+          <div className="grid sm:grid-cols-4 gap-3 mb-4">
+            <div className="bg-violet-50 border border-violet-200 rounded-xl p-3">
+              <div className="text-xs text-gray-500 mb-0.5">Dépensé en challenges</div>
+              <div className="font-display text-lg font-bold text-violet-700">{eur(tot.cout)}</div>
+            </div>
+            <div className="border border-gray-200 rounded-xl p-3">
+              <div className="text-xs text-gray-400 mb-0.5">Dossiers concernés</div>
+              <div className="font-display text-lg font-bold fa-navy">{masqueNb(tot.dossiers)}</div>
+            </div>
+            <div className="border border-gray-200 rounded-xl p-3">
+              <div className="text-xs text-gray-400 mb-0.5">dont production en plus</div>
+              <div className="font-display text-lg font-bold fa-navy">{masqueNb(Math.round(Math.max(0, tot.surplus)))}</div>
+            </div>
+            <div className={`rounded-xl p-3 border ${tot.bilan >= 0 ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200"}`}>
+              <div className="text-xs text-gray-500 mb-0.5">Bilan net</div>
+              <div className={`font-display text-lg font-bold ${tot.bilan >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                {tot.bilan >= 0 ? "+ " : "− "}{eur(Math.abs(tot.bilan))}
+              </div>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-400 text-left">
+                  <th className="font-medium py-1 px-2">Challenge</th>
+                  <th className="font-medium py-1 px-2 text-right">Coût</th>
+                  <th className="font-medium py-1 px-2 text-right">Dossiers</th>
+                  <th className="font-medium py-1 px-2 text-right">Rythme habituel</th>
+                  <th className="font-medium py-1 px-2 text-right">Surplus</th>
+                  <th className="font-medium py-1 px-2 text-right">Marge du surplus</th>
+                  <th className="font-medium py-1 px-2 text-right">Bilan</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lignes.map(({ c, b }, i) => (
+                  <tr key={c.id} className={i % 2 ? "fa-bg-offwhite" : ""}>
+                    <td className="py-2 px-2 border-t border-gray-200">
+                      <span className="fa-navy font-bold">{c.titre || "Sans intitulé"}</span>
+                      <span className="block text-[11px] text-gray-400">
+                        <span className={`inline-block font-semibold px-1.5 py-0.5 rounded-full mr-1 ${estBoost(c) ? "bg-violet-100 text-violet-700" : "bg-amber-100 text-amber-800"}`}>
+                          {estBoost(c) ? "boost" : "objectif"}
+                        </span>
+                        {estBoost(c) ? libelleBonus(c) : `${c.recompense || "récompense"}${b.gagnants > 0 ? ` · ${b.gagnants} gagnant${b.gagnants > 1 ? "s" : ""}` : ""}`}
+                        {" · "}{b.vises} visé{b.vises > 1 ? "s" : ""}
+                      </span>
+                    </td>
+                    <td className={cellule + " text-violet-700 font-semibold"}>{eur(b.cout)}</td>
+                    <td className={cellule + " fa-navy"}>{masqueNb(b.dossiers)}</td>
+                    <td className={cellule + " text-gray-500"}>{b.rythme.toFixed(1)}</td>
+                    <td className={cellule + " " + (b.surplus >= 0 ? "text-emerald-700" : "text-red-600")}>
+                      {b.surplus >= 0 ? "+" : ""}{b.surplus.toFixed(1)}
+                    </td>
+                    <td className={cellule + " text-gray-600"}>{eur(b.margeSurplus)}</td>
+                    <td className={cellule + " font-bold " + (b.bilan >= 0 ? "text-emerald-700" : "text-red-600")}>
+                      {b.bilan >= 0 ? "+ " : "− "}{eur(Math.abs(b.bilan))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 mt-3">
+            <strong>Comment lire le « surplus ».</strong> Je compare ce que les partenaires visés ont
+            produit pendant l'opération à leur rythme des {FENETRE_RYTHME_JOURS} jours précédents. C'est une
+            estimation, pas une preuve : une bonne saison ou un gros client peuvent gonfler le chiffre sans
+            que le challenge y soit pour quelque chose. À lire comme une tendance sur plusieurs opérations,
+            pas comme un verdict sur une seule.
+          </div>
+        </>
+      )}
+
+      {/* ── Simulateur ─────────────────────────────────────────────────────── */}
+      <div className="border-t border-gray-200 mt-5 pt-4">
+        <div className="font-display font-semibold fa-navy mb-1">Combien me coûterait un challenge ?</div>
+        <p className="text-sm text-gray-500 mb-3">Pour chiffrer avant de lancer, sans rien créer.</p>
+
+        <div className="flex flex-wrap items-end gap-3 mb-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-gray-500">Type</span>
+            <select value={simType} onChange={e => setSimType(e.target.value)}
+              className="text-sm border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500">
+              <option value={TYPE_BOOST}>Bonus sur chaque dossier</option>
+              <option value={TYPE_OBJECTIF}>Objectif → récompense</option>
+            </select>
+          </label>
+          {estBoostSim ? (
+            <>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] text-gray-500">Bonus</span>
+                <input type="number" onFocus={selectionTotale} min="0" value={simBonus}
+                  onChange={e => setSimBonus(sansZeroDeTete(e.target.value))}
+                  className="w-20 text-sm text-center border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] text-gray-500">Forme</span>
+                <select value={simMode} onChange={e => setSimMode(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500">
+                  {MODES_BONUS.map(m => <option key={m.valeur} value={m.valeur}>{m.libelle}</option>)}
+                </select>
+              </label>
+            </>
+          ) : (
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-gray-500">Prix du cadeau (€)</span>
+              <input type="number" onFocus={selectionTotale} min="0" value={simPrix}
+                onChange={e => setSimPrix(sansZeroDeTete(e.target.value))}
+                className="w-24 text-sm text-center border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            </label>
+          )}
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-gray-500">Partenaires visés</span>
+            <input type="number" onFocus={selectionTotale} min="0" value={simNb}
+              onChange={e => setSimNb(sansZeroDeTete(e.target.value))}
+              className="w-20 text-sm text-center border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-gray-500">Durée (jours)</span>
+            <input type="number" onFocus={selectionTotale} min="1" value={simJours}
+              onChange={e => setSimJours(sansZeroDeTete(e.target.value))}
+              className="w-20 text-sm text-center border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          </label>
+        </div>
+
+        {actifs === 0 ? (
+          <div className="text-sm text-gray-400">
+            Aucun dossier gagné ces {FENETRE_RYTHME_JOURS} derniers jours : impossible d'estimer un rythme de production.
+          </div>
+        ) : (
+          <>
+            <div className="grid sm:grid-cols-4 gap-3">
+              <div className="fa-bg-offwhite rounded-xl p-3">
+                <div className="text-xs text-gray-500 mb-0.5">Dossiers attendus</div>
+                <div className="font-display text-lg font-bold fa-navy">{attendus.toFixed(1)}</div>
+              </div>
+              <div className="fa-bg-offwhite rounded-xl p-3">
+                <div className="text-xs text-gray-500 mb-0.5">Ce que ça me coûte</div>
+                <div className="font-display text-lg font-bold text-violet-700">{eur(coutSim)}</div>
+              </div>
+              <div className="fa-bg-offwhite rounded-xl p-3">
+                <div className="text-xs text-gray-500 mb-0.5">Marge nette générée</div>
+                <div className="font-display text-lg font-bold fa-navy">{eur(attendus * margeMoyenne)}</div>
+              </div>
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
+                <div className="text-xs text-gray-500 mb-0.5">Seuil de rentabilité</div>
+                <div className="font-display text-lg font-bold text-emerald-700">
+                  {seuil === null ? "jamais" : `+${Math.ceil(seuil)} dossier${Math.ceil(seuil) > 1 ? "s" : ""}`}
+                </div>
+              </div>
+            </div>
+            <div className="text-xs text-gray-400 border border-dashed border-gray-200 rounded-lg px-3 py-2.5 mt-3">
+              « Dossiers attendus » part du rythme réel de vos partenaires actifs sur les {FENETRE_RYTHME_JOURS} derniers
+              jours ({(parPartenaireParJour * 30).toFixed(1)} dossier par partenaire et par mois), sur une marge nette
+              moyenne de {fmtEuroPrecis(margeMoyenne)} par dossier. « Seuil de rentabilité », c'est le nombre de dossiers
+              à faire <strong>en plus</strong> de cette habitude pour que l'opération soit gagnante.
+              {estBoostSim && (
+                seuil === null
+                  ? <> Ici le bonus de {fmtEuroPrecis(bonusParDossier)} dépasse la marge du dossier : l'opération
+                      perd de l'argent quel que soit le volume.</>
+                  : <> Un bonus se paie sur <strong>tous</strong> les dossiers, y compris ceux que vous auriez eus
+                      sans lui — c'est ce qui relève le seuil.</>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -7177,8 +7504,15 @@ function ProjectionCA({ data }) {
   );
 }
 
-function Vision360({ data }) {
+// `vue` découpe ce composant en deux écrans : la trésorerie d'un côté, la
+// récurrence assureur de l'autre. Les calculs restent communs, seul l'affichage
+// se scinde — deux composants séparés auraient dupliqué toute la mécanique.
+function Vision360({ data, vue = "tout" }) {
+  const montreTreso = vue === "tout" || vue === "tresorerie";
+  const montreRec = vue === "tout" || vue === "recurrence";
   const [detail, setDetail] = useState(false);
+  const [voirSorties, setVoirSorties] = useState(false);
+  const [voirMois, setVoirMois] = useState(false);
   const [vueRec, setVueRec] = useState("maintenu");
   const vivants = data.dossiers.filter(d => d.status !== "KO");
   const gagnes = vivants.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
@@ -7216,6 +7550,61 @@ function Vision360({ data }) {
   const libre = encaisse - retroAcquise - primeAcquise;
   const margeAVenir = aPercevoir - retroAVenir - primeAVenir;
 
+  // --- Ce qui est réellement sorti de la caisse, par nature.
+  // Les virements portent une clé qui dit d'où ils viennent : « YYYY-MM » pour
+  // une rétrocession mensuelle, « d:<id> » pour le forfait d'un dossier hors
+  // immobilier. On s'appuie dessus plutôt que de recouper les montants.
+  const tousVersements = data.partners.filter(p => !p.deleted)
+    .flatMap(p => (p.retrocessionVersements || []).map(v => ({ ...v, p })));
+  const sortiRetro = tousVersements.filter(v => !String(v.cle ?? v.mois ?? "").startsWith("d:"))
+    .reduce((s2, v) => s2 + (v.montant || 0), 0);
+  const sortiForfaits = tousVersements.filter(v => String(v.cle ?? v.mois ?? "").startsWith("d:"))
+    .reduce((s2, v) => s2 + (v.montant || 0), 0);
+  const sortiParrainage = versementsParrains;
+  const depense = sortiRetro + sortiForfaits + sortiParrainage;
+  // Primes de challenge déjà acquises : elles voyagent à l'intérieur des
+  // virements mensuels, on ne peut pas les isoler dans les versements — on les
+  // recalcule sur les dossiers encaissés.
+  const primesChallenge = gagnes.reduce((s2, d) => s2 + partEncaissee(d, bonusTotalDossier(d)), 0);
+  const enCaisse = encaisse - depense;
+  const nette = libre * (1 - PART_MANDATAIRE);
+
+  // --- Mois par mois : le réalisé d'après les encaissements et les virements,
+  //     le prévisionnel d'après les échéances annoncées.
+  const moisCle = (ts) => new Date(ts).toISOString().slice(0, 7);
+  const moisTable = {};
+  const touche = (cle) => {
+    if (!moisTable[cle]) moisTable[cle] = { cle, encaisse: 0, depense: 0, prevu: false };
+    return moisTable[cle];
+  };
+  for (const d of gagnes) {
+    const ech = echeancesDe(d);
+    const parts = repartir(d.caAmount || 0, ech.length);
+    ech.forEach((e, i) => {
+      if (e.encaisseLe) touche(e.encaisseLe.slice(0, 7)).encaisse += parts[i];
+      else if (e.datePrevue) { const m = touche(e.datePrevue.slice(0, 7)); m.encaisse += parts[i]; m.prevu = true; }
+    });
+  }
+  for (const v of tousVersements) {
+    const quand = v.dateVirement ? v.dateVirement.slice(0, 7) : (v.at ? moisCle(v.at) : null);
+    if (quand) touche(quand).depense += (v.montant || 0);
+  }
+  for (const p of data.partners.filter(x => !x.deleted)) {
+    for (const v of (p.parrainageVersements || [])) {
+      if (v.at) touche(moisCle(v.at)).depense += (v.montant || 0);
+    }
+  }
+  const moisCourant = new Date().toISOString().slice(0, 7);
+  const lignesMois = Object.values(moisTable).sort((a2, b2) => a2.cle.localeCompare(b2.cle));
+  let cumulNet = 0;
+  for (const m of lignesMois) {
+    m.net = m.encaisse - m.depense;
+    cumulNet += m.net;
+    m.cumul = cumulNet;
+    m.futur = m.cle > moisCourant;
+    m.libelle = new Date(m.cle + "-01T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+  }
+
   const Ligne = ({ libelle, montant, ton = "", note }) => (
     <div className="flex items-baseline justify-between gap-3 py-1.5 border-b border-gray-100 last:border-0">
       <span className="text-sm text-gray-600">{libelle}{note && <span className="block text-xs text-gray-400">{note}</span>}</span>
@@ -7225,38 +7614,122 @@ function Vision360({ data }) {
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      {montreTreso && (<>
       <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
-        <div className="font-display font-semibold fa-navy">Trésorerie — vue d'ensemble</div>
+        <div className="font-display font-semibold fa-navy">Mon C.A. en temps réel</div>
         <button onClick={() => setDetail(v => !v)} className="text-xs fa-teal-text hover:underline">
-          {detail ? "Masquer le détail" : "Voir le détail"}
+          {detail ? "Masquer la décomposition" : "Voir la décomposition"}
         </button>
       </div>
       <p className="text-sm text-gray-500 mb-4">
-        Une partie de ce qui est encaissé est déjà due au réseau. Le fond de roulement, c'est ce qui reste après.
+        Ce qui est entré, ce qui est sorti, et ce qui reste engagé des deux côtés.
       </p>
 
-      <div className="grid sm:grid-cols-4 gap-3 mb-4">
-        <div className="fa-bg-offwhite rounded-xl p-4">
-          <div className="text-xs text-gray-500 mb-1">Encaissé à ce jour</div>
-          <div className="font-display text-xl font-bold text-emerald-600">{fmtEuroPrecis(encaisse)}</div>
-        </div>
-        <div className="fa-bg-gold rounded-xl p-4">
-          <div className="text-xs text-teal-900/70 mb-1">À percevoir</div>
-          <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(aPercevoir)}</div>
-          <div className="text-[11px] text-teal-900/60 mt-0.5">acquis, pas encore reçu</div>
-        </div>
-        <div className="fa-bg-offwhite rounded-xl p-4">
-          <div className="text-xs text-gray-500 mb-1">Engagé envers le réseau</div>
-          <div className="font-display text-xl font-bold text-violet-700">{fmtEuroPrecis(engage)}</div>
-          <div className="text-[11px] text-gray-400 mt-0.5">dû et pas encore versé</div>
-        </div>
-        <div className={`rounded-xl p-4 border ${libre < 0 ? "bg-red-50 border-red-200" : "bg-white border-gray-200"}`}>
-          <div className="text-xs text-gray-500 mb-1">Marge sur l'encaissé</div>
-          <div className={`font-display text-xl font-bold ${libre < 0 ? "text-red-700" : "fa-navy"}`}>{fmtEuroPrecis(libre)}</div>
-          <div className="text-[11px] text-gray-400 mt-0.5">après rétrocessions et primes</div>
+      {/* Un seul bloc sombre par écran : c'est là que l'œil se pose. */}
+      <div className="bg-slate-800 rounded-2xl p-5 mb-3">
+        <div className="grid sm:grid-cols-4 gap-5">
+          <div>
+            <div className="text-xs text-white/60 mb-0.5">Encaissé à date</div>
+            <div className="font-display text-2xl font-bold text-emerald-300">{fmtEuro(encaisse)}</div>
+          </div>
+          <div>
+            <div className="text-xs text-white/60 mb-0.5">Dépensé à date</div>
+            <div className="font-display text-2xl font-bold text-rose-300">{fmtEuro(depense)}</div>
+          </div>
+          <div>
+            <div className="text-xs text-white/60 mb-0.5">En caisse</div>
+            <div className="font-display text-2xl font-bold" style={{ color: "var(--fa-gold)" }}>{fmtEuro(enCaisse)}</div>
+            {engage > 0.5 && (
+              <div className="text-[11px] text-white/50 mt-0.5">dont {fmtEuro(engage)} déjà dû au réseau</div>
+            )}
+          </div>
+          <div>
+            <div className="text-xs text-white/60 mb-0.5">Ma marge sur l'encaissé</div>
+            <div className="font-display text-2xl font-bold text-white">{fmtEuro(libre)}</div>
+            <div className="text-[11px] text-white/50 mt-0.5">net société {fmtEuro(nette)}, après mandataires</div>
+          </div>
         </div>
       </div>
 
+      <div className="grid sm:grid-cols-4 gap-3 mb-3">
+        <div className="fa-bg-gold rounded-xl p-4">
+          <div className="text-xs text-teal-900/70 mb-1">Reste à encaisser</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuro(aPercevoir)}</div>
+          <div className="text-[11px] text-teal-900/60 mt-0.5">signé, pas encore reçu</div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">Reste à verser</div>
+          <div className="font-display text-xl font-bold text-violet-700">{fmtEuro(retroAVenir + primeAVenir + engage)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">dû au réseau quand l'argent rentre</div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-xl p-4">
+          <div className="text-xs text-gray-500 mb-1">Solde à venir</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuro(margeAVenir)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">ce que le portefeuille dégagera encore</div>
+        </div>
+        <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 fa-recurrent">
+          <div className="text-xs text-gray-500 mb-1">Récurrence assureur</div>
+          <div className="font-display text-xl font-bold text-violet-700">{fmtEuro(recurrenceMensuelleTotale(data.dossiers))}<span className="text-sm font-normal">/mois</span></div>
+          <div className="text-[11px] text-gray-400 mt-0.5">invisible des partenaires</div>
+        </div>
+      </div>
+
+      {/* Les tableaux longs restent repliés : on voit d'abord les chiffres. */}
+      <button onClick={() => setVoirSorties(v => !v)}
+        className="w-full flex items-center gap-2 text-left bg-white border border-gray-200 rounded-xl px-4 py-3 mb-2 hover:border-teal-300 transition">
+        <ChevronDown size={16} className={`fa-teal-text shrink-0 transition-transform ${voirSorties ? "" : "-rotate-90"}`} />
+        <span className="text-sm font-semibold fa-navy">Le détail de ce qui est sorti</span>
+        <span className="ml-auto text-xs text-gray-400">{fmtEuro(depense)} versés depuis le début</span>
+      </button>
+      {voirSorties && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 mb-3">
+          <Ligne libelle="Rétrocessions aux apporteurs" montant={sortiRetro} />
+          <Ligne libelle="Forfaits hors immobilier" montant={sortiForfaits} />
+          <Ligne libelle="Primes de parrainage" montant={sortiParrainage} />
+          <Ligne libelle="Primes de challenge acquises"
+            note="comprises dans les virements ci-dessus, recalculées à part"
+            montant={primesChallenge} ton="text-violet-700" />
+        </div>
+      )}
+
+      <button onClick={() => setVoirMois(v => !v)}
+        className="w-full flex items-center gap-2 text-left bg-white border border-gray-200 rounded-xl px-4 py-3 mb-2 hover:border-teal-300 transition">
+        <ChevronDown size={16} className={`fa-teal-text shrink-0 transition-transform ${voirMois ? "" : "-rotate-90"}`} />
+        <span className="text-sm font-semibold fa-navy">Mois par mois</span>
+        <span className="ml-auto text-xs text-gray-400">{lignesMois.length} mois · réalisé puis prévisionnel</span>
+      </button>
+      {voirMois && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 mb-3 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-400 text-left">
+                <th className="font-medium py-1">Mois</th>
+                <th className="font-medium py-1 text-right">Encaissé</th>
+                <th className="font-medium py-1 text-right">Dépensé</th>
+                <th className="font-medium py-1 text-right">Net</th>
+                <th className="font-medium py-1 text-right">Cumul</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lignesMois.map(m => (
+                <tr key={m.cle} className={m.cle === new Date().toISOString().slice(0, 7) ? "fa-bg-gold" : (m.futur ? "text-gray-400 italic" : "")}>
+                  <td className="py-1 capitalize">{m.libelle}{m.prevu && !m.futur ? " · en partie prévu" : ""}</td>
+                  <td className="py-1 text-right">{fmtEuro(m.encaisse)}</td>
+                  <td className="py-1 text-right">{fmtEuro(m.depense)}</td>
+                  <td className={`py-1 text-right font-semibold ${m.net >= 0 ? "" : "text-red-600"}`}>{fmtEuro(m.net)}</td>
+                  <td className="py-1 text-right font-bold fa-navy">{fmtEuro(m.cumul)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-[11px] text-gray-400 mt-2">
+            Les mois à venir sont estimés d'après les échéanciers déjà signés — aucune production nouvelle n'y est supposée.
+          </p>
+        </div>
+      )}
+      </>)}
+
+      {montreRec && (<>
       {(() => {
         const mrr = recurrenceMensuelleTotale(data.dossiers);
         const cumul = recurrenceCumuleeTotale(data.dossiers);
@@ -7412,15 +7885,16 @@ function Vision360({ data }) {
           </div>
         );
       })()}
+      </>)}
 
-      {sansCalendrier.length > 0 && (
+      {montreTreso && sansCalendrier.length > 0 && (
         <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
           {sansCalendrier.length} dossier{sansCalendrier.length > 1 ? "s" : ""} gagné{sansCalendrier.length > 1 ? "s" : ""} sans date d'effet :
           leur montant est acquis, mais aucune date d'encaissement ne peut être annoncée tant que l'échéancier n'est pas renseigné.
         </div>
       )}
 
-      {detail && (
+      {montreTreso && detail && (
         <div className="grid sm:grid-cols-2 gap-5">
           <div>
             <div className="text-xs font-semibold fa-navy mb-1 uppercase tracking-wide">Ce qui rentre</div>
@@ -7945,7 +8419,14 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const actionsPartenaires = parrainagesEnAttente + facturesEnAttente;
   const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
   const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
-  const [tab, setTabRaw] = useState(() => getStoredTab("adp:adminTab", "accueil"));
+  // « stats » a été éclaté en plusieurs écrans : un navigateur qui avait gardé
+  // l'ancienne valeur atterrirait sur une page vide.
+  const [tab, setTabRaw] = useState(() => {
+    const garde = getStoredTab("adp:adminTab", "accueil");
+    const correspondances = { stats: "analyses" };
+    const cible = correspondances[garde] || garde;
+    return CATEGORIES_ADMIN.some(c => c.feuillets.some(f => f.id === cible)) ? cible : "accueil";
+  });
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:adminTab", t); };
   useEffect(() => { if (tab === "mandataires" && !isFullAdmin) setTab("accueil"); }, []);
   // Sauts de navigation offerts à tout l'espace admin via NavAdmin : un clic
@@ -8360,48 +8841,37 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
       <main className="max-w-5xl mx-auto px-6 py-8">
         {(() => {
-          // Barre d'onglets : elle est construite à partir du catalogue et de
-          // l'ordre choisi par l'utilisateur, avec deux commandes à droite —
-          // le mode discret (démonstration en visio) et la réorganisation.
-          const catalogue = Object.fromEntries(ONGLETS_ADMIN.map(o => [o.id, o]));
-          const visibles = ordreOnglets
+          // Navigation à deux étages : quatre familles en haut, les écrans de
+          // la famille active juste en dessous. L'onglet du quotidien reste à
+          // un clic — Production s'ouvre sur Dossiers, C.A. sur le temps réel.
+          const catalogue = Object.fromEntries(CATEGORIES_ADMIN.map(c => [c.id, c]));
+          const familles = ordreOnglets
             .map(id => catalogue[id])
-            .filter(o => o && (!o.fullAdmin || isFullAdmin));
+            .filter(c => c && feuilletsVisibles(c, isFullAdmin).length > 0);
+          const active = categorieDe(tab);
+          const feuillets = feuilletsVisibles(active, isFullAdmin);
 
-          const puce = "text-xs font-bold rounded-full min-w-[20px] h-5 px-1.5 flex items-center justify-center";
-          const badgeDe = (id) => {
-            if (id === "dossiers") {
-              return newDeposits > 0
-                ? <span className={`fa-bg-gold fa-navy ${puce}`}>{masqueNb(newDeposits)}</span>
-                : null;
-            }
-            if (id === "partenaires") {
-              return actionsPartenaires > 0 ? (
-                <span className={`fa-bg-gold fa-navy ${puce}`}
-                  title={[
-                    parrainagesEnAttente > 0 ? `${parrainagesEnAttente} déclaration${parrainagesEnAttente > 1 ? "s" : ""} de parrainage à traiter` : null,
-                    facturesEnAttente > 0 ? `${facturesEnAttente} facture${facturesEnAttente > 1 ? "s" : ""} à régler` : null,
-                  ].filter(Boolean).join(" · ")}>
-                  {masqueNb(actionsPartenaires)}
-                </span>
-              ) : null;
-            }
-            if (id === "facturation") {
-              const n = data.partners.filter(p => !p.deleted).reduce((s2, p) => s2 + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
-              return n > 0 ? <span className={`bg-amber-400 text-amber-950 ${puce}`}>{masqueNb(n)}</span> : null;
-            }
-            if (id === "corbeille") {
-              const n = data.partners.filter(p => p.deleted).length;
-              return n > 0 ? <span className={`bg-gray-200 text-gray-600 ${puce}`}>{masqueNb(n)}</span> : null;
-            }
-            return null;
+          const puce = "text-xs font-bold rounded-full min-w-[19px] h-[19px] px-1.5 flex items-center justify-center";
+          // Compteurs d'alerte, remontés au niveau de la famille : on doit voir
+          // qu'il y a quelque chose à traiter sans avoir à ouvrir l'onglet.
+          const nbFactures = data.partners.filter(p => !p.deleted)
+            .reduce((s2, p) => s2 + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
+          const nbCorbeille = data.partners.filter(p => p.deleted).length;
+          const alertes = {
+            production: newDeposits + actionsPartenaires,
+            ca: nbFactures,
+            logistique: 0,
+          };
+          const alerteFeuillet = {
+            dossiers: newDeposits,
+            partenaires: actionsPartenaires,
+            facturation: nbFactures,
+            corbeille: nbCorbeille,
           };
 
-          // On permute dans l'ordre complet, mais d'après le voisin VISIBLE :
-          // un onglet caché ne doit pas absorber un déplacement.
           const deplacer = (id, sens) => {
-            const rang = visibles.findIndex(o => o.id === id);
-            const cible = visibles[rang + sens];
+            const rang = familles.findIndex(c => c.id === id);
+            const cible = familles[rang + sens];
             if (!cible) return;
             const suivant = [...ordreOnglets];
             const a = suivant.indexOf(id), b = suivant.indexOf(cible.id);
@@ -8412,68 +8882,84 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           };
 
           return (
-            <div className="mb-8">
-              <div className="flex gap-2 items-center overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
-                {visibles.map((o, i) => {
-                  const Icone = o.icone ? ICONES_ONGLETS[o.icone] : null;
+            <div className="mb-7">
+              <div className="flex gap-1 items-center border-b border-gray-200 overflow-x-auto -mx-1 px-1">
+                {familles.map((c, i) => {
+                  const Icone = c.icone ? ICONES_ONGLETS[c.icone] : null;
+                  const ici = active.id === c.id;
+                  const n = alertes[c.id] || 0;
                   return (
-                    <div key={o.id} className="flex items-center shrink-0">
+                    <div key={c.id} className="flex items-center shrink-0">
                       {reorganiser && (
-                        <button onClick={() => deplacer(o.id, -1)} disabled={i === 0}
+                        <button onClick={() => deplacer(c.id, -1)} disabled={i === 0}
                           title="Déplacer vers la gauche"
                           className="text-gray-400 hover:fa-teal-text disabled:opacity-20 px-1 text-lg leading-none">‹</button>
                       )}
-                      <button onClick={() => { if (!reorganiser) setTab(o.id); }}
-                        className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap ${tab === o.id ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"} ${reorganiser ? "ring-2 ring-teal-300" : ""}`}>
-                        {Icone ? <Icone size={15} /> : <span>{o.emoji}</span>} {o.label}
-                        {badgeDe(o.id)}
+                      <button onClick={() => { if (!reorganiser) setTab(feuilletsVisibles(c, isFullAdmin)[0].id); }}
+                        className={`flex items-center gap-2 text-sm font-bold px-4 py-3 border-b-[3px] -mb-px transition whitespace-nowrap ${
+                          ici ? "fa-navy border-b-[var(--fa-teal)]" : "text-gray-400 border-b-transparent hover:text-gray-600"
+                        } ${reorganiser ? "ring-2 ring-teal-300 rounded-t-lg" : ""}`}>
+                        {Icone && <Icone size={15} />} {c.label}
+                        {n > 0 && <span className={`fa-bg-gold fa-navy ${puce}`}>{masqueNb(n)}</span>}
                       </button>
                       {reorganiser && (
-                        <button onClick={() => deplacer(o.id, 1)} disabled={i === visibles.length - 1}
+                        <button onClick={() => deplacer(c.id, 1)} disabled={i === familles.length - 1}
                           title="Déplacer vers la droite"
                           className="text-gray-400 hover:fa-teal-text disabled:opacity-20 px-1 text-lg leading-none">›</button>
                       )}
                     </div>
                   );
                 })}
-                <div className="flex items-center gap-1 shrink-0 sm:ml-auto">
-                  <button onClick={basculerDiscret}
-                    title={discret ? "Réafficher les chiffres" : "Mode discret : masquer tous les chiffres"}
-                    className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${discret ? "bg-amber-100 border-amber-300 text-amber-900" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
-                    {discret ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
+                <div className="flex items-center gap-1 shrink-0 ml-auto pb-1">
                   <button onClick={() => {
-                      // Le mode discret masquerait aussi les chiffres fictifs,
-                      // ce qui viderait la démonstration de son intérêt.
                       if (!modeDemo && discret) basculerDiscret();
                       onBasculerDemo();
                     }}
                     title={modeDemo ? "Quitter la démonstration et retrouver mes vraies données" : "Mode démonstration : cabinet fictif complet, aucune écriture réelle"}
-                    className={`flex items-center text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${modeDemo ? "bg-violet-600 text-white border-transparent" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
+                    className={`flex items-center px-2.5 py-1.5 rounded-lg transition border ${modeDemo ? "bg-violet-600 text-white border-transparent" : "bg-white border-gray-200 text-gray-400 hover:fa-teal-text"}`}>
                     <Sparkles size={15} />
+                  </button>
+                  <button onClick={basculerDiscret}
+                    title={discret ? "Réafficher les chiffres" : "Mode discret : masquer tous les chiffres"}
+                    className={`flex items-center px-2.5 py-1.5 rounded-lg transition border ${discret ? "bg-amber-100 border-amber-300 text-amber-900" : "bg-white border-gray-200 text-gray-400 hover:fa-teal-text"}`}>
+                    {discret ? <EyeOff size={15} /> : <Eye size={15} />}
                   </button>
                   <button onClick={() => setReorganiser(r => !r)}
                     title="Réorganiser mes onglets"
-                    className={`flex items-center text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${reorganiser ? "fa-bg-teal text-white border-transparent" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
+                    className={`flex items-center px-2.5 py-1.5 rounded-lg transition border ${reorganiser ? "fa-bg-teal text-white border-transparent" : "bg-white border-gray-200 text-gray-400 hover:fa-teal-text"}`}>
                     <ArrowLeftRight size={15} />
                   </button>
                 </div>
               </div>
 
+              {/* Les écrans de la famille active. Masqués quand il n'y en a
+                  qu'un : afficher « Pilotage » tout seul n'apprend rien. */}
+              {feuillets.length > 1 && (
+                <div className="flex gap-2 flex-wrap mt-4">
+                  {feuillets.map(f => {
+                    const n = alerteFeuillet[f.id] || 0;
+                    return (
+                      <button key={f.id} onClick={() => setTab(f.id)}
+                        className={`flex items-center gap-2 text-sm font-medium px-4 py-1.5 rounded-full transition whitespace-nowrap ${
+                          tab === f.id ? "fa-navy-bg bg-slate-800 text-white" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"
+                        }`}>
+                        {f.label}
+                        {n > 0 && <span className={`${tab === f.id ? "bg-white/25 text-white" : "fa-bg-gold fa-navy"} ${puce}`}>{masqueNb(n)}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               {reorganiser && (
                 <div className="mt-3 flex items-center gap-3 flex-wrap text-xs bg-teal-50 border border-teal-200 rounded-xl px-3 py-2">
-                  <span className="fa-teal-text">Range tes onglets avec les flèches ‹ › — l'ordre est mémorisé sur cet ordinateur.</span>
+                  <span className="fa-teal-text">Range tes familles avec les flèches ‹ › — l'ordre est mémorisé sur cet ordinateur.</span>
                   <button onClick={() => { setOrdreOnglets([...ORDRE_ONGLETS_DEFAUT]); ecrireOrdreOnglets(ORDRE_ONGLETS_DEFAUT); }}
                     className="underline fa-teal-text">Remettre l'ordre d'origine</button>
                   <button onClick={() => setReorganiser(false)}
                     className="ml-auto fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg">Terminé</button>
                 </div>
               )}
-
-              {/* Aucun bandeau quand le mode discret est actif : il serait lu
-                  par le partenaire en visio, à qui on n'a pas à signaler qu'on
-                  lui masque quelque chose. Le seul repère est l'œil barré,
-                  discret, et les « ••• » que seul l'admin sait interpréter. */}
             </div>
           );
         })()}
@@ -8578,22 +9064,26 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
               </div>
 
-              <div className="grid sm:grid-cols-4 gap-4">
-                <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                  <div className="text-xs text-gray-400 mb-1">Dossiers actifs</div>
-                  <div className="font-display text-2xl font-bold fa-navy">{masqueNb(dossiersActifs)}</div>
-                </div>
-                <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                  <div className="text-xs text-gray-400 mb-1">Nouveaux dépôts</div>
-                  <div className="font-display text-2xl font-bold text-amber-600">{masqueNb(newDeposits)}</div>
-                </div>
-                <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                  <div className="text-xs text-gray-400 mb-1">Encaissé ce mois</div>
-                  <div className="font-display text-2xl font-bold text-emerald-600">{fmtEuro(caduMois)}</div>
-                </div>
-                <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                  <div className="text-xs text-gray-400 mb-1">Partenaires actifs</div>
-                  <div className="font-display text-2xl font-bold fa-teal-text">{masqueNb(partenairesActifs)}</div>
+              {/* Bloc héros : le seul élément sombre de l'écran, celui sur
+                  lequel l'œil se pose en arrivant. */}
+              <div className="bg-slate-800 rounded-2xl p-5">
+                <div className="grid sm:grid-cols-4 gap-5">
+                  <div>
+                    <div className="text-xs text-white/60 mb-0.5">Encaissé ce mois</div>
+                    <div className="font-display text-2xl font-bold" style={{ color: "var(--fa-gold)" }}>{fmtEuro(caduMois)}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-white/60 mb-0.5">Dossiers actifs</div>
+                    <div className="font-display text-2xl font-bold text-white">{masqueNb(dossiersActifs)}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-white/60 mb-0.5">Nouveaux dépôts</div>
+                    <div className={`font-display text-2xl font-bold ${newDeposits > 0 ? "text-amber-300" : "text-white/40"}`}>{masqueNb(newDeposits)}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-white/60 mb-0.5">Partenaires actifs</div>
+                    <div className="font-display text-2xl font-bold text-emerald-300">{masqueNb(partenairesActifs)}</div>
+                  </div>
                 </div>
               </div>
 
@@ -10002,7 +10492,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           );
         })()}
 
-        {tab === "stats" && (() => {
+        {["analyses", "tresorerie", "projections", "recurrence", "journal"].includes(tab) && (() => {
           const allDepartements = [...new Set(data.partners.map(p => p.departement).filter(Boolean))].sort();
           const allReseaux = [...new Set(data.partners.map(p => p.company).filter(Boolean))].sort((a, b) => a.localeCompare(b));
           const scopedPartnerIds = new Set(
@@ -10158,10 +10648,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             <div className="space-y-8">
               {/* Vue trésorerie : volontairement hors filtres, on ne pilote pas
                   une caisse par département. */}
-              <Vision360 data={data} />
+              {tab === "tresorerie" && <Vision360 data={data} vue="tresorerie" />}
+              {tab === "recurrence" && <Vision360 data={data} vue="recurrence" />}
+              {tab === "projections" && (<>
               <ProjectionCA data={data} />
               <ObjectifsCA data={data} />
+              <CoutChallenges data={data} />
+              </>)}
 
+              {tab === "journal" && (<>
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
                 <div className="font-display font-semibold fa-navy mb-3">Dernières connexions</div>
                 <div className="space-y-2">
@@ -10195,8 +10690,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   </div>
                 )}
               </div>
+              </>)}
 
 
+              {tab === "analyses" && (<>
               <div className="flex flex-wrap items-center gap-2">
                 <select value={statsDepartementFilter} onChange={e => setStatsDepartementFilter(e.target.value)}
                   className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500">
@@ -10644,6 +11141,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   </ResponsiveContainer>
                 </div>
               </div>
+              </>)}
             </div>
           );
         })()}
