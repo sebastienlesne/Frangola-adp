@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { storage } from "./storage";
 import { supabase } from "./supabaseClient";
 import {
@@ -229,6 +229,52 @@ function fileToDataURL(file) {
     reader.readAsDataURL(file);
   });
 }
+// ── Navigation par les noms ─────────────────────────────────────────────────
+// Partout où un nom de partenaire ou de client s'affiche côté admin, on doit
+// pouvoir cliquer dessus pour atterrir sur sa fiche. Les listes concernées
+// (tops, classements, filleuls, par commercial) vivent dans des composants
+// séparés ; passer deux callbacks à chacun d'eux serait fastidieux et se
+// perdrait au prochain ajout. Un contexte les rend disponibles partout sous
+// l'espace admin — et absent ailleurs, le nom reste du simple texte, ce qui
+// évite qu'un partenaire se retrouve avec un lien qui ne mène nulle part.
+const NavAdmin = createContext(null);
+
+function LienPartenaire({ p, className = "", children }) {
+  const nav = useContext(NavAdmin);
+  const texte = children ?? nomPartenaire(p);
+  if (!nav || !p) return <>{texte}</>;
+  return (
+    <button type="button" title="Ouvrir sa fiche"
+      onClick={(e) => { e.stopPropagation(); nav.ouvrirPartenaire(p); }}
+      className={`text-left hover:fa-teal-text hover:underline decoration-dotted underline-offset-2 transition ${className}`}>
+      {texte}
+    </button>
+  );
+}
+
+function LienClient({ d, className = "", children }) {
+  const nav = useContext(NavAdmin);
+  const texte = children ?? clientName(d);
+  if (!nav || !d) return <>{texte}</>;
+  return (
+    <button type="button" title="Ouvrir ce dossier"
+      onClick={(e) => { e.stopPropagation(); nav.ouvrirDossier(d); }}
+      className={`text-left hover:fa-teal-text hover:underline decoration-dotted underline-offset-2 transition ${className}`}>
+      {texte}
+    </button>
+  );
+}
+
+// Cliquer dans un champ numérique en sélectionne tout le contenu : on tape la
+// nouvelle valeur par-dessus, au lieu de devoir d'abord effacer le zéro.
+const selectionTotale = (e) => e.target.select();
+// Retire les zéros de tête qu'un champ numérique laisse traîner quand on tape
+// à la suite d'un 0 (« 0300 »), sans toucher au zéro seul ni aux décimales.
+function sansZeroDeTete(v) {
+  const t = String(v ?? "");
+  return /^0\d/.test(t) ? t.replace(/^0+(?=\d)/, "") : t;
+}
+
 function fmtDate(ts) {
   return new Date(ts).toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" });
 }
@@ -248,15 +294,21 @@ function joursDepuis(ts) {
 }
 
 // ── Mode discret ────────────────────────────────────────────────────────────
-// En visio avec un futur partenaire, l'outil doit pouvoir se montrer sans
-// montrer nos chiffres. Le drapeau est volontairement global : il est lu par
-// les quelques fonctions par lesquelles passent TOUS les affichages sensibles
-// (montants, noms de clients, noms de partenaires, logos de réseau). Une seule
-// bascule suffit donc à couvrir l'application entière, sans avoir à retoucher
-// les centaines d'endroits qui affichent une valeur.
+// Partager son écran sans montrer ses chiffres. Le drapeau est volontairement
+// global : il est lu par les deux formateurs de montants par lesquels passe
+// TOUT l'argent affiché, plus masqueNb pour les compteurs. Une seule bascule
+// couvre donc l'application entière, sans retoucher les centaines d'endroits
+// qui affichent une valeur. Les noms, eux, restent lisibles : pour présenter
+// un cabinet entièrement fictif, c'est le mode démonstration qui sert.
 // Aucun useMemo n'existe dans ce fichier : un simple re-rendu suffit à ce que
 // tout soit recalculé avec le drapeau à jour.
 let MODE_DISCRET = false;
+// La commission récurrente de l'assureur est une information de marge : elle
+// n'a rien à faire sous les yeux d'un futur partenaire, même en chiffres
+// fictifs. On la masque en bloc pendant la démonstration, par une classe
+// portée par la racine de l'espace admin (voir BRAND_STYLES).
+let MODE_DEMO = false;
+function setModeDemoGlobal(v) { MODE_DEMO = !!v; }
 function setModeDiscret(v) {
   MODE_DISCRET = !!v;
   try { localStorage.setItem("adp:discret", MODE_DISCRET ? "1" : "0"); } catch { /* navigation privée */ }
@@ -273,32 +325,6 @@ function initModeDiscret() {
 function masqueNb(n) {
   return MODE_DISCRET ? "•••" : n;
 }
-// Noms de substitution : plutôt qu'un pavé noir, on affiche une identité
-// crédible et stable (le même dossier montre toujours le même faux nom),
-// pour que la démonstration reste lisible et réaliste.
-const NOMS_DEMO = ["MARTIN", "BERNARD", "DUBOIS", "THOMAS", "ROBERT", "RICHARD", "PETIT", "DURAND", "LEROY", "MOREAU", "SIMON", "LAURENT", "LEFEBVRE", "MICHEL", "GARCIA", "DAVID", "BERTRAND", "ROUX", "VINCENT", "FOURNIER"];
-const PRENOMS_DEMO = ["Julie", "Marc", "Sophie", "Thomas", "Camille", "Nicolas", "Laura", "Julien", "Emma", "Antoine", "Chloé", "Maxime", "Léa", "Pierre", "Sarah", "Hugo", "Manon", "Lucas", "Inès", "Paul"];
-const RESEAUX_DEMO = ["Agence Horizon", "Immo Panorama", "Cap Habitat", "Résidence & Co", "Atlas Immobilier", "Optima Immo", "Via Nova", "Le Clos Immobilier"];
-function hachage(s) {
-  let h = 0;
-  const t = String(s || "");
-  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0;
-  return h;
-}
-function nomFictif(cle) {
-  const h = hachage(cle);
-  // Décalage NON signé : avec `>>` un hachage haut devient négatif et l'index
-  // sort du tableau (prénom « undefined »).
-  return `${NOMS_DEMO[h % NOMS_DEMO.length]} ${PRENOMS_DEMO[(h >>> 5) % PRENOMS_DEMO.length]}`;
-}
-function reseauFictif(cle) {
-  return RESEAUX_DEMO[hachage(cle) % RESEAUX_DEMO.length];
-}
-// Nom de réseau / société affiché à l'écran.
-function afficheReseau(c) {
-  if (!c) return c;
-  return MODE_DISCRET ? reseauFictif(c) : c;
-}
 
 function fmtEuro(n) {
   if (MODE_DISCRET) return "••• €";
@@ -312,7 +338,6 @@ function up(s) {
   return (s || "").toUpperCase();
 }
 function clientName(d) {
-  if (MODE_DISCRET) return nomFictif(d?.id || "");
   const full = `${(d.clientLastName || "").toUpperCase()} ${d.clientFirstName || ""}`.trim();
   return full || "(Sans nom)";
 }
@@ -320,7 +345,6 @@ function clientName(d) {
 // pour que le mode discret n'en laisse échapper aucun.
 function nomPartenaire(p) {
   if (!p) return "—";
-  if (MODE_DISCRET) return nomFictif(p.id || p.email || p.name || "");
   return p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
 }
 const MOTIFS_REFUS = [
@@ -699,10 +723,10 @@ function genererJeuDemo(base) {
         // Contrat vivant : date d'effet, assureur, cotisation et récurrence.
         d.dateEffet = jourIso(createdAt + rnd(22, 55) * JOUR);
         d.assureur = pondere(listeAssureurs.map((n, i) => [n, [46, 31, 23][i] ?? 15]));
-        d.cotisationMensuelle = choix([21.4, 26.9, 31.5, 34.8, 38.2, 42.6, 47.9, 52.3, 58.7, 64.1, 71.5, 82.4]);
-        // Deux régimes de commission assureur : linéaire ou dégressif.
-        if (chance(0.62)) { d.tauxCommissionAssureur = 30; d.tauxCommissionSuivantes = 30; }
-        else { d.tauxCommissionAssureur = 50; d.tauxCommissionSuivantes = 10; }
+        // Pas de cotisation ni de taux de commission assureur : la marge
+        // récurrente ne doit pas exister du tout en démonstration, pas même
+        // en chiffres fictifs. Sans ces champs, tous les calculs de récurrence
+        // tombent à zéro et les blocs concernés s'effacent d'eux-mêmes.
         // Mode de règlement des honoraires : direct, collecte en une fois,
         // ou lissé sur plusieurs mois par l'assureur.
         const mode = pondere([["direct", 12], ["assureur", 88]]);
@@ -737,14 +761,46 @@ function genererJeuDemo(base) {
     }
   }
 
-  // ── Rétrocessions de parrainage déjà versées ──────────────────────────────
-  for (const parrain of parrains) {
-    if (chance(0.45)) {
-      parrain.parrainageVersements = [{
-        id: "demo-v-" + parrain.id, at: maintenant - rnd(10, 120) * JOUR,
-        montant: Math.round((20 + r() * 180) * 100) / 100, note: "Virement",
-      }];
+  // ── Paiements à jour ──────────────────────────────────────────────────────
+  // Une démonstration criblée de lignes rouges donne l'image d'un cabinet qui
+  // ne paie pas ses apporteurs. On solde donc tout ce qui est dû, en laissant
+  // volontairement quelques lignes en attente : un tableau parfaitement vide
+  // ne montrerait pas à quoi sert l'onglet.
+  for (const p of partners) {
+    const siens = dossiers.filter(d => d.partnerId === p.id);
+    if (siens.length === 0) continue;
+    const lignes = p.horsImmo
+      ? forfaitsRetrocession(p, siens).map(f => ({ cle: f.cle, libelle: f.libelle, montant: f.montant, etat: f.etat }))
+      : calendrierRetrocession(p, siens).mois.map(m => ({ cle: m.cle, libelle: m.libelle, montant: m.montant, etat: m.etat }));
+    for (const l of lignes) {
+      if (l.etat !== "a_regler") continue;
+      if (!chance(0.94)) continue;
+      p.retrocessionVersements = p.retrocessionVersements || [];
+      p.retrocessionVersements.push({
+        id: "demo-rv-" + p.id + "-" + l.cle, cle: l.cle, libelle: l.libelle,
+        montant: Math.round((l.montant || 0) * 100) / 100,
+        dateVirement: jourIso(maintenant - rnd(2, 45) * JOUR),
+        ordre: null, mode: "Virement", at: maintenant - rnd(2, 45) * JOUR,
+      });
     }
+  }
+
+  // ── Rétrocessions de parrainage, réglées elles aussi ──────────────────────
+  // bilanParrainage s'appuie sur les données déjà montées dans l'application ;
+  // ici elles n'existent pas encore, on refait donc le calcul sur place.
+  for (const parrain of parrains) {
+    const filleuls = partners.filter(x => x.parrainId === parrain.id);
+    const du = filleuls.reduce((s, f) => s + dossiers
+      .filter(d => d.partnerId === f.id && d.status !== "KO")
+      .reduce((s2, d) => s2 + partEncaissee(d, d.caAmount || 0), 0), 0) * PARRAINAGE_TAUX;
+    if (du <= 0.5) continue;
+    // Quelques parrains restent à payer, pour que la file d'attente vive.
+    const part = chance(0.88) ? 1 : (chance(0.5) ? 0.5 : 0);
+    if (part === 0) continue;
+    parrain.parrainageVersements = [{
+      id: "demo-v-" + parrain.id, at: maintenant - rnd(5, 90) * JOUR,
+      montant: Math.round(du * part * 100) / 100, note: "Virement",
+    }];
   }
 
   // ── Factures des partenaires hors immobilier ──────────────────────────────
@@ -1004,6 +1060,8 @@ const BRAND_STYLES = `
    masquer leurs valeurs, on les floute donc en bloc. */
 .mode-discret .recharts-wrapper,
 .mode-discret .recharts-surface { filter: blur(7px); }
+/* Démonstration : la récurrence assureur disparaît entièrement. */
+.mode-demo .fa-recurrent { display: none !important; }
 :root{
   --fa-teal:#008BA8;
   --fa-teal-dark:#006C82;
@@ -1230,10 +1288,12 @@ export default function App() {
       if (!data) return;
       donneesReellesRef.current = data;
       demoRef.current = true;
+      setModeDemoGlobal(true);
       setModeDemo(true);
       setData(genererJeuDemo(data));
     } else {
       demoRef.current = false;
+      setModeDemoGlobal(false);
       setModeDemo(false);
       setData(donneesReellesRef.current);
       donneesReellesRef.current = null;
@@ -3277,7 +3337,7 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
               <span className="font-bold">{up(partner.name)} {partner.firstName}</span>
               {partner.company && (
                 <span className="flex items-center gap-1.5 font-medium">
-                  - {afficheReseau(partner.company)}
+                  - {partner.company}
                   {reseauLogoFor(partner.company) && (
                     <img src={reseauLogoFor(partner.company).data} alt="" className="w-8 h-8 rounded object-contain" />
                   )}
@@ -3742,7 +3802,7 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
                 </div>
                 {editingGoal ? (
                   <div className="flex flex-wrap items-center gap-2">
-                    <input type="number" value={goalDraft} onChange={e => setGoalDraft(e.target.value)}
+                    <input type="number" onFocus={selectionTotale} value={goalDraft} onChange={e => setGoalDraft(e.target.value)}
                       placeholder="Montant visé ce mois (€)" className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-teal-500" />
                     <button onClick={saveGoal} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
                     <button onClick={() => setEditingGoal(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
@@ -4046,7 +4106,7 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
                   </div>
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">Montant TTC (€)</label>
-                    <input type="number" value={factureMontant} onChange={e => setFactureMontant(e.target.value)}
+                    <input type="number" onFocus={selectionTotale} value={factureMontant} onChange={e => setFactureMontant(e.target.value)}
                       placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                   </div>
                 </div>
@@ -4188,9 +4248,6 @@ function commercialLabel(name) {
   return name;
 }
 function reseauLogoFor(companyName) {
-  // En mode discret, un logo d'agence trahirait le réseau aussi sûrement
-  // qu'un nom : on n'en affiche aucun.
-  if (MODE_DISCRET) return null;
   if (!companyName || !_colorDataRef?.reseaux) return null;
   const found = _colorDataRef.reseaux.find(r => r.name.trim().toLowerCase() === companyName.trim().toLowerCase());
   return found?.logoData ? { data: found.logoData } : null;
@@ -4296,7 +4353,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
             <div className="space-y-2">
               {partnerStats.map(ps => (
                 <div key={ps.partner.id} className="flex items-center justify-between text-sm fa-bg-offwhite rounded-lg px-3 py-2.5">
-                  <span className="fa-navy font-bold">{nomPartenaire(ps.partner)}</span>
+                  <LienPartenaire p={ps.partner} className="fa-navy font-bold" />
                   <span className="text-gray-500 text-xs">{ps.count} dossier{ps.count !== 1 ? "s" : ""} · CA {fmtEuro(ps.ca)}</span>
                 </div>
               ))}
@@ -4532,11 +4589,11 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
         {editGoals ? (
           <div className="space-y-2">
             <div className="grid sm:grid-cols-3 gap-2">
-              <input type="number" value={draft.partenaires} onChange={e => setDraft(d => ({ ...d, partenaires: e.target.value }))}
+              <input type="number" onFocus={selectionTotale} value={draft.partenaires} onChange={e => setDraft(d => ({ ...d, partenaires: e.target.value }))}
                 placeholder="Partenaires" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-              <input type="number" value={draft.dossiers} onChange={e => setDraft(d => ({ ...d, dossiers: e.target.value }))}
+              <input type="number" onFocus={selectionTotale} value={draft.dossiers} onChange={e => setDraft(d => ({ ...d, dossiers: e.target.value }))}
                 placeholder="Dossiers" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-              <input type="number" value={draft.ca} onChange={e => setDraft(d => ({ ...d, ca: e.target.value }))}
+              <input type="number" onFocus={selectionTotale} value={draft.ca} onChange={e => setDraft(d => ({ ...d, ca: e.target.value }))}
                 placeholder="CA (€)" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
             </div>
             <div className="flex gap-2">
@@ -4699,7 +4756,7 @@ function VersementsParrainage({ data, onAddVersement }) {
 
               {ouvertId === x.p.id && (
                 <div className="flex gap-2 mt-2 flex-wrap items-center">
-                  <input type="number" value={montant} onChange={e => setMontant(e.target.value)} placeholder="Montant €"
+                  <input type="number" onFocus={selectionTotale} value={montant} onChange={e => setMontant(e.target.value)} placeholder="Montant €"
                     className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs w-28 focus:outline-none focus:ring-2 focus:ring-teal-500" />
                   <input value={note} onChange={e => setNote(e.target.value)} placeholder="Référence du virement (facultatif)"
                     className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs flex-1 min-w-[180px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
@@ -4823,21 +4880,21 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
               Cotisation du client
-              <input type="number" min="0" step="0.01" value={dossier.cotisationMensuelle ?? ""}
+              <input type="number" onFocus={selectionTotale} min="0" step="0.01" value={dossier.cotisationMensuelle ?? ""}
                 onChange={e => onUpdate(dossier.id, { cotisationMensuelle: e.target.value === "" ? null : Number(e.target.value) })}
                 placeholder="€ / mois" className={petitChamp} />
               € / mois
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
               Commission 1<sup>re</sup> année
-              <input type="number" min="0" max="100" step="1" value={dossier.tauxCommissionAssureur ?? ""}
+              <input type="number" onFocus={selectionTotale} min="0" max="100" step="1" value={dossier.tauxCommissionAssureur ?? ""}
                 onChange={e => onUpdate(dossier.id, { tauxCommissionAssureur: e.target.value === "" ? null : Number(e.target.value) })}
                 placeholder="%" className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-16 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
               % HT
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
               puis années suivantes
-              <input type="number" min="0" max="100" step="1" value={dossier.tauxCommissionSuivantes ?? ""}
+              <input type="number" onFocus={selectionTotale} min="0" max="100" step="1" value={dossier.tauxCommissionSuivantes ?? ""}
                 onChange={e => onUpdate(dossier.id, { tauxCommissionSuivantes: e.target.value === "" ? null : Number(e.target.value) })}
                 placeholder="idem" className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-16 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
               % HT
@@ -5629,7 +5686,7 @@ function ChallengePartenaires({ data, onSet, canEdit }) {
               placeholder="Intitulé" className={champ + " flex-1 min-w-[180px]"} />
             <label className="text-xs text-gray-500 flex items-center gap-1.5">
               Objectif
-              <input type="number" min="1" value={b.objectif} onChange={e => setB(x => ({ ...x, objectif: e.target.value }))}
+              <input type="number" onFocus={selectionTotale} min="1" value={b.objectif} onChange={e => setB(x => ({ ...x, objectif: e.target.value }))}
                 className={champ + " w-16 text-center"} />
               dossiers souscrits
             </label>
@@ -5690,7 +5747,7 @@ function ChallengePartenaires({ data, onSet, canEdit }) {
                 return (
                   <div key={x.p.id} className="flex items-center gap-3 flex-wrap">
                     <span className="text-sm fa-navy font-medium w-44 shrink-0 truncate">
-                      {nomPartenaire(x.p)}
+                      <LienPartenaire p={x.p} />
                     </span>
                     <div className="flex-1 min-w-[120px] h-3 bg-gray-100 rounded-full overflow-hidden">
                       <div className={`h-full ${atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
@@ -5852,7 +5909,7 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
           {[["partenaires", "Partenaires"], ["dossiers", "Dossiers"], ["ca", "Honoraires (€)"], ["recurrence", "Récurrence ajoutée (€/mois)"]].map(([k, lib]) => (
             <label key={k} className="text-xs text-gray-500 flex items-center gap-1.5">
               {lib}
-              <input type="number" min="0" value={brouillon[k] ?? ""}
+              <input type="number" onFocus={selectionTotale} min="0" value={brouillon[k] ?? ""}
                 onChange={e => setBrouillon(b => ({ ...b, [k]: e.target.value }))}
                 className="w-24 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
             </label>
@@ -5870,7 +5927,7 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
         <Jauge titre="Nouveaux partenaires" segments={partenaires} objectif={objectifs.partenaires || 0} />
         <Jauge titre="Dossiers gagnés" segments={dossiers} objectif={objectifs.dossiers || 0} />
         <Jauge titre="C.A. encaissé — honoraires" segments={ca} objectif={objectifs.ca || 0} format={euros} />
-        <Jauge titre="Récurrence ajoutée ce mois" segments={recurrence} objectif={objectifs.recurrence || 0} format={euros} />
+        <div className="fa-recurrent"><Jauge titre="Récurrence ajoutée ce mois" segments={recurrence} objectif={objectifs.recurrence || 0} format={euros} /></div>
       </div>
 
       <div className="text-xs text-gray-500 mt-3">
@@ -5929,6 +5986,12 @@ function ObjectifsCA({ data }) {
   const vTransfo = transfo === null ? transfoObservee : (Number(transfo) || 0);
   const vProd = Number(prod) || 0;
   const vActivation = activation === null ? activationObservee : (Number(activation) || 0);
+  // On affiche la saisie telle quelle, nettoyée de ses zéros de tête, plutôt
+  // que la valeur recalculée : sinon le champ et ce qu'on a tapé divergent.
+  const affCa = caMoyen === null ? String(caMoyenObserve) : caMoyen;
+  const affTransfo = transfo === null ? String(transfoObservee) : transfo;
+  const affProd = String(prod);
+  const affActivation = activation === null ? String(activationObservee) : activation;
 
   const calculable = vCa > 0 && vTransfo > 0 && vProd > 0 && vActivation > 0;
 
@@ -5960,34 +6023,34 @@ function ObjectifsCA({ data }) {
         <div className="text-xs font-semibold fa-navy mb-2">Hypothèses</div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-gray-600">
           <label className="flex items-center gap-2">
-            <input type="number" min="0" step="10" value={vCa} onChange={e => setCaMoyen(e.target.value)} className={champ} />
+            <input type="number" onFocus={selectionTotale} min="0" step="10" value={affCa} onChange={e => setCaMoyen(sansZeroDeTete(e.target.value))} className={champ} />
             € de C.A. par dossier gagné
             <span className="text-xs text-gray-400">
               ({avecMontant.length > 0 ? `observé : ${caMoyenObserve} €` : "aucune donnée, valeur à fixer"})
             </span>
           </label>
           <label className="flex items-center gap-2">
-            <input type="number" min="1" max="100" step="1" value={vTransfo} onChange={e => setTransfo(e.target.value)} className={champ} />
+            <input type="number" onFocus={selectionTotale} min="1" max="100" step="1" value={affTransfo} onChange={e => setTransfo(sansZeroDeTete(e.target.value))} className={champ} />
             % de dossiers qui aboutissent
             <span className="text-xs text-gray-400">
               ({arbitres > 0 ? `observé : ${transfoObservee} %` : "aucune donnée"})
             </span>
           </label>
           <label className="flex items-center gap-2">
-            <input type="number" min="0" step="0.1" value={vProd} onChange={e => setProd(e.target.value)} className={champ} />
+            <input type="number" onFocus={selectionTotale} min="0" step="0.1" value={affProd} onChange={e => setProd(sansZeroDeTete(e.target.value))} className={champ} />
             dossiers/mois par partenaire actif
             <span className="text-xs text-gray-400">(1,00 = 12 par an)</span>
           </label>
           <label className="flex items-center gap-2">
-            <input type="number" min="1" max="100" step="1" value={vActivation} onChange={e => setActivation(e.target.value)} className={champ} />
+            <input type="number" onFocus={selectionTotale} min="1" max="100" step="1" value={affActivation} onChange={e => setActivation(sansZeroDeTete(e.target.value))} className={champ} />
             % de partenaires qui produisent
             <span className="text-xs text-gray-400">
               ({vivants.length > 0 ? `observé : ${activationObservee} %` : "aucune donnée"})
             </span>
           </label>
           <label className="flex items-center gap-2">
-            <input type="number" min="0" step="10000" value={objectifLibre} onChange={e => setObjectifLibre(e.target.value)}
-              placeholder="250000" className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            <input type="number" onFocus={selectionTotale} min="0" step="10000" value={objectifLibre} onChange={e => setObjectifLibre(sansZeroDeTete(e.target.value))}
+              placeholder="0" className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
             objectif personnalisé (€)
           </label>
         </div>
@@ -6210,7 +6273,7 @@ function ProjectionCA({ data }) {
                 <div className="text-xs text-gray-500 mb-1">Honoraires</div>
                 <div className="font-display text-lg font-bold fa-navy">{fmtEuro(total12Scenario)}</div>
               </div>
-              <div className="bg-violet-50 border border-violet-200 rounded-xl p-4">
+              <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 fa-recurrent">
                 <div className="text-xs text-gray-500 mb-1">Récurrence assureur</div>
                 <div className="font-display text-lg font-bold text-violet-700">{fmtEuro(total12Recurrence)}</div>
                 <div className="text-[11px] text-gray-400">
@@ -6228,24 +6291,24 @@ function ProjectionCA({ data }) {
             <div className="text-xs font-semibold fa-navy mb-2">Hypothèses du scénario</div>
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-gray-600">
               <label className="flex items-center gap-2">
-                <input type="number" min="0" step="1" value={recrutementUtilise}
+                <input type="number" onFocus={selectionTotale} min="0" step="1" value={recrutementUtilise}
                   onChange={e => setRecrutement(e.target.value)} className={champHypo} />
                 partenaires recrutés par mois
                 <span className="text-xs text-gray-400">(observé : {recrutementObserve})</span>
               </label>
               <label className="flex items-center gap-2">
-                <input type="number" min="0" max="100" step="1" value={activationUtilisee}
+                <input type="number" onFocus={selectionTotale} min="0" max="100" step="1" value={activationUtilisee}
                   onChange={e => setActivation(e.target.value)} className={champHypo} />
                 % qui déposent au moins un dossier
                 <span className="text-xs text-gray-400">(observé : {activationObservee} %)</span>
               </label>
               <label className="flex items-center gap-2">
-                <input type="number" min="0" max="6" step="1" value={delai}
+                <input type="number" onFocus={selectionTotale} min="0" max="6" step="1" value={delai}
                   onChange={e => setDelai(Math.max(0, Number(e.target.value) || 0))} className={champHypo} />
                 mois avant le premier dossier
               </label>
               <label className="flex items-center gap-2">
-                <input type="number" min="0" step="0.1" value={productivite.toFixed(2)}
+                <input type="number" onFocus={selectionTotale} min="0" step="0.1" value={productivite.toFixed(2)}
                   onChange={e => setProdSaisie(e.target.value)} className={champHypo} />
                 dossiers/mois par partenaire actif
                 <span className="text-xs text-gray-400">(observé : {productiviteObservee.toFixed(2)} · 12/an = 1,00)</span>
@@ -6274,7 +6337,7 @@ function ProjectionCA({ data }) {
                     <th className="font-medium py-1 text-right">Partenaires actifs</th>
                     <th className="font-medium py-1 text-right">Dossiers</th>
                     <th className="font-medium py-1 text-right">Honoraires</th>
-                    <th className="font-medium py-1 text-right">Récurrence</th>
+                    <th className="font-medium py-1 text-right fa-recurrent">Récurrence</th>
                     <th className="font-medium py-1 text-right">Cumul total</th>
                   </tr>
                 </thead>
@@ -6285,7 +6348,7 @@ function ProjectionCA({ data }) {
                       <td className="py-1 text-right text-gray-500">{t.actifs}</td>
                       <td className="py-1 text-right text-gray-500">{t.dossiers.toFixed(1)}</td>
                       <td className="py-1 text-right fa-navy font-medium">{fmtEuro(t.ca)}</td>
-                      <td className="py-1 text-right text-violet-700">{fmtEuro(t.rec)}</td>
+                      <td className="py-1 text-right text-violet-700 fa-recurrent">{fmtEuro(t.rec)}</td>
                       <td className="py-1 text-right fa-navy font-bold">{fmtEuro(t.cumulTotal)}</td>
                     </tr>
                   ))}
@@ -6413,7 +6476,7 @@ function Vision360({ data }) {
         // Affiché même à zéro : une récurrence invisible est une récurrence
         // qu'on oublie de renseigner, et donc du chiffre d'affaires perdu.
         return (
-          <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 mb-4">
+          <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 mb-4 fa-recurrent">
             <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
               <span className="font-display font-semibold fa-navy">Revenu récurrent</span>
               <span className="text-xs text-violet-800">
@@ -6613,6 +6676,9 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
   const [fichier, setFichier] = useState(null);
   const [mode, setMode] = useState("Virement");
   const [historique, setHistorique] = useState(false);
+  // La liste peut compter des dizaines de lignes : on doit pouvoir la replier
+  // pour retrouver le reste de l'onglet sans faire défiler tout l'écran.
+  const [replie, setReplie] = useState(false);
   const champ = useRef(null);
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
@@ -6657,13 +6723,23 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
-      <div className="font-display font-semibold fa-navy mb-1">Versements aux partenaires</div>
-      <p className="text-sm text-gray-500 mb-4">
+      <button onClick={() => setReplie(v => !v)}
+        title={replie ? "Déplier" : "Replier"}
+        className="w-full flex items-center gap-2 text-left mb-1">
+        <ChevronDown size={18} className={`fa-teal-text shrink-0 transition-transform ${replie ? "-rotate-90" : ""}`} />
+        <span className="font-display font-semibold fa-navy">Versements aux partenaires</span>
+        {lignes.length > 0 && (
+          <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full min-w-[20px] h-5 px-1.5 flex items-center justify-center">
+            {masqueNb(lignes.length)}
+          </span>
+        )}
+      </button>
+      <p className={`text-sm text-gray-500 ${replie ? "" : "mb-4"}`}>
         Uniquement ce que Frangola a déjà encaissé — on ne verse pas d'argent qu'on n'a pas reçu.
         {lignes.length > 0 && <> Total à régler : <strong className="fa-navy">{fmtEuroPrecis(total)}</strong>.</>}
       </p>
 
-      {lignes.length === 0 ? (
+      {replie ? null : lignes.length === 0 ? (
         <div className="text-sm text-gray-400 mb-3">Rien à régler pour l'instant.</div>
       ) : (
         <div className="space-y-1.5">
@@ -6717,7 +6793,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
         </div>
       )}
 
-      {reglees.length > 0 && (
+      {!replie && reglees.length > 0 && (
         <>
           <button onClick={() => setHistorique(v => !v)} className="text-xs fa-teal-text hover:underline mt-3">
             {historique ? "Masquer les versements effectués" : `Voir les ${reglees.length} versement${reglees.length > 1 ? "s" : ""} effectué${reglees.length > 1 ? "s" : ""}`}
@@ -7076,6 +7152,25 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:adminTab", "accueil"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:adminTab", t); };
   useEffect(() => { if (tab === "mandataires" && !isFullAdmin) setTab("accueil"); }, []);
+  // Sauts de navigation offerts à tout l'espace admin via NavAdmin : un clic
+  // sur un nom, où qu'il apparaisse, ouvre la fiche correspondante. On passe
+  // par la recherche déjà en place, qui déplie au passage le bon groupe.
+  const navAdmin = {
+    ouvrirPartenaire: (p) => {
+      if (!p) return;
+      setPartnerSearch(nomPartenaire(p));
+      setTab("partenaires");
+      try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { /* ignore */ }
+    },
+    ouvrirDossier: (d) => {
+      if (!d) return;
+      setDossierFilter("tous");
+      setDossierSearch(`${d.clientFirstName || ""} ${d.clientLastName || ""}`.trim());
+      setTab("dossiers");
+      try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { /* ignore */ }
+    },
+  };
+
   // Ordre personnalisé des onglets et mode discret : deux réglages de confort,
   // propres à cet ordinateur, qui n'ont pas à voyager dans les données.
   const [ordreOnglets, setOrdreOnglets] = useState(lireOrdreOnglets);
@@ -7444,7 +7539,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   }
 
   return (
-    <div className={`min-h-screen ${discret ? "mode-discret" : ""}`}>
+    <NavAdmin.Provider value={navAdmin}>
+    <div className={`min-h-screen ${discret ? "mode-discret" : ""} ${modeDemo ? "mode-demo" : ""}`}>
       <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
@@ -7539,7 +7635,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 })}
                 <div className="flex items-center gap-1 shrink-0 sm:ml-auto">
                   <button onClick={basculerDiscret}
-                    title={discret ? "Réafficher les chiffres" : "Mode discret : masquer chiffres et noms le temps d'une démonstration"}
+                    title={discret ? "Réafficher les chiffres" : "Mode discret : masquer tous les chiffres"}
                     className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${discret ? "bg-amber-100 border-amber-300 text-amber-900" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
                     {discret ? <EyeOff size={15} /> : <Eye size={15} />}
                   </button>
@@ -7606,7 +7702,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               cle: "p-" + x.id,
               categorie: "Parrainage",
               couleur: "bg-amber-100 text-amber-800",
-              titre: MODE_DISCRET ? nomFictif(x.id || "") : (`${x.prenom || ""} ${up(x.nom || "")}`.trim() || "Filleul sans nom"),
+              titre: `${x.prenom || ""} ${up(x.nom || "")}`.trim() || "Filleul sans nom",
               detail: `présenté par ${nomPartenaireParId(x.parrainId)} — à valider`,
               depuis: x.at,
               aller: () => setTab("partenaires"),
@@ -7874,7 +7970,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                       <span className="font-bold">{nomPartenaire(p)}</span>
                                       {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                                     </div>
-                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{afficheReseau(p.company) || "—"} {!MODE_DISCRET && p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
+                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2.5">
@@ -8122,7 +8218,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           <div className="grid sm:grid-cols-2 gap-3">
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">CA généré (€) — interne</label>
-                                              <input type="number" value={financeDraft.caAmount}
+                                              <input type="number" onFocus={selectionTotale} value={financeDraft.caAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, caAmount: e.target.value }))}
                                                 placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
@@ -8139,7 +8235,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                                     className="fa-teal-text hover:underline font-normal normal-case">50% auto</button>
                                                 )}
                                               </label>
-                                              <input type="number" value={financeDraft.commissionAmount}
+                                              <input type="number" onFocus={selectionTotale} value={financeDraft.commissionAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, commissionAmount: e.target.value }))}
                                                 placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
@@ -8286,7 +8382,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           <div className="grid sm:grid-cols-2 gap-2 mb-2">
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">CRD à M+3 (€)</label>
-                                              <input type="number" value={simDraft.crd} onChange={e => setSimDraft(s => ({ ...s, crd: e.target.value }))}
+                                              <input type="number" onFocus={selectionTotale} value={simDraft.crd} onChange={e => setSimDraft(s => ({ ...s, crd: e.target.value }))}
                                                 placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
                                             <div>
@@ -8299,12 +8395,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           <div className="grid sm:grid-cols-2 gap-2 mb-2">
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">Coût assurance restant (€)</label>
-                                              <input type="number" value={simDraft.assuranceRestante} onChange={e => setSimDraft(s => ({ ...s, assuranceRestante: e.target.value }))}
+                                              <input type="number" onFocus={selectionTotale} value={simDraft.assuranceRestante} onChange={e => setSimDraft(s => ({ ...s, assuranceRestante: e.target.value }))}
                                                 placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1">Durée restante (mois)</label>
-                                              <input type="number" value={simDraft.dureeRestanteMois} onChange={e => setSimDraft(s => ({ ...s, dureeRestanteMois: e.target.value }))}
+                                              <input type="number" onFocus={selectionTotale} value={simDraft.dureeRestanteMois} onChange={e => setSimDraft(s => ({ ...s, dureeRestanteMois: e.target.value }))}
                                                 placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                                             </div>
                                           </div>
@@ -8329,7 +8425,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
 <div className="mb-3">
   <label className="block text-xs text-gray-500 mb-1">Coût assurance restant avec Frangola — devis (€)</label>
-  <input type="number" value={simDraft.devisAssurance}
+  <input type="number" onFocus={selectionTotale} value={simDraft.devisAssurance}
     onChange={e => setSimDraft(s => ({ ...s, devisAssurance: e.target.value }))}
     placeholder="0" className="border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
 </div>
@@ -8447,11 +8543,11 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                       <div key={p.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
                         <div>
                           <div className="text-sm fa-navy font-bold">
-                            {nomPartenaire(p)}
+                            <LienPartenaire p={p} className="font-bold" />
                             {p.issuDuParrainage && <span className="ml-2 text-xs text-teal-700">issu du parrainage</span>}
                           </div>
                           <div className="text-xs text-gray-400">
-                            {afficheReseau(p.company) || "réseau non précisé"}
+                            {p.company || "réseau non précisé"}
                             {p.telephone && ` · ${p.telephone}`}
                             {p.siret && ` · SIRET ${p.siret}`}
                             {p.parrainId && nomParrain(p.parrainId) && ` · parrainé par ${nomParrain(p.parrainId)}`}
@@ -8549,7 +8645,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               {newPartnerFlatFee !== "" && (
                 <div className="mb-4 max-w-xs">
                   <label className="block text-xs text-gray-500 mb-1">Forfait par contrat (€)</label>
-                  <input type="number" value={newPartnerFlatFee} onChange={e => setNewPartnerFlatFee(e.target.value)}
+                  <input type="number" onFocus={selectionTotale} value={newPartnerFlatFee} onChange={e => setNewPartnerFlatFee(e.target.value)}
                     className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 </div>
               )}
@@ -8710,7 +8806,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                       {editForm.flatFee !== "" && (
                         <div className="mb-3 max-w-xs">
                           <label className="block text-xs text-gray-500 mb-1">Forfait par contrat (€)</label>
-                          <input type="number" value={editForm.flatFee} onChange={e => setEditForm(f => ({ ...f, flatFee: e.target.value }))}
+                          <input type="number" onFocus={selectionTotale} value={editForm.flatFee} onChange={e => setEditForm(f => ({ ...f, flatFee: e.target.value }))}
                             className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500" />
                         </div>
                       )}
@@ -8754,7 +8850,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           )}
                         </div>
                         <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">
-                          {afficheReseau(p.company) || "—"} {!MODE_DISCRET && p.ville && `· ${p.ville}`} {!MODE_DISCRET && p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
+                          {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
                           {filleulsOuverts.has(p.id) && filleulsDe(p.id).length > 0 && (() => {
                             const bilan = bilanParrainage(p.id);
                             return (
@@ -8768,8 +8864,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                     return (
                                       <div key={f.id} className="flex items-baseline justify-between gap-3 flex-wrap text-xs">
                                         <span className="fa-navy font-medium">
-                                          {nomPartenaire(f)}
-                                          {f.company && <span className="text-gray-500 font-normal"> · {afficheReseau(f.company)}</span>}
+                                          <LienPartenaire p={f} />
+                                          {f.company && <span className="text-gray-500 font-normal"> · {f.company}</span>}
                                           {f.active === false && <span className="text-gray-400 font-normal"> · inactif</span>}
                                         </span>
                                         <span className="text-gray-500">
@@ -8871,7 +8967,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                               const recMoisP = pDossiers.filter(contratEnCours).reduce((sm, x) => sm + recurrenceMensuelle(x), 0);
                               const recCumulP = pDossiers.reduce((sm, x) => sm + recurrenceCumulee(x), 0);
                               return (
-                                <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 sm:col-span-2">
+                                <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 sm:col-span-2 fa-recurrent">
                                   <div className="text-xs text-gray-500">Récurrence générée par ce partenaire</div>
                                   <div className="font-display text-xl font-bold text-violet-700">{fmtEuroPrecis(recCumulP)}</div>
                                   <div className="text-[11px] text-gray-400 mt-0.5">
@@ -8999,7 +9095,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   <div>
                     <div className="font-medium fa-navy"><span className="font-bold">{nomPartenaire(p)}</span></div>
                     <div className="text-xs text-gray-400">
-                      {afficheReseau(p.company) || "—"} {!MODE_DISCRET && p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
+                      {p.company || "—"} {p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
                     </div>
                   </div>
                   <button onClick={() => onRestorePartner(p.id)}
@@ -9192,7 +9288,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           const topReseaux = (() => {
             const m = new Map();
             for (const p of partners.filter(x => !x.deleted)) {
-              const nom = afficheReseau((p.company || "").trim()) || "Sans réseau";
+              const nom = (p.company || "").trim() || "Sans réseau";
               if (!m.has(nom)) m.set(nom, { nom, partenaires: 0, dossiers: 0, ca: 0, rec: 0 });
               const g = m.get(nom);
               g.partenaires += 1;
@@ -9429,7 +9525,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           <div className="text-xs text-gray-400 mb-1">Honoraires générés</div>
                           <div className="font-display text-2xl font-bold fa-navy">{fmtEuro(totalCa)}</div>
                         </div>
-                        <div className="bg-violet-50 border border-violet-200 rounded-2xl p-5">
+                        <div className="bg-violet-50 border border-violet-200 rounded-2xl p-5 fa-recurrent">
                           <div className="text-xs text-gray-500 mb-1">Récurrence perçue</div>
                           <div className="font-display text-2xl font-bold text-violet-700">{fmtEuro(recCumul)}</div>
                           <div className="text-[11px] text-gray-400 mt-0.5">{fmtEuroPrecis(recMois)}/mois en cours</div>
@@ -9495,7 +9591,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             <span>Part {cs.commercial} (mandataire)</span>
                             <span>{fmtEuro(cs.mandataireCut)}</span>
                           </div>
-                          <div className="flex items-center justify-between pl-3 text-violet-700">
+                          <div className="flex items-center justify-between pl-3 text-violet-700 fa-recurrent">
                             <span>Récurrence · {fmtEuroPrecis(cs.recMensuelle)}/mois</span>
                             <span>{fmtEuro(cs.recCumulee)} perçus</span>
                           </div>
@@ -9519,7 +9615,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     {topPartners.map((tp, i) => (
                       <div key={tp.partner.id} className="flex items-center justify-between text-sm">
                         <span className="flex items-center gap-2">
-                          <span className="fa-navy font-bold">{i + 1}. {nomPartenaire(tp.partner)}</span>
+                          <span className="fa-navy font-bold">{i + 1}. <LienPartenaire p={tp.partner} className="font-bold" /></span>
                           {reseauLogoFor(tp.partner.company) && (
                             <img src={reseauLogoFor(tp.partner.company).data} alt={tp.partner.company} className="h-4 max-w-[52px] object-contain" />
                           )}
@@ -9538,7 +9634,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   {topPartnersByRevenue.map((tp, i) => (
                     <div key={tp.partner.id} className="flex items-center justify-between text-sm">
                       <span className="flex items-center gap-2">
-                        <span className="fa-navy font-bold">{i + 1}. {nomPartenaire(tp.partner)}</span>
+                        <span className="fa-navy font-bold">{i + 1}. <LienPartenaire p={tp.partner} className="font-bold" /></span>
                         {reseauLogoFor(tp.partner.company) && (
                           <img src={reseauLogoFor(tp.partner.company).data} alt={tp.partner.company} className="h-4 max-w-[52px] object-contain" />
                         )}
@@ -9661,7 +9757,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           {classement.map((x, i) => (
                             <div key={x.p.id} className="flex items-center justify-between flex-wrap gap-2 text-sm py-1">
                               <span className="fa-navy font-bold">
-                                {i + 1}. {nomPartenaire(x.p)}
+                                {i + 1}. <LienPartenaire p={x.p} className="font-bold" />
                               </span>
                               <span className="text-xs text-gray-500">
                                 {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA {fmtEuroPrecis(x.caTotal)} · prime {fmtEuroPrecis(x.gainTotal)}
@@ -9893,6 +9989,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
         )}
       </main>
     </div>
+    </NavAdmin.Provider>
 
   );
 }
