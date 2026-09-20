@@ -7205,7 +7205,6 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                     title={discret ? "Réafficher les chiffres" : "Mode discret : masquer chiffres et noms le temps d'une démonstration"}
                     className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${discret ? "bg-amber-100 border-amber-300 text-amber-900" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
                     {discret ? <EyeOff size={15} /> : <Eye size={15} />}
-                    {discret && <span className="hidden sm:inline">Discret</span>}
                   </button>
                   <button onClick={() => setReorganiser(r => !r)}
                     title="Réorganiser mes onglets"
@@ -7225,13 +7224,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                 </div>
               )}
 
-              {discret && (
-                <div className="mt-3 flex items-center gap-2 flex-wrap text-xs bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-amber-900">
-                  <EyeOff size={14} />
-                  <span><strong>Mode discret actif</strong> — montants, compteurs, noms de clients, réseaux et graphiques sont masqués. Tu peux partager ton écran.</span>
-                  <button onClick={basculerDiscret} className="ml-auto underline font-medium">Réafficher mes chiffres</button>
-                </div>
-              )}
+              {/* Aucun bandeau quand le mode discret est actif : il serait lu
+                  par le partenaire en visio, à qui on n'a pas à signaler qu'on
+                  lui masque quelque chose. Le seul repère est l'œil barré,
+                  discret, et les « ••• » que seul l'admin sait interpréter. */}
             </div>
           );
         })()}
