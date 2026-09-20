@@ -681,25 +681,34 @@ function StatusBadge({ status }) {
 // Un dossier au statut « Payé » dont les honoraires rentrent en douze fois
 // n'est pas soldé. Afficher « Payé » seul ferait croire au partenaire que tout
 // est versé, et le premier relevé bancaire démentirait l'application.
-function PaiementBadge({ dossier }) {
-  if (!dossier || dossier.status === "KO") return null;
-  if (!["Souscrit", "Bordereau émis", "Payé"].includes(dossier.status)) return null;
+// État de paiement d'un dossier, utilisé par la pastille et par le tri.
+function etatPaiement(dossier) {
+  if (!dossier || dossier.status === "KO") return "ko";
+  if (!STATUTS_CONTRAT_VIVANT.includes(dossier.status)) return "encours";
   const total = dossier.caAmount || 0;
-  if (total <= 0) return null;
+  if (total <= 0) return "encours";
+  const recu = partEncaissee(dossier, total);
+  if (recu / total >= 0.9999) return "solde";
+  return recu > 0.005 ? "partiel" : "avenir";
+}
 
-  const ech = echeancesDe(dossier);
+function PaiementBadge({ dossier }) {
+  const etat = etatPaiement(dossier);
+  if (etat === "ko" || etat === "encours") return null;
+
+  const total = dossier.caAmount || 0;
   const recu = partEncaissee(dossier, total);
   const pct = Math.round((recu / total) * 100);
-  const fractionne = ech.length > 1;
+  const ech = echeancesDe(dossier);
 
-  if (pct >= 100) {
+  if (etat === "solde") {
     return (
       <span className="inline-block text-xs font-semibold px-2.5 py-1 rounded-full border bg-emerald-50 text-emerald-700 border-emerald-300">
         Soldé
       </span>
     );
   }
-  if (recu > 0.005) {
+  if (etat === "partiel") {
     return (
       <span className="inline-block text-xs font-semibold px-2.5 py-1 rounded-full border bg-amber-50 text-amber-800 border-amber-300"
         title={`${fmtEuroPrecis(recu)} reçus sur ${fmtEuroPrecis(total)}`}>
@@ -709,7 +718,7 @@ function PaiementBadge({ dossier }) {
   }
   return (
     <span className="inline-block text-xs font-semibold px-2.5 py-1 rounded-full border bg-gray-100 text-gray-600 border-gray-300"
-      title={fractionne ? `Réglé en ${ech.length} fois — rien encore reçu` : "Aucun encaissement enregistré"}>
+      title={ech.length > 1 ? `Réglé en ${ech.length} fois — rien encore reçu` : "Aucun encaissement enregistré"}>
       Paiement à venir
     </span>
   );
@@ -2649,11 +2658,24 @@ function ParrainageCard({ partner, onDeclarer }) {
             <div key={d.id} className="fa-bg-offwhite rounded-lg px-3 py-2.5">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <span className="text-sm fa-navy font-bold">{d.prenom} {(d.nom || "").toUpperCase()}</span>
-                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
-                  d.statut === "valide" ? "bg-emerald-50 text-emerald-700"
-                  : d.statut === "refuse" ? "bg-red-50 text-red-700"
-                  : "bg-amber-50 text-amber-700"}`}>
-                  {d.statut === "valide" ? "Validée" : d.statut === "refuse" ? "Refusée" : "En cours de vérification"}
+                <span className="flex items-center gap-2 ml-auto">
+                  {/* Ce que ce filleul a rapporté au parrain depuis le début :
+                      la promesse du parrainage, rendue tangible. */}
+                  {d.statut === "valide" && d.partnerId && (() => {
+                    const gain = caGenerePar(d.partnerId) * PARRAINAGE_TAUX;
+                    return (
+                      <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${gain > 0.005 ? "fa-bg-gold fa-navy" : "bg-gray-100 text-gray-400"}`}
+                        title="Votre part de 10 % sur le chiffre d'affaires encaissé grâce à ce confrère">
+                        {gain > 0.005 ? `+${fmtEuroPrecis(gain)}` : "pas encore de production"}
+                      </span>
+                    );
+                  })()}
+                  <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                    d.statut === "valide" ? "bg-emerald-50 text-emerald-700"
+                    : d.statut === "refuse" ? "bg-red-50 text-red-700"
+                    : "bg-amber-50 text-amber-700"}`}>
+                    {d.statut === "valide" ? "Validée" : d.statut === "refuse" ? "Refusée" : "En cours de vérification"}
+                  </span>
                 </span>
               </div>
               <div className="text-xs text-gray-400 mt-0.5">Déclaré le {fmtDate(d.at)}{d.reseau && ` · ${d.reseau}`}</div>
@@ -2716,6 +2738,7 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
+  const [filtrePaiement, setFiltrePaiement] = useState("tous");
   const [clientFirstName, setClientFirstName] = useState("");
   const [clientLastName, setClientLastName] = useState("");
   const [clientPhone, setClientPhone] = useState("");
@@ -2886,6 +2909,34 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
           )}
         </div>
 
+        {tab === "clotures" && (() => {
+          const closedAll = dossiers.filter(d => ["Souscrit", "Bordereau émis", "Payé", "KO"].includes(d.status));
+          if (closedAll.length === 0) return null;
+          const compte = (etat) => etat === "tous" ? closedAll.length : closedAll.filter(d => etatPaiement(d) === etat).length;
+          const puces = [
+            ["tous", "Tous"],
+            ["avenir", "Paiement à venir"],
+            ["partiel", "Paiement partiel"],
+            ["solde", "Soldés"],
+            ["ko", "Sans suite"],
+          ].filter(([v]) => v === "tous" || compte(v) > 0);
+          if (puces.length <= 2) return null;
+          return (
+            <div className="flex flex-wrap gap-2 mb-5">
+              {puces.map(([val, lib]) => (
+                <button key={val} onClick={() => setFiltrePaiement(val)}
+                  className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition ${
+                    filtrePaiement === val ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
+                  {lib}
+                  <span className={`text-[10px] font-bold rounded-full px-1.5 ${filtrePaiement === val ? "bg-white/25" : "bg-gray-100 text-gray-500"}`}>
+                    {compte(val)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+
         {tab === "encours" && showForm && (
           <div className="bg-white border border-gray-200 rounded-2xl p-6 mb-8 shadow-sm">
             <h3 className="font-display font-semibold fa-navy mb-4">Déposer un nouveau dossier</h3>
@@ -2964,7 +3015,17 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
 
         {(() => {
           const CLOSED = ["Souscrit", "Bordereau émis", "Payé", "KO"];
-          const visibleDossiers = dossiers.filter(d => tab === "clotures" ? CLOSED.includes(d.status) : !CLOSED.includes(d.status));
+          // Dans les dossiers clôturés, ce qui compte n'est plus l'avancement
+          // mais l'argent : on regroupe par état de paiement, ce qui reste dû
+          // en tête.
+          const ORDRE_PAIEMENT = { avenir: 0, partiel: 1, solde: 2, encours: 3, ko: 4 };
+          let visibleDossiers = dossiers.filter(d => tab === "clotures" ? CLOSED.includes(d.status) : !CLOSED.includes(d.status));
+          if (tab === "clotures") {
+            if (filtrePaiement !== "tous") visibleDossiers = visibleDossiers.filter(d => etatPaiement(d) === filtrePaiement);
+            visibleDossiers = [...visibleDossiers].sort((a, b) =>
+              (ORDRE_PAIEMENT[etatPaiement(a)] ?? 9) - (ORDRE_PAIEMENT[etatPaiement(b)] ?? 9)
+              || b.createdAt - a.createdAt);
+          }
           return (
             <>
               {visibleDossiers.length === 0 && !(tab === "encours" && showForm) && (
@@ -4680,6 +4741,77 @@ function mrrDansNMois(dossiers, n) {
   }, 0);
 }
 
+// Décomposition de ce qui a DÉJÀ été encaissé, par régime de taux. Répond à
+// « où j'en suis » : ce que la première année de chaque contrat a rapporté,
+// et ce que les années suivantes ont rapporté à leur taux propre.
+function recurrencePercueDetaillee(dossiers) {
+  let an1 = 0, apres = 0, moisAn1 = 0, moisApres = 0;
+  let contratsEnAn1 = 0, contratsAuDela = 0;
+  for (const d of dossiers || []) {
+    if (!STATUTS_CONTRAT_VIVANT.includes(d.status)) continue;
+    const n = mensualitesEcoulees(d);
+    const cot = Number(d.cotisationMensuelle) || 0;
+    if (n <= 0 || cot <= 0) continue;
+    const a = Math.min(n, DUREE_TAUX_INITIAL);
+    const b = Math.max(0, n - DUREE_TAUX_INITIAL);
+    an1 += (cot * tauxAnnee1(d) / 100) * a;
+    apres += (cot * tauxAnneesSuivantes(d) / 100) * b;
+    moisAn1 += a; moisApres += b;
+    if (b > 0) contratsAuDela += 1; else contratsEnAn1 += 1;
+  }
+  return { an1, apres, moisAn1, moisApres, contratsEnAn1, contratsAuDela, total: an1 + apres };
+}
+
+// Rythme observé de signature de contrats porteurs de récurrence, et montants
+// moyens. Sert à projeter l'empilement : chaque année de production s'ajoute
+// aux précédentes, c'est ce qui fait grossir la cagnotte.
+function rythmeRecurrence(dossiers, fenetreJours = 90) {
+  const depuis = Date.now() - fenetreJours * 86400000;
+  const avecRec = (dossiers || []).filter(d =>
+    STATUTS_CONTRAT_VIVANT.includes(d.status) && (Number(d.cotisationMensuelle) || 0) > 0 && tauxAnnee1(d) > 0);
+  const recents = avecRec.filter(d => {
+    if (!d.dateEffet) return false;
+    const t = new Date(d.dateEffet + "T12:00:00").getTime();
+    return !isNaN(t) && t >= depuis;
+  });
+  const parMois = recents.length / (fenetreJours / 30.44);
+  const moy = (f) => avecRec.length ? avecRec.reduce((s, d) => s + f(d), 0) / avecRec.length : 0;
+  return {
+    parMois,
+    an1: moy(d => (Number(d.cotisationMensuelle) || 0) * tauxAnnee1(d) / 100),
+    apres: moy(d => recurrenceCroisiere(d)),
+    echantillon: avecRec.length,
+  };
+}
+
+// Projection sur cinq ans, dans les deux lectures :
+//   — « acquis » : le portefeuille actuel vieillit, sans rien de nouveau ;
+//   — « maintenu » : on continue de signer au rythme observé.
+function projectionRecurrence(dossiers, nouveauxParMois, r1, r2, annees = 5) {
+  const lignes = [];
+  let cumulAcquis = 0, cumulMaintenu = 0;
+  for (let a = 1; a <= annees; a++) {
+    let acquis = 0, maintenu = 0;
+    for (let k = 1; k <= 12; k++) {
+      const m = (a - 1) * 12 + k;
+      const base = mrrDansNMois(dossiers, m);
+      acquis += base;
+      // Chaque cohorte mensuelle passée contribue, au taux correspondant à
+      // son propre âge.
+      let apport = 0;
+      for (let c = 1; c <= m; c++) {
+        const age = m - c + 1;
+        apport += nouveauxParMois * (age <= DUREE_TAUX_INITIAL ? r1 : r2);
+      }
+      maintenu += base + apport;
+    }
+    cumulAcquis += acquis;
+    cumulMaintenu += maintenu;
+    lignes.push({ annee: a, acquis, maintenu, cumulAcquis, cumulMaintenu });
+  }
+  return lignes;
+}
+
 // Ce que rapportera le portefeuille actuel sur une année donnée, sans un
 // dossier de plus : année 1 = les douze prochains mois.
 function recurrenceAnnee(dossiers, annee) {
@@ -5757,6 +5889,7 @@ function ProjectionCA({ data }) {
 
 function Vision360({ data }) {
   const [detail, setDetail] = useState(false);
+  const [vueRec, setVueRec] = useState("maintenu");
   const vivants = data.dossiers.filter(d => d.status !== "KO");
   const gagnes = vivants.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
 
@@ -5885,41 +6018,88 @@ function Vision360({ data }) {
                     </div>
                   </div>
 
-                  {mrr > 0 && (
-                    <div className="mt-4 pt-3 border-t border-violet-200">
-                      <div className="text-xs font-semibold fa-navy mb-2">
-                        Ce que rapporte le portefeuille actuel, année après année
+                  {(() => {
+                    // Où en est-on réellement : le réalisé, ventilé par régime.
+                    const r = recurrencePercueDetaillee(data.dossiers);
+                    if (r.total < 0.005) return null;
+                    return (
+                      <div className="mt-3 pt-3 border-t border-violet-200 text-xs text-gray-600">
+                        <span className="font-semibold fa-navy">Où en est-on : </span>
+                        sur les <strong className="fa-navy">{fmtEuroPrecis(r.total)}</strong> déjà encaissés,
+                        {" "}<strong className="text-violet-700">{fmtEuroPrecis(r.an1)}</strong> proviennent du taux de première année
+                        {" "}({r.moisAn1} mensualité{r.moisAn1 > 1 ? "s" : ""})
+                        {r.apres > 0.005
+                          ? <>, et <strong className="text-violet-700">{fmtEuroPrecis(r.apres)}</strong> du taux des années suivantes ({r.moisApres} mensualité{r.moisApres > 1 ? "s" : ""}).</>
+                          : <>. Aucun contrat n'a encore dépassé sa première année.</>}
+                        <span className="block text-gray-400 mt-0.5">
+                          {r.contratsEnAn1} contrat{r.contratsEnAn1 > 1 ? "s" : ""} encore en première année
+                          {r.contratsAuDela > 0 && <> · {r.contratsAuDela} passé{r.contratsAuDela > 1 ? "s" : ""} au taux des années suivantes</>}
+                        </span>
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="text-gray-400 text-left">
-                              <th className="font-medium py-1">Année</th>
-                              <th className="font-medium py-1 text-right">Récurrence</th>
-                              <th className="font-medium py-1 text-right">Dont mandataires</th>
-                              <th className="font-medium py-1 text-right">Dont Frangola</th>
-                              <th className="font-medium py-1 text-right">Cumul depuis le début</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {lignes.map(l => (
-                              <tr key={l.a} className={l.a % 2 === 0 ? "bg-white/50" : ""}>
-                                <td className="py-1 fa-navy">Année {l.a}</td>
-                                <td className="py-1 text-right text-violet-700 font-medium">{fmtEuro(l.montant)}</td>
-                                <td className="py-1 text-right text-gray-500">{fmtEuro(l.montant * PART_MANDATAIRE)}</td>
-                                <td className="py-1 text-right text-gray-500">{fmtEuro(l.montant * (1 - PART_MANDATAIRE))}</td>
-                                <td className="py-1 text-right fa-navy font-bold">{fmtEuro(l.cumul)}</td>
+                    );
+                  })()}
+
+                  {mrr > 0 && (() => {
+                    const ry = rythmeRecurrence(data.dossiers);
+                    const proj = projectionRecurrence(data.dossiers, vueRec === "maintenu" ? ry.parMois : 0, ry.an1, ry.apres);
+                    const maintenu = vueRec === "maintenu";
+                    return (
+                      <div className="mt-4 pt-3 border-t border-violet-200">
+                        <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                          <span className="text-xs font-semibold fa-navy">La cagnotte, année après année</span>
+                          <div className="flex gap-1.5">
+                            <button onClick={() => setVueRec("maintenu")}
+                              className={`text-[11px] font-medium px-2.5 py-1 rounded-full transition ${maintenu ? "bg-violet-600 text-white" : "bg-white border border-violet-200 text-gray-600"}`}>
+                              Si je continue à produire
+                            </button>
+                            <button onClick={() => setVueRec("acquis")}
+                              className={`text-[11px] font-medium px-2.5 py-1 rounded-full transition ${!maintenu ? "bg-violet-600 text-white" : "bg-white border border-violet-200 text-gray-600"}`}>
+                              Si j'arrête demain
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-gray-400 text-left">
+                                <th className="font-medium py-1">Année</th>
+                                <th className="font-medium py-1 text-right">Récurrence de l'année</th>
+                                <th className="font-medium py-1 text-right">Dont mandataires</th>
+                                <th className="font-medium py-1 text-right">Dont Frangola</th>
+                                <th className="font-medium py-1 text-right">Cagnotte cumulée</th>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                            </thead>
+                            <tbody>
+                              {proj.map(l => {
+                                const montant = maintenu ? l.maintenu : l.acquis;
+                                const cumul2 = maintenu ? l.cumulMaintenu : l.cumulAcquis;
+                                return (
+                                  <tr key={l.annee} className={l.annee % 2 === 0 ? "bg-white/50" : ""}>
+                                    <td className="py-1 fa-navy">Année {l.annee}</td>
+                                    <td className="py-1 text-right text-violet-700 font-medium">{fmtEuroPrecis(montant)}</td>
+                                    <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * PART_MANDATAIRE)}</td>
+                                    <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * (1 - PART_MANDATAIRE))}</td>
+                                    <td className="py-1 text-right fa-navy font-bold">{fmtEuroPrecis(cumul + cumul2)}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <p className="text-[11px] text-gray-400 mt-2">
+                          {maintenu
+                            ? <>Au rythme observé de <strong className="text-violet-700">{ry.parMois.toFixed(1)} contrat{ry.parMois >= 2 ? "s" : ""} par mois</strong>,
+                                à {fmtEuroPrecis(ry.an1)} la première année puis {fmtEuroPrecis(ry.apres)} ensuite (moyennes sur {ry.echantillon} contrat{ry.echantillon > 1 ? "s" : ""}).
+                                Chaque année de production s'ajoute aux précédentes : c'est ce qui fait grossir la cagnotte.</>
+                            : <>Aucun dossier nouveau n'est supposé : c'est ce que vous toucherez si vous arrêtez de produire demain.
+                                La baisse entre l'année 1 et l'année 2 vient des barèmes dégressifs.</>}
+                          {" "}La cagnotte cumulée inclut les {fmtEuroPrecis(cumul)} déjà perçus.
+                        </p>
                       </div>
-                      <p className="text-[11px] text-gray-400 mt-2">
-                        Aucun dossier nouveau n'est supposé : c'est ce que vous toucherez si vous arrêtez de
-                        produire demain. La baisse entre l'année 1 et l'année 2 vient des barèmes dégressifs.
-                      </p>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </>
               );
             })()}
