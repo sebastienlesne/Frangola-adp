@@ -494,6 +494,300 @@ function dernierEncaissement(dossier) {
   return dates.sort().slice(-1)[0];
 }
 
+// ── Jeu de démonstration ────────────────────────────────────────────────────
+// Présenter l'outil à un futur partenaire sans montrer nos chiffres — et sans
+// montrer non plus un cabinet vide. Truquer les montants écran par écran
+// produirait des totaux qui ne tombent pas juste (un « encaissé ce mois » sans
+// rapport avec la liste en dessous) ; on remplace donc la base ENTIÈRE par un
+// jeu fictif complet, et l'application calcule normalement par-dessus. Tout
+// est cohérent par construction, y compris les échéanciers, les rétrocessions
+// et la récurrence. Le tirage est déterministe : la démonstration est
+// rigoureusement identique d'une fois sur l'autre.
+// Rien n'est jamais écrit dans Supabase en mode démo (voir mutateData).
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GÉNÉRATEUR DU JEU DE DÉMONSTRATION
+// ─────────────────────────────────────────────────────────────────────────────
+const DEMO_NOMS = ["MARTIN", "BERNARD", "DUBOIS", "THOMAS", "ROBERT", "RICHARD", "PETIT", "DURAND", "LEROY", "MOREAU", "SIMON", "LAURENT", "LEFEBVRE", "MICHEL", "GARCIA", "DAVID", "BERTRAND", "ROUX", "VINCENT", "FOURNIER", "MOREL", "GIRARD", "ANDRE", "MERCIER", "BLANC", "GUERIN", "BOYER", "GARNIER", "CHEVALIER", "FRANCOIS", "LEGRAND", "GAUTHIER", "PERRIN", "ROBIN", "CLEMENT", "MORIN", "NICOLAS", "HENRY", "ROUSSEAU", "MATHIEU", "DUVAL", "MARCHAND", "DUFOUR", "BARBIER", "BRUN", "DUMONT", "FONTAINE", "CARON", "PICARD", "ROGER", "SCHMITT", "COLIN", "MEUNIER", "NOEL", "MEYER", "LUCAS", "BENOIT", "REY", "RENAUD", "OLIVIER", "BOURGEOIS", "MASSON", "MARTY", "AUBERT", "GIRAUD", "KLEIN", "RIVIERE", "LECLERC", "MARCHAL", "DENIS"];
+const DEMO_PRENOMS = ["Julie", "Marc", "Sophie", "Thomas", "Camille", "Nicolas", "Laura", "Julien", "Emma", "Antoine", "Chloé", "Maxime", "Léa", "Pierre", "Sarah", "Hugo", "Manon", "Lucas", "Inès", "Paul", "Alice", "Romain", "Clara", "Mathieu", "Élise", "Benjamin", "Anaïs", "Guillaume", "Marine", "Alexandre", "Pauline", "Damien", "Céline", "Fabien", "Audrey", "Kevin", "Noémie", "Sébastien", "Amandine", "Florian", "Mélanie", "Jérôme", "Charlotte", "Olivier", "Delphine", "Cédric", "Aurélie", "Vincent", "Nadia", "Karim"];
+const DEMO_RESEAUX = ["Agence Horizon", "Immo Panorama", "Cap Habitat", "Résidence & Co", "Atlas Immobilier", "Optima Immo", "Via Nova", "Le Clos Immobilier", "Terrasse & Jardin", "Pierre & Sud", "Alliance Habitat", "Immo Boréal", "Studio Patrimoine", "Le Comptoir des Clés", "Azur Résidences", "Nova Immobilier", "Maisons du Levant", "Pleine Lune Immo"];
+const DEMO_VILLES = [
+  ["Montpellier", "34000", "34"], ["Nîmes", "30000", "30"], ["Béziers", "34500", "34"],
+  ["Sète", "34200", "34"], ["Perpignan", "66000", "66"], ["Toulouse", "31000", "31"],
+  ["Narbonne", "11100", "11"], ["Carcassonne", "11000", "11"], ["Avignon", "84000", "84"],
+  ["Marseille", "13008", "13"], ["Aix-en-Provence", "13100", "13"], ["Lyon", "69003", "69"],
+  ["Bordeaux", "33000", "33"], ["Nantes", "44000", "44"], ["Rennes", "35000", "35"],
+  ["Lille", "59000", "59"], ["Strasbourg", "67000", "67"], ["Nancy", "54000", "54"],
+  ["Paris", "75011", "75"], ["Créteil", "94000", "94"], ["Champigny-sur-Marne", "94500", "94"],
+  ["Le Perreux-sur-Marne", "94170", "94"], ["Versailles", "78000", "78"], ["Nanterre", "92000", "92"],
+  ["Tours", "37000", "37"], ["Orléans", "45000", "45"], ["Angers", "49000", "49"],
+  ["Dijon", "21000", "21"], ["Grenoble", "38000", "38"], ["Annecy", "74000", "74"],
+  ["Nice", "06000", "06"], ["Cannes", "06400", "06"], ["Toulon", "83000", "83"],
+  ["Clermont-Ferrand", "63000", "63"], ["Limoges", "87000", "87"], ["Pau", "64000", "64"],
+  ["Bayonne", "64100", "64"], ["La Rochelle", "17000", "17"], ["Poitiers", "86000", "86"],
+  ["Caen", "14000", "14"], ["Rouen", "76000", "76"], ["Amiens", "80000", "80"],
+  ["Reims", "51100", "51"], ["Metz", "57000", "57"], ["Besançon", "25000", "25"],
+];
+const DEMO_KO = ["Refus banque / assureur", "Client a annulé", "Concurrent moins cher", "Sans nouvelles du client", "Autre"];
+
+function prngDemo(graine) {
+  let a = graine >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function genererJeuDemo(base) {
+  const r = prngDemo(20260920);
+  const rnd = (a, b) => a + Math.floor(r() * (b - a + 1));
+  const choix = (t) => t[Math.floor(r() * t.length)];
+  const chance = (p) => r() < p;
+  const pondere = (paires) => {
+    const total = paires.reduce((s, x) => s + x[1], 0);
+    let t = r() * total;
+    for (const [v, p] of paires) { t -= p; if (t <= 0) return v; }
+    return paires[paires.length - 1][0];
+  };
+  const codeDemo = () => Array.from({ length: 6 }, () => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(r() * 32)]).join("");
+  const JOUR = 86400000;
+  const MOIS = 30.44 * JOUR;
+  const maintenant = Date.now();
+  const DEBUT = maintenant - 430 * JOUR;
+  const jourIso = (ts) => new Date(ts).toISOString().slice(0, 10);
+
+  // Mandataires, réglages et assureurs sont repris du vrai compte : sinon
+  // l'utilisateur perdrait son identité d'administrateur en entrant en démo.
+  const mandataires = (base?.mandataires || []).map(m => ({ ...m }));
+  const noms = mandataires.filter(m => !m.deleted).map(m => m.name);
+  const commerciaux = ["Sébastien", ...noms].filter((v, i, t) => t.indexOf(v) === i);
+  const reseauxReels = (base?.reseaux || []).map(x => x.name).filter(Boolean);
+  const catalogueReseaux = [...reseauxReels, ...DEMO_RESEAUX];
+  const assureurs = (base?.settings?.assureurs || []).map(a => a.nom).filter(Boolean);
+  const listeAssureurs = assureurs.length > 0 ? assureurs : ["CARDIF", "APRIL", "APIVIA"];
+
+  // ── Partenaires ───────────────────────────────────────────────────────────
+  const CIBLE_PARTENAIRES = 352;
+  const partners = [];
+  const prisNom = new Set();
+  for (let i = 0; i < CIBLE_PARTENAIRES; i++) {
+    let nom, prenom, cle;
+    do {
+      nom = choix(DEMO_NOMS); prenom = choix(DEMO_PRENOMS); cle = nom + "|" + prenom;
+    } while (prisNom.has(cle));
+    prisNom.add(cle);
+    // Recrutement en accélération : peu au départ, beaucoup ces derniers mois.
+    const createdAt = Math.round(DEBUT + Math.pow(r(), 0.5) * (maintenant - DEBUT - 2 * JOUR));
+    const [ville, cp, dep] = choix(DEMO_VILLES);
+    const horsImmo = chance(0.09);
+    const p = {
+      id: "demo-p-" + i, name: nom, firstName: prenom,
+      company: horsImmo ? "" : (chance(0.9) ? choix(catalogueReseaux) : ""),
+      email: `${prenom.toLowerCase().normalize("NFD").replace(/[^a-z]/g, "")}.${nom.toLowerCase().normalize("NFD").replace(/[^a-z]/g, "")}@exemple.fr`,
+      telephone: "06" + String(rnd(10000000, 99999999)),
+      siret: horsImmo ? "" : String(rnd(100000000, 899999999)) + "000" + rnd(10, 99),
+      ville, postalCode: cp, departement: dep,
+      commercial: chance(0.58) ? "Sébastien" : choix(commerciaux),
+      horsImmo, flatFee: horsImmo ? choix([150, 180, 200, 250, 300]) : undefined,
+      // Code d'accès tiré du même générateur que le reste : sans cela la
+      // démonstration ne serait pas rigoureusement identique d'une fois sur
+      // l'autre (genCode s'appuie sur Math.random).
+      active: chance(0.93), code: codeDemo(), createdAt,
+      contratAccepteLe: chance(0.91) ? createdAt + rnd(1, 6) * JOUR : null,
+      lastLoginAt: chance(0.72) ? maintenant - rnd(0, 40) * JOUR : null,
+      factures: [], parrainageVersements: [],
+    };
+    if (!p.horsImmo) delete p.flatFee;
+    partners.push(p);
+  }
+
+  // ── Parrainages ───────────────────────────────────────────────────────────
+  // Des filleuls rattachés à des parrains, et quelques parrains qui en ont
+  // présenté plusieurs : c'est ce qui rend la mécanique lisible en démo.
+  const parrainages = [];
+  const anciens = partners.filter(p => maintenant - p.createdAt > 150 * JOUR);
+  const parrains = [];
+  for (let k = 0; k < 34 && k < anciens.length; k++) {
+    const cand = anciens[Math.floor(r() * anciens.length)];
+    if (!parrains.includes(cand)) parrains.push(cand);
+  }
+  const dejaFilleul = new Set();
+  for (const parrain of parrains) {
+    const combien = pondere([[1, 55], [2, 25], [3, 12], [4, 5], [6, 3]]);
+    for (let k = 0; k < combien; k++) {
+      const cand = partners.find(x => x.createdAt > parrain.createdAt + 20 * JOUR && !x.parrainId && !dejaFilleul.has(x.id) && x.id !== parrain.id);
+      if (!cand) continue;
+      dejaFilleul.add(cand.id);
+      cand.parrainId = parrain.id;
+      cand.issuDuParrainage = true;
+      parrainages.push({
+        id: "demo-pa-" + parrainages.length, parrainId: parrain.id,
+        nom: cand.name, prenom: cand.firstName, telephone: cand.telephone,
+        email: cand.email, reseau: cand.company, siret: cand.siret,
+        at: cand.createdAt - rnd(2, 10) * JOUR, statut: "valide", motif: "",
+      });
+    }
+  }
+  // Déclarations encore à traiter et refus : la file d'attente de l'accueil
+  // doit montrer quelque chose.
+  for (let k = 0; k < 4; k++) {
+    const parrain = choix(parrains);
+    parrainages.push({
+      id: "demo-pa-att-" + k, parrainId: parrain.id,
+      nom: choix(DEMO_NOMS), prenom: choix(DEMO_PRENOMS),
+      telephone: "06" + String(rnd(10000000, 99999999)),
+      email: "contact@exemple.fr", reseau: choix(catalogueReseaux), siret: "",
+      at: maintenant - rnd(1, 9) * JOUR, statut: "en_attente", motif: "",
+    });
+  }
+  for (let k = 0; k < 2; k++) {
+    const parrain = choix(parrains);
+    parrainages.push({
+      id: "demo-pa-ref-" + k, parrainId: parrain.id,
+      nom: choix(DEMO_NOMS), prenom: choix(DEMO_PRENOMS),
+      telephone: "", email: "", reseau: "", siret: "",
+      at: maintenant - rnd(20, 90) * JOUR, statut: "refuse",
+      motif: "Déjà partenaire chez nous.",
+    });
+  }
+
+  // ── Dossiers ──────────────────────────────────────────────────────────────
+  const dossiers = [];
+  for (const p of partners) {
+    const anciennete = (maintenant - p.createdAt) / MOIS;
+    const profil = pondere([["dormant", 46], ["occasionnel", 28], ["regulier", 19], ["top", 7]]);
+    const cadence = { dormant: 0, occasionnel: 0.32, regulier: 0.95, top: 2.1 }[profil];
+    const combien = Math.round(anciennete * cadence * (0.55 + r() * 0.95));
+    for (let k = 0; k < combien; k++) {
+      const createdAt = Math.round(p.createdAt + (0.05 + r() * 0.95) * (maintenant - p.createdAt));
+      const age = (maintenant - createdAt) / JOUR;
+      // Le statut suit l'âge du dossier : un dépôt d'hier n'est pas payé.
+      let status;
+      if (age < 4) status = pondere([["Déposé", 70], ["En vérification", 30]]);
+      else if (age < 12) status = pondere([["En vérification", 30], ["Devis en cours", 45], ["KO", 12], ["Souscrit", 13]]);
+      else if (age < 30) status = pondere([["Devis en cours", 20], ["Souscrit", 40], ["Bordereau émis", 18], ["KO", 17], ["Payé", 5]]);
+      else if (age < 75) status = pondere([["Souscrit", 18], ["Bordereau émis", 22], ["Payé", 43], ["KO", 17]]);
+      else status = pondere([["Payé", 79], ["KO", 16], ["Bordereau émis", 5]]);
+
+      const caAmount = choix([290, 350, 390, 420, 450, 490, 520, 560, 590, 640, 690, 750, 820, 890, 950, 1100, 1250]) + rnd(0, 9);
+      const tauxRetro = p.horsImmo ? null : choix([0.30, 0.30, 0.30, 0.35, 0.35, 0.40]);
+      const commissionAmount = p.horsImmo ? (p.flatFee || 200) : Math.round(caAmount * tauxRetro * 100) / 100;
+
+      const d = {
+        id: "demo-d-" + dossiers.length, partnerId: p.id,
+        clientFirstName: choix(DEMO_PRENOMS), clientLastName: choix(DEMO_NOMS),
+        clientPhone: "06" + String(rnd(10000000, 99999999)),
+        status, createdAt, updatedAt: createdAt + rnd(1, 20) * JOUR,
+        clientInformeLe: createdAt,
+        hasCoEmprunteur: chance(0.38),
+        coClientLastName: "", coClientFirstName: "", coClientPhone: "",
+        docs: {}, bordereau: null, notes: "",
+        history: [{ status: "Déposé", at: createdAt }],
+        caAmount, commissionAmount,
+      };
+      if (d.hasCoEmprunteur) {
+        d.coClientLastName = d.clientLastName;
+        d.coClientFirstName = choix(DEMO_PRENOMS);
+        d.coClientPhone = "06" + String(rnd(10000000, 99999999));
+      }
+      if (status === "KO") {
+        d.koReason = choix(DEMO_KO);
+        d.caAmount = 0; d.commissionAmount = 0;
+      } else if (["Souscrit", "Bordereau émis", "Payé"].includes(status)) {
+        // Contrat vivant : date d'effet, assureur, cotisation et récurrence.
+        d.dateEffet = jourIso(createdAt + rnd(22, 55) * JOUR);
+        d.assureur = pondere(listeAssureurs.map((n, i) => [n, [46, 31, 23][i] ?? 15]));
+        d.cotisationMensuelle = choix([21.4, 26.9, 31.5, 34.8, 38.2, 42.6, 47.9, 52.3, 58.7, 64.1, 71.5, 82.4]);
+        // Deux régimes de commission assureur : linéaire ou dégressif.
+        if (chance(0.62)) { d.tauxCommissionAssureur = 30; d.tauxCommissionSuivantes = 30; }
+        else { d.tauxCommissionAssureur = 50; d.tauxCommissionSuivantes = 10; }
+        // Mode de règlement des honoraires : direct, collecte en une fois,
+        // ou lissé sur plusieurs mois par l'assureur.
+        const mode = pondere([["direct", 12], ["assureur", 88]]);
+        d.modeReglement = mode;
+        d.nombreEcheances = mode === "direct" ? 1 : pondere([[1, 30], [2, 8], [3, 14], [4, 6], [6, 14], [10, 6], [12, 22]]);
+        d.echeances = genererEcheancier(d);
+        // On encaisse ce qui est échu, avec quelques retards.
+        for (const e of d.echeances) {
+          if (!e.datePrevue) continue;
+          const prevu = new Date(e.datePrevue + "T12:00:00").getTime();
+          if (prevu <= maintenant) {
+            if (chance(0.9)) e.encaisseLe = jourIso(Math.min(maintenant, prevu + rnd(0, 6) * JOUR));
+          }
+        }
+        // Le statut se DÉDUIT de l'échéancier, il n'est pas tiré à part :
+        // sinon on afficherait « Payé » sur un dossier encaissé 4 fois sur 12,
+        // et c'est exactement le genre de détail qu'un partenaire remarque.
+        const recus = d.echeances.filter(e => e.encaisseLe);
+        if (recus.length > 0 && recus.length === d.echeances.length) {
+          d.status = "Payé";
+          d.paymentMethod = chance(0.93) ? "Virement" : "Carte cadeau";
+          d.paymentDate = recus.map(e => e.encaisseLe).sort().slice(-1)[0];
+        } else if (recus.length > 0) {
+          d.status = "Bordereau émis";
+          d.paymentMethod = "Virement";
+        } else {
+          d.status = "Souscrit";
+        }
+        d.history.push({ status: d.status, at: d.updatedAt });
+      }
+      dossiers.push(d);
+    }
+  }
+
+  // ── Rétrocessions de parrainage déjà versées ──────────────────────────────
+  for (const parrain of parrains) {
+    if (chance(0.45)) {
+      parrain.parrainageVersements = [{
+        id: "demo-v-" + parrain.id, at: maintenant - rnd(10, 120) * JOUR,
+        montant: Math.round((20 + r() * 180) * 100) / 100, note: "Virement",
+      }];
+    }
+  }
+
+  // ── Factures des partenaires hors immobilier ──────────────────────────────
+  for (const p of partners.filter(x => x.horsImmo)) {
+    const n = rnd(0, 3);
+    for (let k = 0; k < n; k++) {
+      p.factures.push({
+        id: "demo-f-" + p.id + "-" + k,
+        at: maintenant - rnd(3, 250) * JOUR,
+        statut: chance(0.65) ? "Réglée" : "Déposée",
+        motif: "", montant: p.flatFee || 200,
+      });
+    }
+  }
+
+  // ── Journal d'activité ────────────────────────────────────────────────────
+  const activityLog = [];
+  const recents = [...dossiers].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 80);
+  for (const d of recents) {
+    const p = partners.find(x => x.id === d.partnerId);
+    activityLog.push({
+      id: "demo-l-" + activityLog.length, at: d.updatedAt,
+      actor: p?.commercial || "Sébastien",
+      message: `a changé le statut de ${d.clientLastName} ${d.clientFirstName} → ${d.status}`,
+    });
+  }
+
+  return {
+    ...(base || {}),
+    partners, dossiers, parrainages, mandataires,
+    activityLog: activityLog.sort((a, b) => b.at - a.at).slice(0, 300),
+    reseaux: base?.reseaux || [],
+    settings: {
+      ...(base?.settings || {}),
+      // Objectifs calés pour que les jauges du Challenge racontent un mois
+      // en cours bien engagé, sans être absurdement dépassées.
+      challenge: { partenaires: 42, dossiers: 55, ca: 24000, recurrence: 900 },
+    },
+    rev: 0,
+    _demo: true,
+  };
+}
+
 const PARRAINAGE_TAUX = 0.10;
 
 function filleulsDe(partnerId) {
@@ -924,6 +1218,28 @@ export default function App() {
   const [loadError, setLoadError] = useState(false);
   useEffect(() => { if (data) setColorDataRef(data); }, [data]);
 
+  // ── Mode démonstration ────────────────────────────────────────────────────
+  // Les vraies données sont mises de côté et remplacées par le jeu fictif.
+  // Rien n'est écrit dans Supabase tant que le mode est actif : on peut cliquer
+  // partout pendant la présentation, tout revient en sortant.
+  const [modeDemo, setModeDemo] = useState(false);
+  const demoRef = useRef(false);
+  const donneesReellesRef = useRef(null);
+  function basculerDemo() {
+    if (!demoRef.current) {
+      if (!data) return;
+      donneesReellesRef.current = data;
+      demoRef.current = true;
+      setModeDemo(true);
+      setData(genererJeuDemo(data));
+    } else {
+      demoRef.current = false;
+      setModeDemo(false);
+      setData(donneesReellesRef.current);
+      donneesReellesRef.current = null;
+    }
+  }
+
   // ==========================================================================
   // DÉMARRAGE — l'authentification d'abord, les données ensuite
   //
@@ -1044,7 +1360,24 @@ export default function App() {
   // Écrit en repartant TOUJOURS de l'état réellement stocké, jamais de la copie
   // chargée au démarrage — sinon deux personnes connectées en même temps
   // s'écrasent mutuellement (partenaire disparu, Authenticator réinitialisé).
+  // En démonstration, aucun fichier ne part non plus vers Supabase : sans ce
+  // garde-fou, un dépôt de pièce fait pendant la présentation laisserait une
+  // ligne orpheline dans la vraie base.
+  async function ecrireFichier(key, contenu) {
+    if (demoRef.current) return;
+    await storage.set(key, contenu, true);
+  }
+
   async function mutateData(mutator) {
+    // En démonstration, toute modification reste en mémoire. C'est la vraie
+    // protection : même si l'oubli du mode survient, la base réelle est
+    // intouchable, et l'on peut manipuler l'outil devant le partenaire.
+    if (demoRef.current) {
+      const next = mutator(data);
+      if (!next) return false;
+      setData({ ...next, rev: (data?.rev ?? 0) + 1 });
+      return true;
+    }
     let base = data;
     try {
       const res = await storage.get("adp:data", true);
@@ -1117,12 +1450,12 @@ export default function App() {
       const existant = await storage.list("adp:backup:", true);
       const cles = (existant?.keys || []).sort();
       if (cles.includes("adp:backup:" + jour)) return;
-      await storage.set("adp:backup:" + jour, JSON.stringify({
+      await ecrireFichier("adp:backup:" + jour, JSON.stringify({
         at: Date.now(),
         partenaires: donnees.partners?.length || 0,
         dossiers: donnees.dossiers?.length || 0,
         data: donnees,
-      }), true);
+      }));
       const apres = [...cles, "adp:backup:" + jour].sort();
       for (const vieille of apres.slice(0, Math.max(0, apres.length - 7))) {
         try { await storage.delete(vieille, true); } catch (e) { /* ignore */ }
@@ -1285,7 +1618,7 @@ export default function App() {
     try {
       const b64 = await fileToBase64(file);
       const key = "adp:file:" + uid();
-      await storage.set(key, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      await ecrireFichier(key, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
       return await mutateData(base => ({
         ...base,
         settings: { ...base.settings, contratType: { name: file.name, key, at: Date.now() } },
@@ -1299,7 +1632,7 @@ export default function App() {
     try {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
-      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
       await mutateData(base => ({
         ...base,
         partners: base.partners.map(p => p.id === partnerId
@@ -1317,7 +1650,7 @@ export default function App() {
     try {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
-      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
       const facture = {
         id: uid(), name: file.name, key: fileKey, size: file.size,
         at: Date.now(), statut: "Déposée", motif: "",
@@ -1347,7 +1680,7 @@ export default function App() {
         if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
         const b64 = await fileToBase64(file);
         const key = "adp:file:" + uid();
-        await storage.set(key, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+        await ecrireFichier(key, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
         ordre = { name: file.name, key, size: file.size };
       }
       const versement = { id: uid(), cle, libelle: libelle || cle, montant: Number(montant) || 0, dateVirement, ordre, mode: mode || "Virement", at: Date.now() };
@@ -1401,7 +1734,7 @@ export default function App() {
     try {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
-      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
       await mutateData(base => ({
         ...base,
         partners: base.partners.map(p => p.id === partnerId
@@ -1467,7 +1800,7 @@ export default function App() {
         if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo — compresse le PDF avant de le déposer.`); setBusy(false); return false; }
         const b64 = await fileToBase64(file);
         const fileKey = "adp:file:" + uid();
-        await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+        await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
         docs[key] = { name: file.name, key: fileKey, size: file.size };
       }
       const dossier = {
@@ -1589,7 +1922,7 @@ export default function App() {
     try {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
-      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
       await mutateData(base => ({
         ...base,
         dossiers: base.dossiers.map(d => d.id === dossierId
@@ -1643,7 +1976,7 @@ export default function App() {
     try {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
-      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
       const newDoc = { label: label || file.name, name: file.name, key: fileKey, size: file.size, addedAt: Date.now() };
       await mutateData(base => ({
         ...base,
@@ -1659,7 +1992,7 @@ export default function App() {
     try {
       const b64 = await fileToBase64(file);
       const fileKey = "adp:file:" + uid();
-      await storage.set(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+      await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
       await mutateData(base => ({
         ...base,
         dossiers: base.dossiers.map(d => d.id === dossierId
@@ -1829,6 +2162,8 @@ export default function App() {
         return (
         <AdminDashboard
           data={data}
+          modeDemo={modeDemo}
+          onBasculerDemo={basculerDemo}
           currentAdmin={currentAdmin}
           isFullAdmin={true}
           viewerLabel={currentMandataire.firstName || currentMandataire.name}
@@ -1878,6 +2213,8 @@ export default function App() {
       {view === "adminDash" && (
         <AdminDashboard
           data={data}
+          modeDemo={modeDemo}
+          onBasculerDemo={basculerDemo}
           currentAdmin={currentAdmin}
           isFullAdmin={true}
           viewerLabel="Sébastien"
@@ -6729,7 +7066,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onSetChallengePartenaires, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onSetChallengePartenaires, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -7205,6 +7542,16 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                     title={discret ? "Réafficher les chiffres" : "Mode discret : masquer chiffres et noms le temps d'une démonstration"}
                     className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${discret ? "bg-amber-100 border-amber-300 text-amber-900" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
                     {discret ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                  <button onClick={() => {
+                      // Le mode discret masquerait aussi les chiffres fictifs,
+                      // ce qui viderait la démonstration de son intérêt.
+                      if (!modeDemo && discret) basculerDiscret();
+                      onBasculerDemo();
+                    }}
+                    title={modeDemo ? "Quitter la démonstration et retrouver mes vraies données" : "Mode démonstration : cabinet fictif complet, aucune écriture réelle"}
+                    className={`flex items-center text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${modeDemo ? "bg-violet-600 text-white border-transparent" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
+                    <Sparkles size={15} />
                   </button>
                   <button onClick={() => setReorganiser(r => !r)}
                     title="Réorganiser mes onglets"
