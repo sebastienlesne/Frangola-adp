@@ -425,40 +425,62 @@ function mesDeclarations(partnerId) {
 }
 
 // Ne bloque jamais : signale, l'arbitrage reste humain.
+// Comparaison insensible à la casse, aux accents et à la ponctuation :
+// « Léa GOMEZ » et « lea gomez » sont la même personne, « Century 21 » et
+// « century-21 » le même réseau. Sans ça, la moitié des doublons passe entre
+// les mailles.
+function cleComparaison(t) {
+  return (t || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function detecterDoublon(decl) {
-  if (!_colorDataRef) return { niveau: null, messages: [] };
+  if (!_colorDataRef) return { niveau: null, messages: [], partenaires: [] };
   const messages = [];
+  const partenaires = [];
   let niveau = null;
+  const monter = (n) => { if (n === "rouge" || niveau !== "rouge") niveau = n; };
   const siret = (decl.siret || "").replace(/\D/g, "");
   const tel = normaliseTel(decl.telephone);
-  const nom = (decl.nom || "").trim().toLowerCase();
-  const reseau = (decl.reseau || "").trim().toLowerCase();
+  const email = cleComparaison(decl.email);
+  const nom = cleComparaison(decl.nom);
+  const prenom = cleComparaison(decl.prenom);
+  const reseau = cleComparaison(decl.reseau);
 
   for (const p of _colorDataRef.partners || []) {
     const memeSiret = siret && (p.siret || "").replace(/\D/g, "") === siret;
     const memeTel = tel && normaliseTel(p.telephone || p.phone) === tel;
-    const nomP = (p.name || "").trim().toLowerCase();
-    const reseauP = (p.company || "").trim().toLowerCase();
-    const etiquette = `${p.firstName || ""} ${(p.name || "").toUpperCase()}`.trim();
+    const memeEmail = email && cleComparaison(p.email) === email;
+    const nomP = cleComparaison(p.name);
+    const prenomP = cleComparaison(p.firstName);
+    const reseauP = cleComparaison(p.company);
+    const memeIdentite = nom && nomP === nom && prenom && prenomP === prenom;
+    const memeNomReseau = nom && nomP === nom && reseau && reseauP === reseau;
     const etat = p.deleted ? " (supprimé)" : (p.active === false ? " (inactif)" : "");
-    if (memeSiret) {
-      niveau = "rouge";
-      messages.push(`SIRET identique à ${etiquette}${etat}, inscrit le ${fmtDate(p.createdAt)}.`);
-    } else if (memeTel) {
-      niveau = "rouge";
-      messages.push(`Téléphone identique à ${etiquette}${etat}, inscrit le ${fmtDate(p.createdAt)}.`);
-    } else if (nom && nomP === nom && reseau && reseauP === reseau) {
-      if (niveau !== "rouge") niveau = "orange";
-      messages.push(`Même nom et même réseau que ${etiquette}${etat}.`);
+    const depuis = `inscrit le ${fmtDate(p.createdAt)}`;
+    let motif = null;
+    // Du signal le plus sûr au plus faible : un SIRET ne se partage pas, un
+    // homonyme est fréquent.
+    if (memeSiret) { monter("rouge"); motif = `SIRET identique${etat} — ${depuis}`; }
+    else if (memeEmail) { monter("rouge"); motif = `adresse email identique${etat} — ${depuis}`; }
+    else if (memeTel) { monter("rouge"); motif = `téléphone identique${etat} — ${depuis}`; }
+    else if (memeIdentite) { monter("orange"); motif = `même nom et même prénom${etat} — ${depuis}`; }
+    else if (memeNomReseau) { monter("orange"); motif = `même nom et même réseau${etat} — ${depuis}`; }
+    if (motif) {
+      partenaires.push({ p, motif });
+      messages.push(`${nomPartenaire(p)} : ${motif}.`);
     }
   }
 
+  let dejaPresente = false;
   for (const d of _colorDataRef.parrainages || []) {
     if (d.id === decl.id || d.statut === "refuse") continue;
     const memeSiret = siret && (d.siret || "").replace(/\D/g, "") === siret;
     const memeTel = tel && normaliseTel(d.telephone) === tel;
     if ((memeSiret || memeTel) && d.at < decl.at) {
       niveau = "rouge";
+      dejaPresente = true;
       messages.push(`Déjà présenté par un autre partenaire le ${fmtDate(d.at)}.`);
     }
   }
@@ -468,7 +490,15 @@ function detecterDoublon(decl) {
     messages.push("Le numéro SIRET saisi est mal formé — à vérifier.");
   }
 
-  return { niveau, messages };
+  // Les alertes qui ne désignent aucune fiche existante (double déclaration,
+  // SIRET mal formé) sont listées à part : elles n'ont pas de lien à offrir.
+  const messagesAutres = messages.slice(partenaires.length);
+  // `doublon` ne retient que ce qui met en cause l'existence du filleul. Un
+  // SIRET mal saisi mérite un coup d'œil, mais ce n'est pas un doublon : le
+  // confondre avec un vrai conflit reviendrait à noyer l'alerte utile au
+  // milieu de fautes de frappe.
+  const doublon = partenaires.length > 0 || dejaPresente;
+  return { niveau, doublon, messages, messagesAutres, partenaires };
 }
 // =============================================================================
 // ÉCHÉANCIER D'ENCAISSEMENT
@@ -1608,6 +1638,38 @@ export default function App() {
 
   // Valider une déclaration crée directement la fiche du filleul, déjà
   // rattachée à son parrain : il ne reste qu'à compléter ce qui manque.
+  // Validation en lot. Une écriture unique plutôt que N appels successifs :
+  // à cinquante déclarations, N relectures-réécritures seraient lentes et
+  // s'écraseraient les unes les autres.
+  async function traiterParrainagesEnLot(ids) {
+    const aTraiter = new Set(ids || []);
+    if (aTraiter.size === 0) return;
+    await mutateData(base => {
+      const nouveaux = [];
+      const maj = (base.parrainages || []).map(d => {
+        if (!aTraiter.has(d.id) || d.statut !== "en_attente") return d;
+        if (d.partnerId) return { ...d, statut: "valide", motif: "", traiteAt: Date.now() };
+        const parrain = base.partners.find(p => p.id === d.parrainId);
+        const nouveau = {
+          id: uid(),
+          name: d.nom || "", firstName: d.prenom || "", company: d.reseau || "",
+          telephone: d.telephone || "", siret: d.siret || "", email: d.email || "",
+          ville: "", postalCode: "", departement: "",
+          commercial: parrain?.commercial || "Sébastien",
+          parrainId: d.parrainId || null, issuDuParrainage: true,
+          active: true, code: genCode(), createdAt: Date.now(),
+        };
+        nouveaux.push(nouveau);
+        return { ...d, statut: "valide", motif: "", traiteAt: Date.now(), partnerId: nouveau.id };
+      });
+      return withLog({
+        ...base,
+        partners: [...base.partners, ...nouveaux],
+        parrainages: maj,
+      }, `a validé ${nouveaux.length} parrainage${nouveaux.length > 1 ? "s" : ""} en une fois`);
+    });
+  }
+
   async function traiterParrainage(id, statut, motif) {
     await mutateData(base => {
       const decl = (base.parrainages || []).find(p => p.id === id);
@@ -2359,6 +2421,7 @@ export default function App() {
           onSetAssureurs={setAssureurs}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
+                    onTraiterParrainagesEnLot={traiterParrainagesEnLot}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
           onVirementPartenaire={enregistrerVirementPartenaire}
@@ -2413,6 +2476,7 @@ export default function App() {
           onSetAssureurs={setAssureurs}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
+                    onTraiterParrainagesEnLot={traiterParrainagesEnLot}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
           onVirementPartenaire={enregistrerVirementPartenaire}
@@ -4624,12 +4688,28 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function RegistreParrainages({ data, onTraiter }) {
+function RegistreParrainages({ data, onTraiter, onTraiterEnLot, busy }) {
   const [refusId, setRefusId] = useState(null);
   const [motif, setMotif] = useState(MOTIFS_REFUS[0]);
   const [motifLibre, setMotifLibre] = useState("");
+  const [filtre, setFiltre] = useState("tous");
+  const [confirmeLot, setConfirmeLot] = useState(false);
   const decls = (data.parrainages || []).slice().sort((a, b) => b.at - a.at);
-  const attente = decls.filter(d => d.statut === "en_attente");
+  const enAttenteBrut = decls.filter(d => d.statut === "en_attente");
+
+  // L'analyse est faite une fois pour toutes, puis on trie : à cinquante
+  // déclarations, l'enjeu n'est plus de détecter mais de séparer ce qui se
+  // valide d'un clic de ce qui demande un arbitrage.
+  const analysees = enAttenteBrut.map(d => ({ d, alerte: detecterDoublon(d) }));
+  const suspectes = analysees.filter(x => x.alerte.doublon);
+  const propres = analysees.filter(x => !x.alerte.doublon);
+  const rang = { rouge: 0, orange: 1 };
+  const attente = (filtre === "propres" ? propres
+    : filtre === "suspectes" ? suspectes
+    : [...suspectes, ...propres])
+    .slice()
+    .sort((a, b) => (rang[a.alerte.niveau] ?? 2) - (rang[b.alerte.niveau] ?? 2))
+    .map(x => x.d);
   const traitees = decls.filter(d => d.statut !== "en_attente").slice(0, 10);
 
   const nomParrainDe = (id) => {
@@ -4651,9 +4731,51 @@ function RegistreParrainages({ data, onTraiter }) {
         🤝 Déclarations de parrainage
         {attente.length > 0 && <span className="ml-2 fa-bg-gold fa-navy text-xs font-bold px-2 py-0.5 rounded-full">{attente.length} en attente</span>}
       </div>
-      <p className="text-sm text-gray-500 mb-4">Vérifiez les alertes puis validez ou refusez. Rien n'est rattaché sans votre accord.</p>
+      <p className="text-sm text-gray-500 mb-3">
+        Chaque déclaration est confrontée aux fiches existantes sur le nom, le prénom, le SIRET,
+        le téléphone et l'email. Rien n'est rattaché sans votre accord.
+      </p>
 
-      {attente.length === 0 && <div className="text-sm text-gray-400 mb-3">Aucune déclaration en attente.</div>}
+      {enAttenteBrut.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          {[["tous", `Tout (${enAttenteBrut.length})`],
+            ["suspectes", `Doublons possibles (${suspectes.length})`],
+            ["propres", `Sans doublon (${propres.length})`]].map(([v, label]) => (
+            <button key={v} onClick={() => setFiltre(v)}
+              className={`text-xs font-medium px-3 py-1.5 rounded-full transition ${
+                filtre === v ? "fa-bg-teal text-white"
+                : v === "suspectes" && suspectes.length > 0 ? "bg-red-50 border border-red-200 text-red-800"
+                : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"}`}>
+              {label}
+            </button>
+          ))}
+          {/* Le travail de masse : les déclarations sans aucune correspondance
+              n'ont rien à arbitrer, elles se valident ensemble. */}
+          {propres.length > 1 && (
+            confirmeLot ? (
+              <span className="flex items-center gap-2 text-xs ml-auto">
+                <span className="fa-navy">Créer {propres.length} fiches partenaires d'un coup ?</span>
+                <button disabled={busy}
+                  onClick={() => { onTraiterEnLot(propres.map(x => x.d.id)); setConfirmeLot(false); }}
+                  className="font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg transition">
+                  {busy ? "En cours…" : "Oui, valider"}
+                </button>
+                <button onClick={() => setConfirmeLot(false)} className="text-gray-500 hover:underline">Annuler</button>
+              </span>
+            ) : (
+              <button onClick={() => setConfirmeLot(true)}
+                className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition ml-auto">
+                Valider les {propres.length} sans doublon
+              </button>
+            )
+          )}
+        </div>
+      )}
+
+      {enAttenteBrut.length === 0 && <div className="text-sm text-gray-400 mb-3">Aucune déclaration en attente.</div>}
+      {enAttenteBrut.length > 0 && attente.length === 0 && (
+        <div className="text-sm text-gray-400 mb-3">Rien dans cette catégorie.</div>
+      )}
 
       <div className="space-y-3">
         {attente.map(d => {
@@ -4671,10 +4793,26 @@ function RegistreParrainages({ data, onTraiter }) {
                 {d.telephone} {d.reseau && `· ${d.reseau}`} · SIRET {d.siret}
               </div>
 
-              {alerte.messages.length > 0 && (
-                <div className={`text-xs mb-2.5 space-y-0.5 ${alerte.niveau === "rouge" ? "text-red-800" : "text-amber-800"}`}>
-                  {alerte.messages.map((m, i) => <div key={i}>⚠ {m}</div>)}
+              {/* Chaque correspondance renvoie vers la fiche concernée : sans
+                  ça, il faudrait aller la chercher à la main pour trancher. */}
+              {alerte.partenaires.length > 0 && (
+                <div className={`text-xs mb-2.5 space-y-1 ${alerte.niveau === "rouge" ? "text-red-800" : "text-amber-800"}`}>
+                  {alerte.partenaires.map(({ p, motif }) => (
+                    <div key={p.id} className="flex items-baseline gap-1.5 flex-wrap">
+                      <span>⚠</span>
+                      <LienPartenaire p={p} className="font-bold underline decoration-dotted" />
+                      <span>— {motif}</span>
+                    </div>
+                  ))}
                 </div>
+              )}
+              {alerte.messagesAutres?.length > 0 && (
+                <div className={`text-xs mb-2.5 space-y-0.5 ${alerte.niveau === "rouge" ? "text-red-800" : "text-amber-800"}`}>
+                  {alerte.messagesAutres.map((m, i) => <div key={i}>⚠ {m}</div>)}
+                </div>
+              )}
+              {alerte.partenaires.length === 0 && alerte.messages.length === 0 && (
+                <div className="text-xs text-emerald-700 mb-2.5">✓ Aucun doublon détecté sur le nom, le prénom, le SIRET, le téléphone ni l'email.</div>
               )}
 
               {refusId === d.id ? (
@@ -8448,7 +8586,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -9846,7 +9984,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
         {tab === "partenaires" && (
           <div>
-                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} />
+                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} busy={busy} />
 
             <ContratTypePanel contrat={data.settings?.contratType} partners={data.partners}
               onUpload={onUploadContratType} canEdit={isFullAdmin} busy={busy} />
