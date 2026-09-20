@@ -4330,23 +4330,43 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
               € / mois
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
-              Commission
+              Commission 1<sup>re</sup> année
               <input type="number" min="0" max="100" step="1" value={dossier.tauxCommissionAssureur ?? ""}
                 onChange={e => onUpdate(dossier.id, { tauxCommissionAssureur: e.target.value === "" ? null : Number(e.target.value) })}
                 placeholder="%" className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-16 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
               % HT
+            </label>
+            <label className="text-xs text-gray-600 flex items-center gap-1.5">
+              puis années suivantes
+              <input type="number" min="0" max="100" step="1" value={dossier.tauxCommissionSuivantes ?? ""}
+                onChange={e => onUpdate(dossier.id, { tauxCommissionSuivantes: e.target.value === "" ? null : Number(e.target.value) })}
+                placeholder="idem" className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-16 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              % HT
+              {tauxAnnee1(dossier) > 0 && (
+                <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${baremeDegressif(dossier) ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
+                  {libelleBareme(dossier)}
+                </span>
+              )}
             </label>
           </div>
 
           {mensuelle > 0 && (
             <div className="text-xs text-gray-600">
               Soit <strong className="fa-navy">{fmtEuroPrecis(mensuelle)} par mois</strong>
+              {baremeDegressif(dossier) && (
+                <span className="text-amber-800">
+                  {" "}la première année, puis <strong>{fmtEuroPrecis(recurrenceCroisiere(dossier))}</strong> ensuite
+                </span>
+              )}
               <span className="text-gray-500"> — dont {fmtEuroPrecis(mensuelle * PART_MANDATAIRE)} pour le mandataire
               et {fmtEuroPrecis(mensuelle * (1 - PART_MANDATAIRE))} pour Frangola</span>
               {dossier.dateEffet
                 ? <> à partir du {fmtDate(new Date(dossier.dateEffet + "T12:00:00").getTime())} —
                     <strong className="fa-navy"> {fmtEuroPrecis(cumul)}</strong> perçus à ce jour sur {mois} mensualité{mois > 1 ? "s" : ""},
-                    et <strong className="fa-navy">{fmtEuroPrecis(mensuelle * 12)}</strong> par an tant que le contrat vit.</>
+                    et <strong className="fa-navy">{fmtEuroPrecis(tauxAnnee1(dossier) * (Number(dossier.cotisationMensuelle) || 0) / 100 * 12)}</strong> sur la première année
+                    {baremeDegressif(dossier)
+                      ? <>, puis <strong className="fa-navy">{fmtEuroPrecis(recurrenceCroisiere(dossier) * 12)}</strong> par an ensuite.</>
+                      : <> et autant les suivantes.</>}</>
                 : <span className="text-amber-700"> — renseignez la date d'effet dans l'échéancier pour lancer le compteur.</span>}
             </div>
           )}
@@ -4573,11 +4593,49 @@ function assureurParNom(data, nom) {
   return listeAssureurs(data).find(a => a.nom === nom) || null;
 }
 
-function recurrenceMensuelle(dossier) {
+// Deux barèmes existent chez les compagnies :
+//   — linéaire : le même taux toute la vie du contrat (30/30) ;
+//   — dégressif : un taux gonflé la première année, plus bas ensuite (50/10).
+// Confondre les deux surestime les revenus dès la treizième mensualité, et
+// d'autant plus que le portefeuille vieillit. Le second taux vaut le premier
+// par défaut, ce qui rend les anciens dossiers linéaires sans rien casser.
+const DUREE_TAUX_INITIAL = 12; // mensualités au taux de première année
+
+function tauxAnnee1(dossier) {
+  return Number(dossier?.tauxCommissionAssureur) || 0;
+}
+function tauxAnneesSuivantes(dossier) {
+  const t = dossier?.tauxCommissionSuivantes;
+  return (t === null || t === undefined || t === "") ? tauxAnnee1(dossier) : (Number(t) || 0);
+}
+function baremeDegressif(dossier) {
+  return tauxAnneesSuivantes(dossier) !== tauxAnnee1(dossier);
+}
+function libelleBareme(dossier) {
+  const a = tauxAnnee1(dossier), b = tauxAnneesSuivantes(dossier);
+  if (!a) return "";
+  return `${a}/${b}`;
+}
+
+// Montant d'une mensualité donnée, la première portant le numéro 1.
+function montantMensualite(dossier, numero) {
   const cotisation = Number(dossier?.cotisationMensuelle) || 0;
-  const taux = Number(dossier?.tauxCommissionAssureur) || 0;
-  if (cotisation <= 0 || taux <= 0) return 0;
+  if (cotisation <= 0) return 0;
+  const taux = numero <= DUREE_TAUX_INITIAL ? tauxAnnee1(dossier) : tauxAnneesSuivantes(dossier);
   return (cotisation * taux) / 100;
+}
+
+// Ce que rapporte le contrat CE MOIS-CI, au taux qui s'applique aujourd'hui.
+function recurrenceMensuelle(dossier) {
+  const n = mensualitesEcoulees(dossier);
+  return montantMensualite(dossier, Math.max(1, n + (n === 0 ? 1 : 0)));
+}
+
+// Ce qu'il rapportera une fois la première année passée — le régime de
+// croisière. C'est lui qu'il faut regarder pour se projeter.
+function recurrenceCroisiere(dossier) {
+  const cotisation = Number(dossier?.cotisationMensuelle) || 0;
+  return (cotisation * tauxAnneesSuivantes(dossier)) / 100;
 }
 
 // Le contrat produit-il encore aujourd'hui ?
@@ -4603,7 +4661,31 @@ function mensualitesEcoulees(dossier) {
 
 function recurrenceCumulee(dossier) {
   if (!STATUTS_CONTRAT_VIVANT.includes(dossier?.status)) return 0;
-  return recurrenceMensuelle(dossier) * mensualitesEcoulees(dossier);
+  const n = mensualitesEcoulees(dossier);
+  if (n <= 0) return 0;
+  const cotisation = Number(dossier?.cotisationMensuelle) || 0;
+  if (cotisation <= 0) return 0;
+  const an1 = Math.min(n, DUREE_TAUX_INITIAL);
+  const apres = Math.max(0, n - DUREE_TAUX_INITIAL);
+  return (cotisation * tauxAnnee1(dossier) / 100) * an1
+       + (cotisation * tauxAnneesSuivantes(dossier) / 100) * apres;
+}
+
+// Revenu récurrent du portefeuille à une échéance future donnée, en tenant
+// compte du passage au taux réduit de chaque contrat à sa date anniversaire.
+function mrrDansNMois(dossiers, n) {
+  return (dossiers || []).filter(contratEnCours).reduce((s, d) => {
+    const numero = mensualitesEcoulees(d) + n;
+    return s + montantMensualite(d, Math.max(1, numero));
+  }, 0);
+}
+
+// Ce que rapportera le portefeuille actuel sur une année donnée, sans un
+// dossier de plus : année 1 = les douze prochains mois.
+function recurrenceAnnee(dossiers, annee) {
+  let total = 0;
+  for (let m = 1; m <= 12; m++) total += mrrDansNMois(dossiers, (annee - 1) * 12 + m);
+  return total;
 }
 
 // Revenu récurrent mensuel du cabinet : la somme des contrats qui courent.
@@ -5461,21 +5543,24 @@ function ProjectionCA({ data }) {
   // continue de rapporter longtemps après.
   const mrrActuel = recurrenceMensuelleTotale(data.dossiers);
   const avecRecurrence = gagnes.filter(d => recurrenceMensuelle(d) > 0);
+  // Pour les contrats à venir, c'est le taux de première année qui s'applique :
+  // sur un horizon de douze mois, aucun n'atteint son anniversaire.
   const recMoyenne = avecRecurrence.length > 0
-    ? avecRecurrence.reduce((s2, d) => s2 + recurrenceMensuelle(d), 0) / avecRecurrence.length
+    ? avecRecurrence.reduce((s2, d) => s2 + (Number(d.cotisationMensuelle) || 0) * tauxAnnee1(d) / 100, 0) / avecRecurrence.length
     : 0;
 
   const trajectoire = [];
   if (assezDeDonnees) {
-    let cumul = 0, cumulRec = 0, mrr = mrrActuel;
+    let cumul = 0, cumulRec = 0, apportNouveaux = 0;
     for (let m = 1; m <= 12; m++) {
       const vaguesActives = Math.max(0, m - delai);
       const nouveauxActifs = vaguesActives * recrutementUtilise * (activationUtilisee / 100);
       const dossiersMois = rythmeMensuel + nouveauxActifs * productivite;
       const caMois = dossiersMois * caParDossier;
-      // Les dossiers gagnés du mois grossissent le revenu récurrent des mois
-      // suivants — l'effet cumulatif est ici, pas dans les honoraires.
-      mrr += dossiersMois * (tauxTransfo || 0) * recMoyenne;
+      // Le portefeuille existant vieillit — certains contrats passent à leur
+      // taux réduit en cours de route — pendant que les nouveaux s'ajoutent.
+      apportNouveaux += dossiersMois * (tauxTransfo || 0) * recMoyenne;
+      const mrr = mrrDansNMois(data.dossiers, m) + apportNouveaux;
       cumul += caMois;
       cumulRec += mrr;
       const d = new Date(now.getFullYear(), now.getMonth() + m, 1);
@@ -5764,23 +5849,80 @@ function Vision360({ data }) {
                 commissions versées par l'assureur — non rétrocédées
               </span>
             </div>
-            <div className="grid sm:grid-cols-3 gap-3">
-              <div>
-                <div className="text-xs text-gray-500 mb-0.5">Tous les mois</div>
-                <div className="font-display text-xl font-bold text-violet-700">{fmtEuroPrecis(mrr)}</div>
-                <div className="text-[11px] text-gray-400">sur {contrats.length} contrat{contrats.length > 1 ? "s" : ""} en cours</div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-0.5">Déjà perçu</div>
-                <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(cumul)}</div>
-                <div className="text-[11px] text-gray-400">depuis la première date d'effet</div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-0.5">Sur 12 mois</div>
-                <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(mrr * 12)}</div>
-                <div className="text-[11px] text-gray-400">à périmètre constant</div>
-              </div>
-            </div>
+            {(() => {
+              // Le portefeuille vieillit : chaque contrat passe à son taux
+              // réduit à sa date anniversaire. Projeter en multipliant le
+              // mensuel actuel par douze surestimerait donc les années à venir.
+              const croisiere = contrats.reduce((s2, d) => s2 + recurrenceCroisiere(d), 0);
+              const degressifs = contrats.filter(baremeDegressif).length;
+              const annees = [1, 2, 3, 4, 5].map(a => ({ a, montant: recurrenceAnnee(data.dossiers, a) }));
+              let cumulGlissant = cumul;
+              const lignes = annees.map(x => { cumulGlissant += x.montant; return { ...x, cumul: cumulGlissant }; });
+              return (
+                <>
+                  <div className="grid sm:grid-cols-4 gap-3">
+                    <div>
+                      <div className="text-xs text-gray-500 mb-0.5">Ce mois-ci</div>
+                      <div className="font-display text-xl font-bold text-violet-700">{fmtEuroPrecis(mrr)}</div>
+                      <div className="text-[11px] text-gray-400">sur {contrats.length} contrat{contrats.length > 1 ? "s" : ""} en cours</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-500 mb-0.5">En régime de croisière</div>
+                      <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(croisiere)}</div>
+                      <div className="text-[11px] text-gray-400">
+                        {degressifs > 0 ? `après la 1re année des ${degressifs} contrat${degressifs > 1 ? "s" : ""} dégressif${degressifs > 1 ? "s" : ""}` : "barèmes linéaires"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-500 mb-0.5">Déjà perçu</div>
+                      <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(cumul)}</div>
+                      <div className="text-[11px] text-gray-400">depuis la première date d'effet</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-500 mb-0.5">12 prochains mois</div>
+                      <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(lignes[0].montant)}</div>
+                      <div className="text-[11px] text-gray-400">portefeuille actuel, sans nouveau dossier</div>
+                    </div>
+                  </div>
+
+                  {mrr > 0 && (
+                    <div className="mt-4 pt-3 border-t border-violet-200">
+                      <div className="text-xs font-semibold fa-navy mb-2">
+                        Ce que rapporte le portefeuille actuel, année après année
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="text-gray-400 text-left">
+                              <th className="font-medium py-1">Année</th>
+                              <th className="font-medium py-1 text-right">Récurrence</th>
+                              <th className="font-medium py-1 text-right">Dont mandataires</th>
+                              <th className="font-medium py-1 text-right">Dont Frangola</th>
+                              <th className="font-medium py-1 text-right">Cumul depuis le début</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {lignes.map(l => (
+                              <tr key={l.a} className={l.a % 2 === 0 ? "bg-white/50" : ""}>
+                                <td className="py-1 fa-navy">Année {l.a}</td>
+                                <td className="py-1 text-right text-violet-700 font-medium">{fmtEuro(l.montant)}</td>
+                                <td className="py-1 text-right text-gray-500">{fmtEuro(l.montant * PART_MANDATAIRE)}</td>
+                                <td className="py-1 text-right text-gray-500">{fmtEuro(l.montant * (1 - PART_MANDATAIRE))}</td>
+                                <td className="py-1 text-right fa-navy font-bold">{fmtEuro(l.cumul)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className="text-[11px] text-gray-400 mt-2">
+                        Aucun dossier nouveau n'est supposé : c'est ce que vous toucherez si vous arrêtez de
+                        produire demain. La baisse entre l'année 1 et l'année 2 vient des barèmes dégressifs.
+                      </p>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
             <div className="text-xs text-gray-600 mt-3 pt-3 border-t border-violet-200">
               Répartition mensuelle : <strong className="fa-navy">{fmtEuroPrecis(mrr * PART_MANDATAIRE)}</strong> pour les
               mandataires, <strong className="fa-navy">{fmtEuroPrecis(mrr * (1 - PART_MANDATAIRE))}</strong> pour Frangola.
