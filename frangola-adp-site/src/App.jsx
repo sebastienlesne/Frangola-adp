@@ -436,7 +436,7 @@ function forfaitsRetrocession(partner, dossiers) {
       const montant = (d.commissionAmount || 0) > 0 ? d.commissionAmount : forfaitPartenaire;
       const encaisse = partEncaissee(d, d.caAmount || 0);
       const cle = "d:" + d.id;
-      const versement = versements.find(v => v.cle === cle) || null;
+      const versement = versements.find(v => (v.cle ?? v.mois) === cle) || null;
       const couvert = montant > 0 && encaisse + 0.005 >= montant;
       return {
         dossier: d, cle, libelle: clientName(d), montant, encaisse, couvert, versement,
@@ -464,7 +464,10 @@ function calendrierRetrocession(partner, dossiers) {
     m.montant += l.montant; m.nb += 1; if (l.recu) m.recus += 1;
   }
   for (const m of mois) {
-    m.versement = versements.find(v => v.cle === m.cle) || null;
+    // Tolérance de lecture : les versements enregistrés avant le renommage
+    // portent `mois` au lieu de `cle`. Les ignorer ferait repasser au jaune des
+    // lignes déjà réglées, et l'ordre de virement deviendrait introuvable.
+    m.versement = versements.find(v => (v.cle ?? v.mois) === m.cle) || null;
     m.encaisse = m.nb > 0 && m.recus === m.nb;
     m.etat = m.versement ? "regle" : (m.encaisse ? "a_regler" : "a_venir");
   }
@@ -1237,7 +1240,7 @@ export default function App() {
       return await mutateData(base => withLog({
         ...base,
         partners: base.partners.map(p => p.id === partnerId
-          ? { ...p, retrocessionVersements: [...(p.retrocessionVersements || []).filter(v => v.cle !== cle), versement] }
+          ? { ...p, retrocessionVersements: [...(p.retrocessionVersements || []).filter(v => (v.cle ?? v.mois) !== cle), versement] }
           : p),
       }, `a réglé la rétrocession « ${libelle || cle} » à un partenaire`));
     } finally { setBusy(false); }
@@ -4313,6 +4316,8 @@ function RecurrenceDossier({ dossier, onUpdate }) {
           {mensuelle > 0 && (
             <div className="text-xs text-gray-600">
               Soit <strong className="fa-navy">{fmtEuroPrecis(mensuelle)} par mois</strong>
+              <span className="text-gray-500"> — dont {fmtEuroPrecis(mensuelle * PART_MANDATAIRE)} pour le mandataire
+              et {fmtEuroPrecis(mensuelle * (1 - PART_MANDATAIRE))} pour Frangola</span>
               {dossier.dateEffet
                 ? <> à partir du {fmtDate(new Date(dossier.dateEffet + "T12:00:00").getTime())} —
                     <strong className="fa-navy"> {fmtEuroPrecis(cumul)}</strong> perçus à ce jour sur {mois} mensualité{mois > 1 ? "s" : ""},
@@ -4503,6 +4508,10 @@ function EcheancierDossier({ dossier, onUpdate }) {
 // Le compteur démarre à la date d'effet et s'arrête à la résiliation.
 // =============================================================================
 const STATUTS_CONTRAT_VIVANT = ["Souscrit", "Bordereau émis", "Payé"];
+
+// Le mandataire touche la moitié de la récurrence, comme sur les honoraires.
+// Le partenaire, lui, n'en touche rien : elle ne lui est jamais montrée.
+const PART_MANDATAIRE = 0.5;
 
 function recurrenceMensuelle(dossier) {
   const cotisation = Number(dossier?.cotisationMensuelle) || 0;
@@ -5515,6 +5524,11 @@ function Vision360({ data }) {
                 <div className="text-[11px] text-gray-400">à périmètre constant</div>
               </div>
             </div>
+            <div className="text-xs text-gray-600 mt-3 pt-3 border-t border-violet-200">
+              Répartition mensuelle : <strong className="fa-navy">{fmtEuroPrecis(mrr * PART_MANDATAIRE)}</strong> pour les
+              mandataires, <strong className="fa-navy">{fmtEuroPrecis(mrr * (1 - PART_MANDATAIRE))}</strong> pour Frangola.
+              Rien pour les apporteurs : la récurrence n'est pas rétrocédée.
+            </div>
             {sansRecurrence > 0 && (
               <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
                 {sansRecurrence} dossier{sansRecurrence > 1 ? "s" : ""} gagné{sansRecurrence > 1 ? "s" : ""} sans cotisation ni taux renseignés :
@@ -6491,7 +6505,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               titre: clientName(d),
               detail: reasons.join(" · "),
               depuis: d.createdAt,
-              aller: () => { setTab("dossiers"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); },
+              aller: () => { setDossierFilter("tous"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); setTab("dossiers"); },
             })),
             ...(data.parrainages || []).filter(x => x.statut === "en_attente").map(x => ({
               cle: "p-" + x.id,
@@ -7765,7 +7779,20 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                             {pDossiers.sort((a, b) => b.createdAt - a.createdAt).map(d => (
                               <div key={d.id} className="bg-white border border-gray-200 rounded-lg px-3 py-2">
                                 <div className="flex items-center justify-between flex-wrap gap-2">
-                                  <span className="text-sm fa-navy font-bold">{clientName(d)}</span>
+                                  {/* Ouvrir le dossier depuis la fiche du partenaire évite
+                                      d'aller le rechercher dans l'onglet Dossiers. */}
+                                  <button
+                                    onClick={() => {
+                                      // Même format que le filtre de recherche, sinon rien ne remonte.
+                                      setDossierFilter("tous");
+                                      setDossierSearch(`${d.clientFirstName || ""} ${d.clientLastName || ""}`.trim());
+                                      setViewingPartnerId(null);
+                                      setTab("dossiers");
+                                    }}
+                                    title="Ouvrir ce dossier"
+                                    className="text-sm fa-navy font-bold hover:fa-teal-text hover:underline transition text-left">
+                                    {clientName(d)}
+                                  </button>
                                   <div className="flex items-center gap-2 text-xs text-gray-500">
                                     <button onClick={() => setAdminExtraDocOpenId(adminExtraDocOpenId === d.id ? null : d.id)}
                                       className="fa-tap text-gray-400 hover:fa-teal-text" title="Déposer des pièces">
@@ -8014,9 +8041,17 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
             const ca = dossiersOfC.reduce((s, d) => s + (d.caAmount || 0), 0);
             const commission = dossiersOfC.reduce((s, d) => s + (d.commissionAmount || 0), 0);
             const caReel = ca - commission;
-            const mandataireCut = caReel / 2;
+            const mandataireCut = caReel * PART_MANDATAIRE;
             const margeFinale = caReel - mandataireCut;
-            return { commercial: c, partners: partnersOfC.length, dossiers: dossiers.filter(d => partnersOfC.some(p => p.id === d.partnerId)).length, ca, commission, mandataireCut, margeFinale };
+            // La récurrence se partage aussi en deux, mais sans rétrocession
+            // préalable : l'apporteur n'en touche rien.
+            const recMensuelle = dossiersOfC.filter(contratEnCours).reduce((sm, d) => sm + recurrenceMensuelle(d), 0);
+            const recCumulee = dossiersOfC.reduce((sm, d) => sm + recurrenceCumulee(d), 0);
+            return {
+              commercial: c, partners: partnersOfC.length,
+              dossiers: dossiers.filter(d => partnersOfC.some(p => p.id === d.partnerId)).length,
+              ca, commission, mandataireCut, margeFinale, recMensuelle, recCumulee,
+            };
           });
 
           const topPartners = partners.filter(p => !p.deleted)
@@ -8282,9 +8317,21 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                             <span>Part {cs.commercial} (mandataire)</span>
                             <span>{fmtEuro(cs.mandataireCut)}</span>
                           </div>
+                          {cs.recMensuelle > 0 && (
+                            <>
+                              <div className="flex items-center justify-between pl-3 text-violet-700">
+                                <span>Récurrence — {fmtEuroPrecis(cs.recMensuelle)}/mois, {fmtEuro(cs.recCumulee)} perçus</span>
+                                <span>{fmtEuro(cs.recCumulee)}</span>
+                              </div>
+                              <div className="flex items-center justify-between pl-6 text-gray-400">
+                                <span>dont part {cs.commercial}</span>
+                                <span>{fmtEuro(cs.recCumulee * PART_MANDATAIRE)}</span>
+                              </div>
+                            </>
+                          )}
                           <div className="flex items-center justify-between pl-3 font-semibold text-emerald-700">
                             <span>Marge nette Frangola</span>
-                            <span>{fmtEuro(cs.margeFinale)}</span>
+                            <span>{fmtEuro(cs.margeFinale + cs.recCumulee * (1 - PART_MANDATAIRE))}</span>
                           </div>
                         </div>
                       ))}
