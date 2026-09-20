@@ -711,7 +711,7 @@ function genererJeuDemo(base) {
       else status = pondere([["Payé", 79], ["KO", 16], ["Bordereau émis", 5]]);
 
       const caAmount = choix([290, 350, 390, 420, 450, 490, 520, 560, 590, 640, 690, 750, 820, 890, 950, 1100, 1250]) + rnd(0, 9);
-      const tauxRetro = p.horsImmo ? null : choix([0.30, 0.30, 0.30, 0.35, 0.35, 0.40]);
+      const tauxRetro = p.horsImmo ? null : choix([0.50, 0.50, 0.50, 0.50, 0.45, 0.55]);
       const commissionAmount = p.horsImmo ? (p.flatFee || 200) : Math.round(caAmount * tauxRetro * 100) / 100;
 
       const d = {
@@ -3277,11 +3277,77 @@ function BannieresChallenges({ challenges, partner, dossiers }) {
   return <>{visibles.map(c => <BanniereChallenge key={c.id} challenge={c} partner={partner} dossiers={dossiers} />)}</>;
 }
 
+// Opération type Black Friday : pas de palier, donc pas de barre de
+// progression. Ce qui compte pour le partenaire, c'est le temps qu'il lui
+// reste et ce qu'il a déjà gagné en plus.
+function BanniereBoost({ challenge, partner, dossiers, debut, fin, detail, setDetail }) {
+  const concernes = dossiersBoostes(challenge, dossiers, partner?.id)
+    .map(d => ({ d, bonus: bonusDossier(challenge, d), t: dateGain(d) }))
+    .sort((a, b2) => b2.t - a.t);
+  const total = concernes.reduce((s, x) => s + x.bonus, 0);
+  const jours = Math.max(0, Math.ceil((fin - Date.now()) / 86400000));
+  const dateFin = new Date(fin).toLocaleDateString("fr-FR", { day: "numeric", month: "long" });
+
+  return (
+    <div className="rounded-2xl p-5 mb-6 bg-violet-50 border border-violet-300">
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
+        <span className="font-display font-semibold fa-navy">
+          ⚡ {challenge.titre || "Opération commission boostée"}
+        </span>
+        <span className="text-xs text-violet-900/70">
+          jusqu'au {dateFin} · {jours} jour{jours > 1 ? "s" : ""} restant{jours > 1 ? "s" : ""}
+        </span>
+      </div>
+
+      <div className="text-sm fa-navy mb-2">
+        <strong>{libelleBonus(challenge)}</strong> sur chaque dossier souscrit pendant l'opération,
+        sans condition de volume. {challenge.recompense ? <>{challenge.recompense}</> : null}
+      </div>
+
+      <div className="flex items-baseline justify-between gap-2 flex-wrap bg-white/70 rounded-lg px-3 py-2">
+        <span className="text-sm fa-navy">
+          {concernes.length === 0
+            ? <>Aucun dossier souscrit pour l'instant — chaque dossier compte.</>
+            : <><strong>{concernes.length} dossier{concernes.length > 1 ? "s" : ""}</strong> déjà souscrit{concernes.length > 1 ? "s" : ""} pendant l'opération</>}
+        </span>
+        {concernes.length > 0 && (
+          <span className="text-sm font-bold text-violet-700">+{fmtEuroPrecis(total)} de bonus</span>
+        )}
+      </div>
+
+      {concernes.length > 0 && (
+        <button onClick={() => setDetail(v => !v)} className="text-xs font-medium fa-navy hover:underline mt-2">
+          {detail ? "Masquer le détail" : "Voir le détail"}
+        </button>
+      )}
+      {detail && (
+        <div className="mt-2 bg-white/70 rounded-lg px-3 py-2 space-y-1">
+          {concernes.map(({ d, bonus, t }) => (
+            <div key={d.id} className="flex items-baseline justify-between gap-2 text-xs flex-wrap">
+              <span className="fa-navy font-medium">{clientName(d)}</span>
+              <span className="text-violet-900/60">souscrit le {fmtDate(t)}</span>
+              <span className="font-semibold text-violet-700">+{fmtEuroPrecis(bonus)}</span>
+            </div>
+          ))}
+          <div className="text-[11px] text-violet-900/50 pt-1">
+            Ce bonus s'ajoute à votre rétrocession habituelle. Il vous est versé une fois les
+            honoraires du dossier encaissés, comme le reste.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BanniereChallenge({ challenge, partner, dossiers }) {
   const [detail, setDetail] = useState(false);
   if (!challengeVisible(challenge)) return null;
   const debut = new Date(challenge.debut + "T00:00:00").getTime();
   const fin = new Date(challenge.fin + "T23:59:59").getTime();
+  if (estBoost(challenge)) {
+    return <BanniereBoost challenge={challenge} partner={partner} dossiers={dossiers}
+      debut={debut} fin={fin} detail={detail} setDetail={setDetail} />;
+  }
 
   // Chaque partenaire a son propre objectif quand le challenge est ciblé.
   const objectif = objectifChallenge(challenge, partner?.id);
@@ -5517,6 +5583,55 @@ function challengesDe(data) {
   return [...repris, ...(data?.settings?.challenges || [])];
 }
 
+// Deux natures de challenge. « objectif » : un palier de dossiers à atteindre
+// pour gagner une récompense. « boost » : pas de palier du tout, chaque dossier
+// souscrit pendant la fenêtre rapporte une commission majorée — l'opération
+// Black Friday. Le premier récompense l'effort, le second l'accélère.
+const TYPE_OBJECTIF = "objectif";
+const TYPE_BOOST = "boost";
+function estBoost(ch) { return ch?.type === TYPE_BOOST; }
+
+// Trois façons d'exprimer le bonus, au choix par challenge. Par défaut le
+// bonus porte sur LA COMMISSION DU PARTENAIRE, pas sur les honoraires : c'est
+// la règle maison, et l'écart est considérable (sur un dossier à 500 € où il
+// touche 250 €, +10 % font +25 €, quand +10 points feraient +50 €).
+const MODES_BONUS = [
+  { valeur: "pourcent", libelle: "% de sa commission", aide: "il touche 250 € → il touchera 275 €" },
+  { valeur: "points", libelle: "points de taux sur les honoraires", aide: "sa rétrocession passe de 50 % à 60 % du CA" },
+  { valeur: "euros", libelle: "€ par dossier", aide: "une prime fixe, quel que soit le dossier" },
+];
+// Bonus dû sur UN dossier au titre d'un challenge boost.
+function bonusDossier(ch, d) {
+  if (!estBoost(ch)) return 0;
+  const v = Number(ch.bonusValeur) || 0;
+  if (v <= 0) return 0;
+  if (ch.bonusMode === "euros") return v;
+  // Points de taux : seul mode calculé sur les honoraires du dossier.
+  if (ch.bonusMode === "points") return ((d?.caAmount || 0) * v) / 100;
+  // Par défaut, le bonus s'applique à la commission du partenaire.
+  return ((d?.commissionAmount || 0) * v) / 100;
+}
+function libelleBonus(ch) {
+  const v = Number(ch?.bonusValeur) || 0;
+  if (ch?.bonusMode === "euros") return `+${fmtEuro(v)} par dossier`;
+  if (ch?.bonusMode === "points") return `+${v} points de taux`;
+  return `+${v} % de commission`;
+}
+
+// Dossiers d'un partenaire éligibles à un boost : souscrits dans la fenêtre,
+// et le partenaire doit être visé. Le dossier doit avoir rapporté quelque
+// chose — un KO ne donne droit à aucun bonus.
+function dossiersBoostes(ch, dossiers, partnerId) {
+  if (!estBoost(ch)) return [];
+  const { debut, fin, valide } = bornesChallenge(ch);
+  if (!valide || !challengeCible(ch, partnerId)) return [];
+  return (dossiers || []).filter(d => {
+    if (d.partnerId !== partnerId || d.status === "KO") return false;
+    const t = dateGain(d);
+    return t !== null && t >= debut && t <= fin;
+  });
+}
+
 // Un challenge peut viser tout le monde ou une sélection de partenaires, avec
 // un objectif propre à chacun : deux apporteurs ne rapportent pas le même
 // montant par dossier, un objectif unique serait injuste pour l'un et non
@@ -5541,10 +5656,12 @@ const CA_MINIMUM_REFERENCE = 300;
 // Au-delà, la vraie moyenne du partenaire prend le relais automatiquement.
 const SEUIL_RECUL_CHALLENGE = 10;
 
-// Taux de rétrocession constaté sur un ensemble de dossiers.
+// Taux de rétrocession constaté sur un ensemble de dossiers. À défaut de toute
+// donnée, on retient le taux maison : 50 % pour l'apporteur.
+const TAUX_RETROCESSION_DEFAUT = 0.50;
 function tauxRetrocession(dossiers) {
   const ca = dossiers.reduce((s, d) => s + (d.caAmount || 0), 0);
-  if (ca <= 0) return 0.30;
+  if (ca <= 0) return TAUX_RETROCESSION_DEFAUT;
   const retro = dossiers.reduce((s, d) => s + (d.commissionAmount || 0), 0);
   return Math.min(0.9, Math.max(0, retro / ca));
 }
@@ -5581,7 +5698,8 @@ function objectifEquilibre(data, partnerId, coutRecompense) {
 // Un challenge n'est visible du partenaire que s'il est publié ET dans sa
 // fenêtre de dates. Tant qu'il est en brouillon, il n'existe pas pour lui.
 function challengeVisible(ch) {
-  if (!ch?.publie || !ch.debut || !ch.fin || !ch.recompense) return false;
+  if (!ch?.publie || !ch.debut || !ch.fin) return false;
+  if (estBoost(ch) ? !((Number(ch.bonusValeur) || 0) > 0) : !ch.recompense) return false;
   const { debut, fin, valide } = bornesChallenge(ch);
   if (!valide) return false;
   const t = Date.now();
@@ -5591,10 +5709,11 @@ function challengeVisible(ch) {
 // État lisible pour le pilotage côté admin.
 function etatChallenge(ch) {
   const { debut, fin, valide } = bornesChallenge(ch);
-  // Incomplet vaut brouillon : sans récompense ni dates cohérentes, la
-  // bannière ne s'afficherait pas — l'étiquette ne doit pas prétendre
-  // l'inverse.
-  if (!valide || !ch.publie || !ch.recompense) return "brouillon";
+  // Incomplet vaut brouillon : sans récompense (ou sans bonus pour un boost)
+  // ni dates cohérentes, la bannière ne s'afficherait pas — l'étiquette ne
+  // doit pas prétendre l'inverse.
+  const complet = estBoost(ch) ? (Number(ch.bonusValeur) || 0) > 0 : !!ch.recompense;
+  if (!valide || !ch.publie || !complet) return "brouillon";
   const t = Date.now();
   if (t < debut) return "programme";
   if (t > fin) return "termine";
@@ -5875,7 +5994,9 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
   function ouvrirNouveau() {
     setB({
       titre: `Challenge ${now.toLocaleDateString("fr-FR", { month: "long" })}`,
+      type: TYPE_OBJECTIF,
       objectif: 3, recompense: "", coutRecompense: "", cible: "tous", participants: {},
+      bonusMode: "pourcent", bonusValeur: 10,
       debut: defautDebut, fin: defautFin,
     });
     setRechPart("");
@@ -5884,8 +6005,10 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
   function ouvrirEdition(c) {
     setB({
       titre: c.titre || "", objectif: c.objectif ?? 3, recompense: c.recompense || "",
+      type: estBoost(c) ? TYPE_BOOST : TYPE_OBJECTIF,
       coutRecompense: c.coutRecompense ?? "", cible: c.cible === "selection" ? "selection" : "tous",
       participants: { ...(c.participants || {}) },
+      bonusMode: c.bonusMode || "pourcent", bonusValeur: c.bonusValeur ?? 10,
       debut: c.debut || defautDebut, fin: c.fin || defautFin,
     });
     setRechPart("");
@@ -5902,10 +6025,13 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
       }
     }
     const champs = {
+      type: b.type === TYPE_BOOST ? TYPE_BOOST : TYPE_OBJECTIF,
       titre: (b.titre || "").trim(),
       objectif: Math.max(1, Number(b.objectif) || 1),
       recompense: (b.recompense || "").trim(),
       coutRecompense: Number(b.coutRecompense) || 0,
+      bonusMode: b.bonusMode || "pourcent",
+      bonusValeur: Math.max(0, Number(b.bonusValeur) || 0),
       cible, participants,
       debut: b.debut, fin: b.fin,
     };
@@ -5973,23 +6099,73 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
       };
     }, { marge: 0, dossiers: 0, cout: 0 });
 
+    const boost = b.type === TYPE_BOOST;
+    // Simulation du coût d'un boost : on applique le bonus aux dossiers
+    // réellement gagnés le mois dernier. C'est la meilleure approximation
+    // disponible de ce que l'opération coûtera.
+    const refDebut = Date.now() - 30 * 86400000;
+    const dossiersRef = (data.dossiers || []).filter(d => {
+      if (d.status === "KO") return false;
+      const t = dateGain(d);
+      if (t === null || t < refDebut) return false;
+      return cible !== "selection" || participants[d.partnerId] !== undefined;
+    });
+    const chSimule = { type: TYPE_BOOST, bonusMode: b.bonusMode, bonusValeur: b.bonusValeur };
+    const coutBoost = dossiersRef.reduce((s, d) => s + bonusDossier(chSimule, d), 0);
+
     return (
       <div className="space-y-2 my-3 fa-bg-offwhite rounded-lg p-3">
         <div className="flex flex-wrap items-center gap-2">
           <input value={b.titre} onChange={e => setB(x => ({ ...x, titre: e.target.value }))}
-            placeholder="Intitulé" className={champ + " flex-1 min-w-[180px]"} />
+            placeholder="Intitulé — ex. BLACK FRIDAY" className={champ + " flex-1 min-w-[180px]"} />
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
-            placeholder="Récompense — ex. une paire d'AirPods" className={champ + " flex-1 min-w-[200px]"} />
-          <label className="text-xs text-gray-500 flex items-center gap-1.5">
-            Elle me coûte
-            <input type="number" onFocus={selectionTotale} min="0" value={b.coutRecompense ?? ""}
-              onChange={e => setB(x => ({ ...x, coutRecompense: sansZeroDeTete(e.target.value) }))}
-              placeholder="250" className={champ + " w-20 text-center"} />
-            €
-          </label>
+
+        <div className="flex flex-wrap items-center gap-3 pt-1">
+          <span className="text-xs font-semibold fa-navy">Nature</span>
+          {[[TYPE_OBJECTIF, "Un objectif à atteindre → une récompense"], [TYPE_BOOST, "Un bonus sur chaque dossier, sans palier"]].map(([v, label]) => (
+            <label key={v} className="text-xs text-gray-600 flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" checked={(b.type === TYPE_BOOST) === (v === TYPE_BOOST)}
+                onChange={() => setB(x => ({ ...x, type: v }))} />
+              {label}
+            </label>
+          ))}
         </div>
+
+        {boost ? (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">Chaque dossier souscrit rapporte</span>
+              <input type="number" onFocus={selectionTotale} min="0" step="1" value={b.bonusValeur ?? ""}
+                onChange={e => setB(x => ({ ...x, bonusValeur: sansZeroDeTete(e.target.value) }))}
+                className={champ + " w-16 text-center"} />
+              <select value={b.bonusMode || "pourcent"} onChange={e => setB(x => ({ ...x, bonusMode: e.target.value }))}
+                className={champ}>
+                {MODES_BONUS.map(m => <option key={m.valeur} value={m.valeur}>{m.libelle}</option>)}
+              </select>
+              <span className="text-[11px] text-gray-400">
+                {MODES_BONUS.find(m => m.valeur === (b.bonusMode || "pourcent"))?.aide}
+              </span>
+            </div>
+            <div className={`text-xs rounded-lg px-3 py-2 ${coutBoost > 0 ? "bg-amber-50 border border-amber-200 text-amber-900" : "bg-white border border-gray-200 text-gray-500"}`}>
+              {dossiersRef.length > 0
+                ? <>Au rythme des 30 derniers jours ({dossiersRef.length} dossier{dossiersRef.length > 1 ? "s" : ""} gagné{dossiersRef.length > 1 ? "s" : ""}),
+                    ce boost vous coûterait <strong>{fmtEuro(coutBoost)}</strong> sur une période équivalente.</>
+                : <>Aucun dossier gagné ces 30 derniers jours : impossible d'estimer le coût du boost.</>}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
+              placeholder="Récompense — ex. une paire d'AirPods" className={champ + " flex-1 min-w-[200px]"} />
+            <label className="text-xs text-gray-500 flex items-center gap-1.5">
+              Elle me coûte
+              <input type="number" onFocus={selectionTotale} min="0" value={b.coutRecompense ?? ""}
+                onChange={e => setB(x => ({ ...x, coutRecompense: sansZeroDeTete(e.target.value) }))}
+                placeholder="250" className={champ + " w-20 text-center"} />
+              €
+            </label>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-3 pt-1">
           <span className="text-xs font-semibold fa-navy">Pour qui ?</span>
@@ -6001,7 +6177,9 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
           ))}
         </div>
 
-        {cible === "tous" ? (
+        {cible === "tous" ? (boost ? (
+          <div className="text-xs text-gray-500">Tous les partenaires profitent du bonus, sans condition de volume.</div>
+        ) : (
           <label className="text-xs text-gray-500 flex items-center gap-1.5">
             Objectif
             <input type="number" onFocus={selectionTotale} min="1" value={b.objectif}
@@ -6009,7 +6187,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
               className={champ + " w-16 text-center"} />
             dossiers souscrits, le même pour tout le monde
           </label>
-        ) : (
+        )) : (
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
               <input value={rechPart} onChange={e => setRechPart(e.target.value)}
@@ -6034,6 +6212,21 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
 
             {choisis.length === 0 ? (
               <div className="text-xs text-gray-400">Aucun partenaire retenu — cherchez-en un ci-dessus.</div>
+            ) : boost ? (
+              /* Un boost n'a pas de palier : la liste sert seulement à dire
+                 qui en profite. */
+              <div className="flex flex-wrap gap-1.5">
+                {choisis.map(id => {
+                  const p = data.partners.find(x => x.id === id);
+                  if (!p) return null;
+                  return (
+                    <span key={id} className="flex items-center gap-1.5 text-xs bg-white border border-gray-300 rounded-full pl-2.5 pr-1.5 py-1">
+                      {nomPartenaire(p)}
+                      <button onClick={() => basculer(p)} className="text-gray-400 hover:text-red-600">✕</button>
+                    </span>
+                  );
+                })}
+              </div>
             ) : (
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-[11px] text-gray-400 px-1">
@@ -6107,18 +6300,22 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
             au <input type="date" value={b.fin} onChange={e => setB(x => ({ ...x, fin: e.target.value }))} className={champ} />
           </label>
           <button onClick={enregistrer}
-            disabled={!b.recompense?.trim() || !b.debut || !b.fin || (cible === "selection" && choisis.length === 0)}
+            disabled={(boost ? !((Number(b.bonusValeur) || 0) > 0) : !b.recompense?.trim()) || !b.debut || !b.fin || (cible === "selection" && choisis.length === 0)}
             className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">
             {edition === "nouveau" ? "Enregistrer en brouillon" : "Enregistrer"}
           </button>
           <button onClick={() => setEdition(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
         </div>
         <p className="text-xs text-gray-400">
-          La marge par dossier, c'est ce qui reste à Frangola une fois la rétrocession de l'apporteur
-          et la part du mandataire déduites. Tant qu'un partenaire n'a pas {SEUIL_RECUL_CHALLENGE} dossiers
-          gagnés, elle est estimée sur un plancher de {fmtEuro(CA_MINIMUM_REFERENCE)} d'honoraires ;
-          au-delà, sa moyenne réelle prend le relais automatiquement. Les dossiers sont comptés à leur
-          <strong> souscription</strong>, pas à leur dépôt.
+          {boost
+            ? <>Le bonus s'ajoute à la rétrocession habituelle, sur une ligne à part dans Facturation :
+                il ne modifie pas les commissions enregistrées. Il devient exigible dossier par dossier,
+                une fois les honoraires encaissés.</>
+            : <>La marge par dossier, c'est ce qui reste à Frangola une fois la rétrocession de l'apporteur
+                et la part du mandataire déduites. Tant qu'un partenaire n'a pas {SEUIL_RECUL_CHALLENGE} dossiers
+                gagnés, elle est estimée sur un plancher de {fmtEuro(CA_MINIMUM_REFERENCE)} d'honoraires ;
+                au-delà, sa moyenne réelle prend le relais automatiquement.</>}
+          {" "}Les dossiers sont comptés à leur <strong>souscription</strong>, pas à leur dépôt.
           {edition === "nouveau" && <> Rien n'est visible des partenaires tant que vous n'avez pas publié.</>}
         </p>
       </div>
@@ -6154,7 +6351,18 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
             const et = ETIQUETTES[etat];
             const bornes = bornesChallenge(c);
             const objectif = Math.max(1, Number(c.objectif) || 1);
+            const boostC = estBoost(c);
             const vise = c.cible === "selection";
+            // Coût réel du boost à date : le bonus de tous les dossiers gagnés
+            // dans la fenêtre, tous partenaires visés confondus.
+            const lignesBoost = boostC && bornes.valide
+              ? data.partners.filter(p => !p.deleted && challengeCible(c, p.id))
+                  .map(p => ({ p, ds: dossiersBoostes(c, data.dossiers, p.id) }))
+                  .filter(x => x.ds.length > 0)
+                  .map(x => ({ ...x, total: x.ds.reduce((s2, d) => s2 + bonusDossier(c, d), 0) }))
+                  .sort((a, b2) => b2.total - a.total)
+              : [];
+            const coutBoostReel = lignesBoost.reduce((s2, x) => s2 + x.total, 0);
             const nbVises = vise ? Object.keys(c.participants || {}).length : 0;
             // Un challenge ciblé ne classe que ceux qu'il vise, chacun contre
             // SON objectif — sinon le classement compare des choses
@@ -6202,16 +6410,50 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                 {edition === c.id ? formulaire() : (
                   <>
                     <div className="text-xs text-gray-500 mt-1">
-                      {vise
-                        ? <>{nbVises} partenaire{nbVises > 1 ? "s" : ""} ciblé{nbVises > 1 ? "s" : ""}, objectif propre à chacun, pour gagner</>
-                        : <>{objectif} dossier{objectif > 1 ? "s" : ""} souscrit{objectif > 1 ? "s" : ""} pour gagner</>}
-                      {" "}<strong className="fa-navy">{c.recompense || "—"}</strong>
-                      {c.coutRecompense > 0 && <> ({fmtEuro(c.coutRecompense)} pièce)</>}
+                      {boostC
+                        ? <><strong className="text-violet-700">{libelleBonus(c)}</strong> sur chaque dossier souscrit, sans palier
+                            {vise ? <>, pour {nbVises} partenaire{nbVises > 1 ? "s" : ""} ciblé{nbVises > 1 ? "s" : ""}</> : <>, pour tous</>}</>
+                        : <>{vise
+                            ? <>{nbVises} partenaire{nbVises > 1 ? "s" : ""} ciblé{nbVises > 1 ? "s" : ""}, objectif propre à chacun, pour gagner</>
+                            : <>{objectif} dossier{objectif > 1 ? "s" : ""} souscrit{objectif > 1 ? "s" : ""} pour gagner</>}
+                          {" "}<strong className="fa-navy">{c.recompense || "—"}</strong>
+                          {c.coutRecompense > 0 && <> ({fmtEuro(c.coutRecompense)} pièce)</>}</>}
                       {bornes.valide && <> · du {fmtDate(bornes.debut)} au {fmtDate(bornes.fin)}</>}
                       {etat === "encours" && <> · {joursRestants} jour{joursRestants > 1 ? "s" : ""} restant{joursRestants > 1 ? "s" : ""}</>}
                     </div>
 
-                    {gagnants.length > 0 && (
+                    {boostC && (
+                      lignesBoost.length === 0 ? (
+                        <div className="text-xs text-gray-400 mt-2">Aucun dossier souscrit sur la période pour l'instant.</div>
+                      ) : (
+                        <div className="mt-2">
+                          <div className="flex items-baseline justify-between gap-2 flex-wrap bg-violet-50 border border-violet-200 rounded-lg px-3 py-2 mb-1.5">
+                            <span className="text-xs fa-navy">
+                              {lignesBoost.reduce((s2, x) => s2 + x.ds.length, 0)} dossier(s) bonifié(s)
+                              chez {lignesBoost.length} partenaire{lignesBoost.length > 1 ? "s" : ""}
+                            </span>
+                            <span className="text-sm font-bold text-violet-700">{fmtEuroPrecis(coutBoostReel)} de bonus à verser</span>
+                          </div>
+                          {ouvert && (
+                            <div className="space-y-1">
+                              {lignesBoost.map(x => (
+                                <div key={x.p.id} className="flex items-center justify-between gap-2 text-xs px-1">
+                                  <LienPartenaire p={x.p} className="fa-navy font-medium" />
+                                  <span className="text-gray-500">{x.ds.length} dossier{x.ds.length > 1 ? "s" : ""}</span>
+                                  <span className="font-semibold text-violet-700">+{fmtEuroPrecis(x.total)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {!ouvert && (
+                            <button onClick={() => setDeplie(v => v === c.id ? null : c.id)}
+                              className="text-xs fa-teal-text hover:underline">Voir le détail par partenaire</button>
+                          )}
+                        </div>
+                      )
+                    )}
+
+                    {!boostC && gagnants.length > 0 && (
                       <div className="fa-bg-gold rounded-lg px-3 py-2 mt-2">
                         <div className="text-xs fa-navy font-semibold">
                           🏆 {gagnants.length} partenaire{gagnants.length > 1 ? "s ont" : " a"} atteint l'objectif
@@ -6225,14 +6467,14 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                     {/* Le classement d'un challenge terminé ou en brouillon est
                         replié par défaut : on ne veut pas dérouler cinq
                         classements les uns sous les autres. */}
-                    {etat !== "encours" && classement.length > 0 && (
+                    {!boostC && etat !== "encours" && classement.length > 0 && (
                       <button onClick={() => setDeplie(v => v === c.id ? null : c.id)}
                         className="text-xs fa-teal-text hover:underline mt-2">
                         {ouvert ? "Masquer le classement" : `Voir le classement (${classement.length})`}
                       </button>
                     )}
 
-                    {ouvert && (classement.length === 0 ? (
+                    {!boostC && ouvert && (classement.length === 0 ? (
                       <div className="text-xs text-gray-400 mt-2">Aucun dossier souscrit sur la période pour l'instant.</div>
                     ) : (
                       <div className="space-y-1.5 mt-2">
@@ -7183,6 +7425,9 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
   const nomDe = (p) => nomPartenaire(p);
+  // Toutes les opérations « commission boostée », publiées ou passées : un
+  // boost terminé reste dû tant qu'il n'a pas été versé.
+  const boosts = challengesDe(data).filter(c => estBoost(c) && bornesChallenge(c).valide && c.publie);
 
   // Deux mécaniques distinctes : les apporteurs immobiliers sont réglés mois
   // par mois au rythme des encaissements ; les hors immobilier reçoivent leur
@@ -7204,6 +7449,33 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
     for (const it of items) {
       if (it.etat === "a_regler") lignes.push({ p, m: it, forfait });
       else if (it.etat === "regle") reglees.push({ p, m: it, forfait });
+    }
+
+    // Bonus de challenge : une ligne par opération, distincte de la
+    // rétrocession. On ne touche pas aux commissions enregistrées, le bonus
+    // se calcule et se règle à part — et il suit la même règle que le reste,
+    // on ne verse que sur des honoraires déjà encaissés.
+    const versements = p.retrocessionVersements || [];
+    for (const ch of boosts) {
+      const concernes = dossiersBoostes(ch, siens, p.id);
+      if (concernes.length === 0) continue;
+      const acquis = concernes.filter(d => partEncaissee(d, d.caAmount || 0) + 0.005 >= (d.caAmount || 0));
+      const montant = acquis.reduce((s2, d) => s2 + bonusDossier(ch, d), 0);
+      const aVenir = concernes.reduce((s2, d) => s2 + bonusDossier(ch, d), 0) - montant;
+      const cle = "bonus:" + ch.id;
+      const versement = versements.find(v => (v.cle ?? v.mois) === cle) || null;
+      if (!versement && montant < 0.005) continue;
+      const it = {
+        cle,
+        libelle: `Bonus « ${ch.titre || "challenge"} » — ${acquis.length} dossier${acquis.length > 1 ? "s" : ""}`,
+        montant: versement ? versement.montant : montant,
+        etat: versement ? "regle" : "a_regler",
+        versement,
+        detail: aVenir > 0.005 ? `${fmtEuroPrecis(aVenir)} encore à venir sur cette opération` : null,
+        bonus: true,
+      };
+      if (it.etat === "a_regler") lignes.push({ p, m: it, forfait });
+      else reglees.push({ p, m: it, forfait });
     }
   }
   lignes.sort((a, b) => a.m.cle.localeCompare(b.m.cle));
