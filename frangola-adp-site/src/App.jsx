@@ -6108,7 +6108,12 @@ function FicheAdmin({ admin, onUpdate }) {
 // =============================================================================
 // COÛT DES CHALLENGES — ce qu'ils coûtent, ce qu'ils rapportent
 // =============================================================================
+// Le point mort ne dit que « tu ne perds pas d'argent » : à 1,05× on a mobilisé
+// ses partenaires et acheté un cadeau pour gagner douze euros. L'objectif
+// commercial est ailleurs — d'où un multiplicateur, réglé sur 3 par défaut.
+const RATIO_RENTABILITE_DEFAUT = 3;
 function CoutChallenges({ data }) {
+  const [ratioVise, setRatioVise] = useState(String(RATIO_RENTABILITE_DEFAUT));
   const [simType, setSimType] = useState(TYPE_BOOST);
   const [simBonus, setSimBonus] = useState("10");
   const [simMode, setSimMode] = useState("pourcent");
@@ -6158,22 +6163,38 @@ function CoutChallenges({ data }) {
     : (comMoyenne * vBonus) / 100;
 
   const estBoostSim = simType === TYPE_BOOST;
-  // Un boost se paie sur TOUS les dossiers, y compris ceux qu'on aurait eus
-  // sans lui. Le seuil de rentabilité s'en trouve nettement relevé :
-  //   surplus × marge ≥ (attendus + surplus) × bonus
+  const R = Math.max(1, Number(ratioVise) || 1);
   const coutSim = estBoostSim ? attendus * bonusParDossier : nbSim * prixSim;
-  const seuil = estBoostSim
-    ? (margeMoyenne > bonusParDossier ? (attendus * bonusParDossier) / (margeMoyenne - bonusParDossier) : null)
-    : (margeMoyenne > 0 ? coutSim / margeMoyenne : null);
+  // Combien de dossiers EN PLUS de l'habitude pour que la marge du surplus
+  // atteigne k fois la mise. Un boost se paie sur TOUS les dossiers, y compris
+  // ceux qu'on aurait eus sans lui, d'où la formule à part :
+  //   surplus × marge ≥ k × (attendus + surplus) × bonus
+  const seuilPour = (k) => {
+    if (margeMoyenne <= 0) return null;
+    if (!estBoostSim) return (k * coutSim) / margeMoyenne;
+    const reste = margeMoyenne - k * bonusParDossier;
+    return reste > 0 ? (k * attendus * bonusParDossier) / reste : null;
+  };
+  const pointMort = seuilPour(1);
+  const seuil = seuilPour(R);
 
   const eur = (n) => fmtEuro(n);
   const cellule = "py-2 px-2 text-right border-t border-gray-200";
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
-      <div className="font-display font-semibold fa-navy mb-1">Ce que mes challenges m'ont coûté</div>
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div className="font-display font-semibold fa-navy">Ce que mes challenges m'ont coûté</div>
+        <label className="text-xs text-gray-500 flex items-center gap-1.5">
+          Rentabilité visée ×
+          <input type="number" onFocus={selectionTotale} min="1" step="0.5" value={ratioVise}
+            onChange={e => setRatioVise(sansZeroDeTete(e.target.value))}
+            className="w-14 text-sm text-center border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+        </label>
+      </div>
       <p className="text-sm text-gray-500 mb-4">
         Le coût réel de chaque opération, face à la marge nette qu'elle a rapportée.
+        Une opération est jugée gagnante quand elle rapporte au moins {R} fois sa mise.
       </p>
 
       {lignes.length === 0 ? (
@@ -6214,6 +6235,7 @@ function CoutChallenges({ data }) {
                   <th className="font-medium py-1 px-2 text-right">Surplus</th>
                   <th className="font-medium py-1 px-2 text-right">Marge du surplus</th>
                   <th className="font-medium py-1 px-2 text-right">Bilan</th>
+                  <th className="font-medium py-1 px-2 text-right">Ratio</th>
                 </tr>
               </thead>
               <tbody>
@@ -6239,6 +6261,17 @@ function CoutChallenges({ data }) {
                     <td className={cellule + " font-bold " + (b.bilan >= 0 ? "text-emerald-700" : "text-red-600")}>
                       {b.bilan >= 0 ? "+ " : "− "}{eur(Math.abs(b.bilan))}
                     </td>
+                    {(() => {
+                      // Sans mise, pas de ratio : une opération gratuite n'a pas
+                      // de rentabilité à comparer.
+                      const ratio = b.cout > 0.005 ? b.margeSurplus / b.cout : null;
+                      const atteint = ratio !== null && ratio >= R;
+                      return (
+                        <td className={cellule + " font-bold " + (ratio === null ? "text-gray-400" : atteint ? "text-emerald-700" : "text-amber-700")}>
+                          {ratio === null ? "—" : `${ratio.toFixed(1)}×`}
+                        </td>
+                      );
+                    })()}
                   </tr>
                 ))}
               </tbody>
@@ -6327,9 +6360,12 @@ function CoutChallenges({ data }) {
                 <div className="font-display text-lg font-bold fa-navy">{eur(attendus * margeMoyenne)}</div>
               </div>
               <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
-                <div className="text-xs text-gray-500 mb-0.5">Seuil de rentabilité</div>
+                <div className="text-xs text-gray-500 mb-0.5">Pour atteindre ×{R}</div>
                 <div className="font-display text-lg font-bold text-emerald-700">
-                  {seuil === null ? "jamais" : `+${Math.ceil(seuil)} dossier${Math.ceil(seuil) > 1 ? "s" : ""}`}
+                  {seuil === null ? "hors d'atteinte" : `+${Math.ceil(seuil)} dossier${Math.ceil(seuil) > 1 ? "s" : ""}`}
+                </div>
+                <div className="text-[11px] text-gray-400 mt-0.5">
+                  {pointMort === null ? "point mort hors d'atteinte" : `point mort à +${Math.ceil(pointMort)}`}
                 </div>
               </div>
             </div>
