@@ -3271,7 +3271,8 @@ function ParrainageCard({ partner, onDeclarer }) {
 // challenges publiés et en cours. Un brouillon, un challenge programmé ou
 // terminé n'apparaît pas : de son côté, il n'existe pas.
 function BannieresChallenges({ challenges, partner, dossiers }) {
-  const visibles = (challenges || []).filter(challengeVisible);
+  // Un challenge ciblé n'existe que pour les partenaires qu'il vise.
+  const visibles = (challenges || []).filter(c => challengeVisible(c) && challengeCible(c, partner?.id));
   if (visibles.length === 0) return null;
   return <>{visibles.map(c => <BanniereChallenge key={c.id} challenge={c} partner={partner} dossiers={dossiers} />)}</>;
 }
@@ -3281,7 +3282,8 @@ function BanniereChallenge({ challenge, partner, dossiers }) {
   const debut = new Date(challenge.debut + "T00:00:00").getTime();
   const fin = new Date(challenge.fin + "T23:59:59").getTime();
 
-  const objectif = Math.max(1, Number(challenge.objectif) || 1);
+  // Chaque partenaire a son propre objectif quand le challenge est ciblé.
+  const objectif = objectifChallenge(challenge, partner?.id);
   const n = (dossiers || []).filter(d => {
     const t = dateGain(d);
     return t !== null && t >= debut && t <= fin;
@@ -5473,6 +5475,44 @@ function challengesDe(data) {
   return [...repris, ...(data?.settings?.challenges || [])];
 }
 
+// Un challenge peut viser tout le monde ou une sélection de partenaires, avec
+// un objectif propre à chacun : deux apporteurs ne rapportent pas le même
+// montant par dossier, un objectif unique serait injuste pour l'un et non
+// rentable pour l'autre.
+function challengeCible(ch, partnerId) {
+  if (ch?.cible !== "selection") return true;
+  const o = ch?.participants?.[partnerId];
+  return o !== undefined && o !== null && o !== "";
+}
+function objectifChallenge(ch, partnerId) {
+  const brut = ch?.cible === "selection" ? ch?.participants?.[partnerId] : ch?.objectif;
+  return Math.max(1, Number(brut) || 1);
+}
+
+// Économie d'un partenaire, telle que la calcule déjà le reste de
+// l'application : CA du dossier, moins la rétrocession de l'apporteur, moins
+// la part du mandataire. C'est ce qui reste réellement à Frangola, et donc ce
+// qui doit couvrir le coût de la récompense.
+function economiePartenaire(data, partnerId) {
+  const gagnes = (data?.dossiers || []).filter(d =>
+    d.partnerId === partnerId && STATUTS_CONTRAT_VIVANT.includes(d.status) && (d.caAmount || 0) > 0);
+  if (gagnes.length === 0) return { nb: 0, caMoyen: 0, margeMoyenne: 0 };
+  const ca = gagnes.reduce((s, d) => s + (d.caAmount || 0), 0);
+  const retro = gagnes.reduce((s, d) => s + (d.commissionAmount || 0), 0);
+  const marge = (ca - retro) * (1 - PART_MANDATAIRE);
+  return { nb: gagnes.length, caMoyen: ca / gagnes.length, margeMoyenne: marge / gagnes.length };
+}
+
+// Combien de dossiers ce partenaire doit-il apporter pour que la récompense
+// soit financée ? Zéro donnée ou marge nulle : pas de suggestion plutôt qu'un
+// chiffre inventé.
+function objectifEquilibre(data, partnerId, coutRecompense) {
+  const cout = Number(coutRecompense) || 0;
+  const { margeMoyenne } = economiePartenaire(data, partnerId);
+  if (cout <= 0 || margeMoyenne <= 0) return null;
+  return Math.max(1, Math.ceil(cout / margeMoyenne));
+}
+
 // Un challenge n'est visible du partenaire que s'il est publié ET dans sa
 // fenêtre de dates. Tant qu'il est en brouillon, il n'existe pas pour lui.
 function challengeVisible(ch) {
@@ -5761,6 +5801,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
   const [b, setB] = useState({});
   const [aSupprimer, setASupprimer] = useState(null);
   const [deplie, setDeplie] = useState(null);
+  const [rechPart, setRechPart] = useState("");
 
   const now = new Date();
   const defautDebut = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
@@ -5769,22 +5810,38 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
   function ouvrirNouveau() {
     setB({
       titre: `Challenge ${now.toLocaleDateString("fr-FR", { month: "long" })}`,
-      objectif: 3, recompense: "", debut: defautDebut, fin: defautFin,
+      objectif: 3, recompense: "", coutRecompense: "", cible: "tous", participants: {},
+      debut: defautDebut, fin: defautFin,
     });
+    setRechPart("");
     setEdition("nouveau");
   }
   function ouvrirEdition(c) {
     setB({
       titre: c.titre || "", objectif: c.objectif ?? 3, recompense: c.recompense || "",
+      coutRecompense: c.coutRecompense ?? "", cible: c.cible === "selection" ? "selection" : "tous",
+      participants: { ...(c.participants || {}) },
       debut: c.debut || defautDebut, fin: c.fin || defautFin,
     });
+    setRechPart("");
     setEdition(c.id);
   }
   function enregistrer() {
+    const cible = b.cible === "selection" ? "selection" : "tous";
+    // Les objectifs individuels sont normalisés à l'enregistrement : un champ
+    // laissé vide vaut 1, jamais zéro ni NaN.
+    const participants = {};
+    if (cible === "selection") {
+      for (const [id, v] of Object.entries(b.participants || {})) {
+        participants[id] = Math.max(1, Number(v) || 1);
+      }
+    }
     const champs = {
       titre: (b.titre || "").trim(),
       objectif: Math.max(1, Number(b.objectif) || 1),
       recompense: (b.recompense || "").trim(),
+      coutRecompense: Number(b.coutRecompense) || 0,
+      cible, participants,
       debut: b.debut, fin: b.fin,
     };
     // Un challenge naît toujours en brouillon : on le prépare tranquillement,
@@ -5811,41 +5868,192 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
 
   // Fonction et non composant : un composant déclaré dans le rendu change
   // d'identité à chaque frappe, React le remonte, et le champ perd le focus.
-  const formulaire = () => (
+  const formulaire = () => {
+    const cible = b.cible === "selection" ? "selection" : "tous";
+    const participants = b.participants || {};
+    const cout = Number(b.coutRecompense) || 0;
+    const choisis = Object.keys(participants);
+    const vivants = data.partners.filter(p => !p.deleted && p.active !== false);
+    const q = (rechPart || "").trim().toLowerCase();
+    // On n'affiche jamais les centaines de partenaires d'un coup : ceux qui
+    // sont déjà retenus, plus ce que la recherche remonte.
+    const propositions = q
+      ? vivants.filter(p => !participants[p.id] &&
+          `${p.firstName || ""} ${p.name || ""} ${p.company || ""} ${p.ville || ""}`.toLowerCase().includes(q)).slice(0, 8)
+      : [];
+
+    const basculer = (p) => setB(x => {
+      const suiv = { ...(x.participants || {}) };
+      if (suiv[p.id] !== undefined) delete suiv[p.id];
+      else suiv[p.id] = objectifEquilibre(data, p.id, Number(x.coutRecompense) || 0) ?? (Number(x.objectif) || 3);
+      return { ...x, participants: suiv };
+    });
+    // Recalculer les objectifs quand le coût change : c'est tout l'intérêt
+    // de saisir le prix du cadeau.
+    const recalculer = () => setB(x => {
+      const suiv = {};
+      for (const id of Object.keys(x.participants || {})) {
+        suiv[id] = objectifEquilibre(data, id, Number(x.coutRecompense) || 0) ?? x.participants[id];
+      }
+      return { ...x, participants: suiv };
+    });
+
+    const bilan = choisis.reduce((acc, id) => {
+      const eco = economiePartenaire(data, id);
+      const obj = Math.max(1, Number(participants[id]) || 1);
+      return {
+        marge: acc.marge + eco.margeMoyenne * obj,
+        dossiers: acc.dossiers + obj,
+        cout: acc.cout + cout,
+      };
+    }, { marge: 0, dossiers: 0, cout: 0 });
+
+    return (
       <div className="space-y-2 my-3 fa-bg-offwhite rounded-lg p-3">
         <div className="flex flex-wrap items-center gap-2">
           <input value={b.titre} onChange={e => setB(x => ({ ...x, titre: e.target.value }))}
             placeholder="Intitulé" className={champ + " flex-1 min-w-[180px]"} />
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
+            placeholder="Récompense — ex. une paire d'AirPods" className={champ + " flex-1 min-w-[200px]"} />
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            Elle me coûte
+            <input type="number" onFocus={selectionTotale} min="0" value={b.coutRecompense ?? ""}
+              onChange={e => setB(x => ({ ...x, coutRecompense: sansZeroDeTete(e.target.value) }))}
+              placeholder="250" className={champ + " w-20 text-center"} />
+            €
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 pt-1">
+          <span className="text-xs font-semibold fa-navy">Pour qui ?</span>
+          {[["tous", "Tous les partenaires"], ["selection", "Des partenaires choisis"]].map(([v, label]) => (
+            <label key={v} className="text-xs text-gray-600 flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" checked={cible === v} onChange={() => setB(x => ({ ...x, cible: v }))} />
+              {label}
+            </label>
+          ))}
+        </div>
+
+        {cible === "tous" ? (
           <label className="text-xs text-gray-500 flex items-center gap-1.5">
             Objectif
             <input type="number" onFocus={selectionTotale} min="1" value={b.objectif}
               onChange={e => setB(x => ({ ...x, objectif: sansZeroDeTete(e.target.value) }))}
               className={champ + " w-16 text-center"} />
-            dossiers souscrits
+            dossiers souscrits, le même pour tout le monde
           </label>
-        </div>
-        <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
-          placeholder="Récompense — ex. une paire d'AirPods" className={champ + " w-full"} />
-        <div className="flex flex-wrap items-center gap-2">
+        ) : (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <input value={rechPart} onChange={e => setRechPart(e.target.value)}
+                placeholder="Chercher un partenaire à ajouter…" className={champ + " flex-1 min-w-[200px]"} />
+              {choisis.length > 0 && cout > 0 && (
+                <button onClick={recalculer} className="text-xs fa-teal-text hover:underline">
+                  Recalculer les objectifs sur {fmtEuro(cout)}
+                </button>
+              )}
+            </div>
+
+            {propositions.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {propositions.map(p => (
+                  <button key={p.id} onClick={() => { basculer(p); setRechPart(""); }}
+                    className="text-xs bg-white border border-gray-300 hover:border-teal-400 rounded-full px-2.5 py-1 transition">
+                    + {nomPartenaire(p)}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {choisis.length === 0 ? (
+              <div className="text-xs text-gray-400">Aucun partenaire retenu — cherchez-en un ci-dessus.</div>
+            ) : (
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-[11px] text-gray-400 px-1">
+                  <span className="flex-1">Partenaire</span>
+                  <span className="w-24 text-right">Marge / dossier</span>
+                  <span className="w-16 text-center">Objectif</span>
+                  <span className="w-24 text-right">Ce que ça rapporte</span>
+                  <span className="w-5" />
+                </div>
+                {choisis.map(id => {
+                  const p = data.partners.find(x => x.id === id);
+                  if (!p) return null;
+                  const eco = economiePartenaire(data, id);
+                  const obj = Math.max(1, Number(participants[id]) || 1);
+                  const rapporte = eco.margeMoyenne * obj;
+                  const rentable = cout <= 0 || rapporte >= cout;
+                  const suggere = objectifEquilibre(data, id, cout);
+                  return (
+                    <div key={id} className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-2 py-1.5">
+                      <span className="flex-1 min-w-0">
+                        <span className="text-xs fa-navy font-semibold block truncate">{nomPartenaire(p)}</span>
+                        <span className="text-[11px] text-gray-400">
+                          {eco.nb > 0
+                            ? <>{eco.nb} dossier{eco.nb > 1 ? "s" : ""} · {fmtEuro(eco.caMoyen)} de CA moyen</>
+                            : <>aucun dossier gagné — objectif à fixer à la main</>}
+                        </span>
+                      </span>
+                      <span className="w-24 text-right text-xs text-gray-600">{eco.nb > 0 ? fmtEuroPrecis(eco.margeMoyenne) : "—"}</span>
+                      <input type="number" onFocus={selectionTotale} min="1" value={participants[id]}
+                        onChange={e => setB(x => ({ ...x, participants: { ...x.participants, [id]: sansZeroDeTete(e.target.value) } }))}
+                        className={champ + " w-16 text-center"} />
+                      <span className={`w-24 text-right text-xs font-semibold ${rentable ? "text-emerald-700" : "text-red-600"}`}>
+                        {eco.nb > 0 ? fmtEuro(rapporte) : "—"}
+                        {suggere !== null && suggere !== obj && (
+                          <button onClick={() => setB(x => ({ ...x, participants: { ...x.participants, [id]: suggere } }))}
+                            title={`Il en faut ${suggere} pour couvrir ${fmtEuro(cout)}`}
+                            className="block text-[10px] font-normal fa-teal-text hover:underline">
+                            équilibre : {suggere}
+                          </button>
+                        )}
+                      </span>
+                      <button onClick={() => basculer(p)} title="Retirer" className="w-5 text-xs text-gray-400 hover:text-red-600">✕</button>
+                    </div>
+                  );
+                })}
+
+                <div className={`flex items-center justify-between flex-wrap gap-2 text-xs rounded-lg px-3 py-2 mt-1 ${bilan.marge >= bilan.cout ? "bg-emerald-50 border border-emerald-200" : "bg-amber-50 border border-amber-200"}`}>
+                  <span className="fa-navy">
+                    Si les {choisis.length} atteignent leur objectif : <strong>{bilan.dossiers} dossiers</strong>,
+                    {" "}<strong>{fmtEuro(bilan.marge)}</strong> de marge nette.
+                  </span>
+                  <span className={bilan.marge >= bilan.cout ? "text-emerald-800 font-semibold" : "text-amber-900 font-semibold"}>
+                    {cout > 0
+                      ? <>Cadeaux : {fmtEuro(bilan.cout)} → {bilan.marge >= bilan.cout ? `+${fmtEuro(bilan.marge - bilan.cout)}` : `${fmtEuro(bilan.marge - bilan.cout)}`}</>
+                      : <>Indiquez le prix du cadeau pour voir le point d'équilibre.</>}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           <label className="text-xs text-gray-500 flex items-center gap-1.5">
             Du <input type="date" value={b.debut} onChange={e => setB(x => ({ ...x, debut: e.target.value }))} className={champ} />
           </label>
           <label className="text-xs text-gray-500 flex items-center gap-1.5">
             au <input type="date" value={b.fin} onChange={e => setB(x => ({ ...x, fin: e.target.value }))} className={champ} />
           </label>
-          <button onClick={enregistrer} disabled={!b.recompense?.trim() || !b.debut || !b.fin}
+          <button onClick={enregistrer}
+            disabled={!b.recompense?.trim() || !b.debut || !b.fin || (cible === "selection" && choisis.length === 0)}
             className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">
             {edition === "nouveau" ? "Enregistrer en brouillon" : "Enregistrer"}
           </button>
           <button onClick={() => setEdition(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
         </div>
         <p className="text-xs text-gray-400">
-          Les dossiers sont comptés à leur <strong>souscription</strong>, pas à leur dépôt. Un dossier déposé
-          le 28 et souscrit le 3 comptera pour la période suivante — annoncez-le à vos partenaires.
+          La marge par dossier, c'est ce qui reste à Frangola une fois la rétrocession de l'apporteur
+          et la part du mandataire déduites. Les dossiers sont comptés à leur <strong>souscription</strong>,
+          pas à leur dépôt.
           {edition === "nouveau" && <> Rien n'est visible des partenaires tant que vous n'avez pas publié.</>}
         </p>
       </div>
-  );
+    );
+  };
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
@@ -5876,13 +6084,18 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
             const et = ETIQUETTES[etat];
             const bornes = bornesChallenge(c);
             const objectif = Math.max(1, Number(c.objectif) || 1);
+            const vise = c.cible === "selection";
+            const nbVises = vise ? Object.keys(c.participants || {}).length : 0;
+            // Un challenge ciblé ne classe que ceux qu'il vise, chacun contre
+            // SON objectif — sinon le classement compare des choses
+            // différentes.
             const classement = bornes.valide
-              ? data.partners.filter(p => !p.deleted)
-                  .map(p => ({ p, n: souscritsSurPeriode(data.dossiers, p.id, bornes.debut, bornes.fin) }))
-                  .filter(x => x.n > 0)
-                  .sort((a, b2) => b2.n - a.n)
+              ? data.partners.filter(p => !p.deleted && challengeCible(c, p.id))
+                  .map(p => ({ p, n: souscritsSurPeriode(data.dossiers, p.id, bornes.debut, bornes.fin), obj: objectifChallenge(c, p.id) }))
+                  .filter(x => x.n > 0 || vise)
+                  .sort((a, b2) => (b2.n / b2.obj) - (a.n / a.obj))
               : [];
-            const gagnants = classement.filter(x => x.n >= objectif);
+            const gagnants = classement.filter(x => x.n >= x.obj);
             const joursRestants = bornes.valide ? Math.max(0, Math.ceil((bornes.fin - Date.now()) / 86400000)) : 0;
             const ouvert = deplie === c.id || etat === "encours";
 
@@ -5919,8 +6132,11 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                 {edition === c.id ? formulaire() : (
                   <>
                     <div className="text-xs text-gray-500 mt-1">
-                      {objectif} dossier{objectif > 1 ? "s" : ""} souscrit{objectif > 1 ? "s" : ""} pour gagner
+                      {vise
+                        ? <>{nbVises} partenaire{nbVises > 1 ? "s" : ""} ciblé{nbVises > 1 ? "s" : ""}, objectif propre à chacun, pour gagner</>
+                        : <>{objectif} dossier{objectif > 1 ? "s" : ""} souscrit{objectif > 1 ? "s" : ""} pour gagner</>}
                       {" "}<strong className="fa-navy">{c.recompense || "—"}</strong>
+                      {c.coutRecompense > 0 && <> ({fmtEuro(c.coutRecompense)} pièce)</>}
                       {bornes.valide && <> · du {fmtDate(bornes.debut)} au {fmtDate(bornes.fin)}</>}
                       {etat === "encours" && <> · {joursRestants} jour{joursRestants > 1 ? "s" : ""} restant{joursRestants > 1 ? "s" : ""}</>}
                     </div>
@@ -5951,8 +6167,8 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                     ) : (
                       <div className="space-y-1.5 mt-2">
                         {classement.map(x => {
-                          const pct = Math.min(100, Math.round((x.n / objectif) * 100));
-                          const atteint = x.n >= objectif;
+                          const pct = Math.min(100, Math.round((x.n / x.obj) * 100));
+                          const atteint = x.n >= x.obj;
                           return (
                             <div key={x.p.id} className="flex items-center gap-3 flex-wrap">
                               <span className="text-sm fa-navy font-medium w-44 shrink-0 truncate">
@@ -5962,7 +6178,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                                 <div className={`h-full ${atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
                               </div>
                               <span className={`text-xs font-semibold shrink-0 ${atteint ? "text-emerald-700" : "text-gray-500"}`}>
-                                {x.n} / {objectif}
+                                {x.n} / {x.obj}
                               </span>
                             </div>
                           );
