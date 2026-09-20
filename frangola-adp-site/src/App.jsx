@@ -5531,18 +5531,41 @@ function objectifChallenge(ch, partnerId) {
   return Math.max(1, Number(brut) || 1);
 }
 
+// Honoraires plancher facturés au client : tant qu'un partenaire n'a pas
+// d'historique, c'est sur ce montant qu'on raisonne. Il sous-estime plutôt
+// qu'il ne surestime, donc il demande un dossier de plus que nécessaire —
+// l'erreur va dans le bon sens.
+const CA_MINIMUM_REFERENCE = 300;
+// En dessous de ce nombre de dossiers gagnés, une moyenne ne veut rien dire :
+// un seul gros dossier ferait croire à une rentabilité qui n'existe pas.
+// Au-delà, la vraie moyenne du partenaire prend le relais automatiquement.
+const SEUIL_RECUL_CHALLENGE = 10;
+
+// Taux de rétrocession constaté sur un ensemble de dossiers.
+function tauxRetrocession(dossiers) {
+  const ca = dossiers.reduce((s, d) => s + (d.caAmount || 0), 0);
+  if (ca <= 0) return 0.30;
+  const retro = dossiers.reduce((s, d) => s + (d.commissionAmount || 0), 0);
+  return Math.min(0.9, Math.max(0, retro / ca));
+}
+
 // Économie d'un partenaire, telle que la calcule déjà le reste de
 // l'application : CA du dossier, moins la rétrocession de l'apporteur, moins
 // la part du mandataire. C'est ce qui reste réellement à Frangola, et donc ce
 // qui doit couvrir le coût de la récompense.
 function economiePartenaire(data, partnerId) {
-  const gagnes = (data?.dossiers || []).filter(d =>
-    d.partnerId === partnerId && STATUTS_CONTRAT_VIVANT.includes(d.status) && (d.caAmount || 0) > 0);
-  if (gagnes.length === 0) return { nb: 0, caMoyen: 0, margeMoyenne: 0 };
-  const ca = gagnes.reduce((s, d) => s + (d.caAmount || 0), 0);
-  const retro = gagnes.reduce((s, d) => s + (d.commissionAmount || 0), 0);
-  const marge = (ca - retro) * (1 - PART_MANDATAIRE);
-  return { nb: gagnes.length, caMoyen: ca / gagnes.length, margeMoyenne: marge / gagnes.length };
+  const gagnants = (data?.dossiers || []).filter(d =>
+    STATUTS_CONTRAT_VIVANT.includes(d.status) && (d.caAmount || 0) > 0);
+  const siens = gagnants.filter(d => d.partnerId === partnerId);
+  const nb = siens.length;
+  const assezDeRecul = nb >= SEUIL_RECUL_CHALLENGE;
+  const caObserve = nb > 0 ? siens.reduce((s, d) => s + (d.caAmount || 0), 0) / nb : 0;
+  // Sans assez de recul on retient le plancher ; son taux de rétrocession
+  // reste le sien dès qu'il a un dossier, sinon celui du cabinet.
+  const caReference = assezDeRecul ? caObserve : CA_MINIMUM_REFERENCE;
+  const taux = nb > 0 ? tauxRetrocession(siens) : tauxRetrocession(gagnants);
+  const margeMoyenne = caReference * (1 - taux) * (1 - PART_MANDATAIRE);
+  return { nb, caObserve, caReference, caMoyen: caReference, margeMoyenne, assezDeRecul, taux };
 }
 
 // Combien de dossiers ce partenaire doit-il apporter pour que la récompense
@@ -6033,17 +6056,20 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                       <span className="flex-1 min-w-0">
                         <span className="text-xs fa-navy font-semibold block truncate">{nomPartenaire(p)}</span>
                         <span className="text-[11px] text-gray-400">
-                          {eco.nb > 0
-                            ? <>{eco.nb} dossier{eco.nb > 1 ? "s" : ""} · {fmtEuro(eco.caMoyen)} de CA moyen</>
-                            : <>aucun dossier gagné — objectif à fixer à la main</>}
+                          {eco.assezDeRecul
+                            ? <>sa moyenne réelle sur {eco.nb} dossiers : <strong className="text-gray-500">{fmtEuro(eco.caObserve)}</strong> de CA</>
+                            : <>base {fmtEuro(CA_MINIMUM_REFERENCE)} — {eco.nb}/{SEUIL_RECUL_CHALLENGE} dossiers avant de passer sur sa vraie moyenne</>}
                         </span>
                       </span>
-                      <span className="w-24 text-right text-xs text-gray-600">{eco.nb > 0 ? fmtEuroPrecis(eco.margeMoyenne) : "—"}</span>
+                      <span className="w-24 text-right text-xs text-gray-600">
+                        {fmtEuroPrecis(eco.margeMoyenne)}
+                        {!eco.assezDeRecul && <span className="block text-[10px] text-gray-400">estimation</span>}
+                      </span>
                       <input type="number" onFocus={selectionTotale} min="1" value={participants[id]}
                         onChange={e => setB(x => ({ ...x, participants: { ...x.participants, [id]: sansZeroDeTete(e.target.value) } }))}
                         className={champ + " w-16 text-center"} />
                       <span className={`w-24 text-right text-xs font-semibold ${rentable ? "text-emerald-700" : "text-red-600"}`}>
-                        {eco.nb > 0 ? fmtEuro(rapporte) : "—"}
+                        {fmtEuro(rapporte)}
                         {suggere !== null && suggere !== obj && (
                           <button onClick={() => setB(x => ({ ...x, participants: { ...x.participants, [id]: suggere } }))}
                             title={`Il en faut ${suggere} pour couvrir ${fmtEuro(cout)}`}
@@ -6089,8 +6115,10 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
         </div>
         <p className="text-xs text-gray-400">
           La marge par dossier, c'est ce qui reste à Frangola une fois la rétrocession de l'apporteur
-          et la part du mandataire déduites. Les dossiers sont comptés à leur <strong>souscription</strong>,
-          pas à leur dépôt.
+          et la part du mandataire déduites. Tant qu'un partenaire n'a pas {SEUIL_RECUL_CHALLENGE} dossiers
+          gagnés, elle est estimée sur un plancher de {fmtEuro(CA_MINIMUM_REFERENCE)} d'honoraires ;
+          au-delà, sa moyenne réelle prend le relais automatiquement. Les dossiers sont comptés à leur
+          <strong> souscription</strong>, pas à leur dépôt.
           {edition === "nouveau" && <> Rien n'est visible des partenaires tant que vous n'avez pas publié.</>}
         </p>
       </div>
