@@ -423,6 +423,29 @@ function caGenerePar(partnerId) {
 // Calendrier mensuel des rétrocessions d'un partenaire : un mois par ligne,
 // avec son état. « Réglé » quand l'ordre de virement est déposé, « à régler »
 // quand Frangola a encaissé mais n'a pas encore reversé, « à venir » sinon.
+// Apporteur hors immobilier : forfait fixe par contrat, réglé EN UNE FOIS dès
+// que Frangola a encaissé au moins le montant du forfait sur ce dossier. Douze
+// cartes cadeaux de huit euros n'auraient aucun sens — ni pour lui, ni pour la
+// gestion.
+function forfaitsRetrocession(partner, dossiers) {
+  const versements = partner?.retrocessionVersements || [];
+  const forfaitPartenaire = Number(partner?.flatFee) || 0;
+  return (dossiers || [])
+    .filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status))
+    .map(d => {
+      const montant = (d.commissionAmount || 0) > 0 ? d.commissionAmount : forfaitPartenaire;
+      const encaisse = partEncaissee(d, d.caAmount || 0);
+      const cle = "d:" + d.id;
+      const versement = versements.find(v => v.cle === cle) || null;
+      const couvert = montant > 0 && encaisse + 0.005 >= montant;
+      return {
+        dossier: d, cle, libelle: clientName(d), montant, encaisse, couvert, versement,
+        etat: versement ? "regle" : (couvert ? "a_regler" : "a_venir"),
+      };
+    })
+    .filter(x => x.montant > 0);
+}
+
 function calendrierRetrocession(partner, dossiers) {
   const lignes = echeancesRetrocession(dossiers);
   const versements = partner?.retrocessionVersements || [];
@@ -441,7 +464,7 @@ function calendrierRetrocession(partner, dossiers) {
     m.montant += l.montant; m.nb += 1; if (l.recu) m.recus += 1;
   }
   for (const m of mois) {
-    m.versement = versements.find(v => v.mois === m.cle) || null;
+    m.versement = versements.find(v => v.cle === m.cle) || null;
     m.encaisse = m.nb > 0 && m.recus === m.nb;
     m.etat = m.versement ? "regle" : (m.encaisse ? "a_regler" : "a_venir");
   }
@@ -1185,8 +1208,8 @@ export default function App() {
   // Règlement d'une échéance de rétrocession à un partenaire, mois par mois.
   // L'ordre de virement est joint : le partenaire n'a pas à demander la preuve,
   // il la télécharge depuis son calendrier.
-  async function enregistrerVirementPartenaire(partnerId, mois, montant, dateVirement, file) {
-    if (!mois || !dateVirement) { setGlobalError("Mois et date de virement requis."); return false; }
+  async function enregistrerVirementPartenaire(partnerId, cle, libelle, montant, dateVirement, file, mode) {
+    if (!cle || !dateVirement) { setGlobalError("Échéance et date de règlement requises."); return false; }
     setBusy(true);
     try {
       let ordre = null;
@@ -1197,13 +1220,13 @@ export default function App() {
         await storage.set(key, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
         ordre = { name: file.name, key, size: file.size };
       }
-      const versement = { id: uid(), mois, montant: Number(montant) || 0, dateVirement, ordre, at: Date.now() };
+      const versement = { id: uid(), cle, libelle: libelle || cle, montant: Number(montant) || 0, dateVirement, ordre, mode: mode || "Virement", at: Date.now() };
       return await mutateData(base => withLog({
         ...base,
         partners: base.partners.map(p => p.id === partnerId
-          ? { ...p, retrocessionVersements: [...(p.retrocessionVersements || []).filter(v => v.mois !== mois), versement] }
+          ? { ...p, retrocessionVersements: [...(p.retrocessionVersements || []).filter(v => v.cle !== cle), versement] }
           : p),
-      }, `a réglé la rétrocession de ${mois} à un partenaire`));
+      }, `a réglé la rétrocession « ${libelle || cle} » à un partenaire`));
     } finally { setBusy(false); }
   }
 
@@ -3338,26 +3361,26 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
               </div>
 
               {(() => {
-                const ech = echeancesRetrocession(dossiers);
-                if (ech.length === 0) return null;
-                const recues = ech.filter(x => x.recu);
-                const aVenir = ech.filter(x => !x.recu)
-                  .sort((a, b) => (a.datePrevue || "9999").localeCompare(b.datePrevue || "9999"));
-                const totalRecu = recues.reduce((sm, x) => sm + x.montant, 0);
-                const totalAVenir = aVenir.reduce((sm, x) => sm + x.montant, 0);
+                // Deux mécaniques : au forfait, une ligne par dossier réglée en
+                // une fois ; au pourcentage, un calendrier mensuel.
+                const auForfait = partner.flatFee != null;
+                const forfaits = auForfait ? forfaitsRetrocession(partner, dossiers) : [];
+                const cal = auForfait ? { mois: [], sansDate: 0 } : calendrierRetrocession(partner, dossiers);
+                const lignesVue = auForfait ? forfaits : cal.mois;
+                if (lignesVue.length === 0) return null;
+                const totalRecu = lignesVue.filter(x => x.etat === "regle")
+                  .reduce((sm, x) => sm + (x.versement?.montant || 0), 0);
+                const totalAVenir = lignesVue.filter(x => x.etat !== "regle")
+                  .reduce((sm, x) => sm + x.montant, 0);
                 if (totalRecu < 0.005 && totalAVenir < 0.005) return null;
-
-                // Un mois par ligne, du premier au dernier, avec son état.
-                // Le vert n'est pas décoratif : il signifie « virement parti,
-                // justificatif disponible ».
-                const cal = calendrierRetrocession(partner, dossiers);
 
                 return (
                   <div className="bg-white border border-gray-200 rounded-2xl p-6">
                     <div className="font-display font-semibold fa-navy mb-1">Mes rétrocessions</div>
                     <p className="text-sm text-gray-500 mb-4">
-                      Vos honoraires vous sont reversés au rythme où Frangola les encaisse. Selon le contrat,
-                      l'assureur les collecte en une fois ou les étale jusqu'à douze mois.
+                      {auForfait
+                        ? "Votre forfait vous est réglé en une seule fois par dossier, dès que Frangola a encaissé le montant correspondant."
+                        : "Vos honoraires vous sont reversés au rythme où Frangola les encaisse. Selon le contrat, l'assureur les collecte en une fois ou les étale jusqu'à douze mois."}
                     </p>
                     <div className="grid sm:grid-cols-2 gap-3 mb-4">
                       <div className="fa-bg-offwhite rounded-xl p-4">
@@ -3370,28 +3393,32 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                       </div>
                     </div>
 
-                    {cal.mois.length > 0 && (
+                    {lignesVue.length > 0 && (
                       <div className="space-y-1.5">
-                        <div className="text-xs font-semibold fa-navy mb-1">Calendrier des versements</div>
-                        {cal.mois.map(m => (
+                        <div className="text-xs font-semibold fa-navy mb-1">
+                          {auForfait ? "Vos forfaits, dossier par dossier" : "Calendrier des versements"}
+                        </div>
+                        {lignesVue.map(m => (
                           <div key={m.cle}
                             className={`flex items-center justify-between gap-2 flex-wrap rounded-lg px-3 py-2 border ${
                               m.etat === "regle" ? "bg-emerald-50 border-emerald-200"
                               : m.etat === "a_regler" ? "fa-bg-gold border-amber-300"
                               : "fa-bg-offwhite border-transparent"}`}>
-                            <span className="text-sm fa-navy capitalize font-medium">{m.libelle}</span>
+                            <span className={`text-sm fa-navy font-medium ${auForfait ? "" : "capitalize"}`}>{m.libelle}</span>
                             <span className="text-xs text-gray-500">
                               {m.etat === "regle"
-                                ? <>versé le {fmtDate(new Date(m.versement.dateVirement + "T12:00:00").getTime())}</>
+                                ? <>{m.versement.mode === "Carte cadeau" ? "carte cadeau remise" : "versé"} le {fmtDate(new Date(m.versement.dateVirement + "T12:00:00").getTime())}</>
                                 : m.etat === "a_regler"
-                                  ? "encaissé par Frangola — versement en préparation"
-                                  : `${m.nb} échéance${m.nb > 1 ? "s" : ""}`}
+                                  ? "encaissé par Frangola — règlement en préparation"
+                                  : (auForfait
+                                      ? `${fmtEuroPrecis(m.encaisse)} encaissés sur ${fmtEuroPrecis(m.montant)}`
+                                      : `${m.nb} échéance${m.nb > 1 ? "s" : ""}`)}
                             </span>
                             <span className="flex items-center gap-2">
                               {m.etat === "regle" && m.versement.ordre && (
                                 <button onClick={() => downloadStoredFile(m.versement.ordre.key, m.versement.ordre.name)}
                                   className="flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline">
-                                  <Download size={12} /> ordre de virement
+                                  <Download size={12} /> {m.versement.mode === "Carte cadeau" ? "carte cadeau" : "ordre de virement"}
                                 </button>
                               )}
                               <span className={`text-sm font-bold ${m.etat === "regle" ? "text-emerald-700" : "fa-navy"}`}>
@@ -5006,33 +5033,47 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
   const [ouvertId, setOuvertId] = useState(null);      // "partnerId|mois"
   const [date, setDate] = useState("");
   const [fichier, setFichier] = useState(null);
+  const [mode, setMode] = useState("Virement");
   const [historique, setHistorique] = useState(false);
   const champ = useRef(null);
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
   const nomDe = (p) => p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
-  const moisFr = (cle) => new Date(cle + "-01T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
 
+  // Deux mécaniques distinctes : les apporteurs immobiliers sont réglés mois
+  // par mois au rythme des encaissements ; les hors immobilier reçoivent leur
+  // forfait en une fois, dès qu'il est couvert.
   const lignes = [];
   const reglees = [];
   for (const p of data.partners.filter(x => !x.deleted)) {
     const siens = data.dossiers.filter(d => d.partnerId === p.id);
     if (siens.length === 0) continue;
-    const cal = calendrierRetrocession(p, siens);
-    for (const m of cal.mois) {
-      if (m.etat === "a_regler") lignes.push({ p, m });
-      else if (m.etat === "regle") reglees.push({ p, m });
+    const forfait = p.flatFee != null;
+    const items = forfait
+      ? forfaitsRetrocession(p, siens).map(f => ({
+          cle: f.cle, libelle: f.libelle, montant: f.montant, etat: f.etat, versement: f.versement,
+          detail: f.etat === "a_venir" ? `${fmtEuroPrecis(f.encaisse)} encaissés sur ${fmtEuroPrecis(f.montant)}` : null,
+        }))
+      : calendrierRetrocession(p, siens).mois.map(m => ({
+          cle: m.cle, libelle: m.libelle, montant: m.montant, etat: m.etat, versement: m.versement, detail: null,
+        }));
+    for (const it of items) {
+      if (it.etat === "a_regler") lignes.push({ p, m: it, forfait });
+      else if (it.etat === "regle") reglees.push({ p, m: it, forfait });
     }
   }
   lignes.sort((a, b) => a.m.cle.localeCompare(b.m.cle));
-  reglees.sort((a, b) => b.m.cle.localeCompare(a.m.cle));
+  reglees.sort((a, b) => (b.m.versement?.at || 0) - (a.m.versement?.at || 0));
 
   const total = lignes.reduce((s, x) => s + x.m.montant, 0);
 
   async function valider(p, m) {
-    const ok = await onVirement(p.id, m.cle, m.montant, date || aujourdhui(), fichier);
+    const ok = await onVirement(p.id, m.cle, m.libelle, m.montant, date || aujourdhui(), fichier, mode);
     if (ok !== false) { setOuvertId(null); setDate(""); setFichier(null); }
   }
+  // Les apporteurs hors immobilier sont rémunérés au forfait, et réglés en
+  // carte cadeau le plus souvent : on prérègle le mode sur le leur.
+  const modeParDefaut = (p) => (p.flatFee != null ? "Carte cadeau" : "Virement");
 
   if (lignes.length === 0 && reglees.length === 0) return null;
 
@@ -5055,10 +5096,13 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
               <div key={cle} className="fa-bg-gold rounded-lg px-3 py-2.5">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <span className="text-sm fa-navy font-bold">{nomDe(p)}</span>
-                  <span className="text-xs text-teal-900/70 capitalize">{moisFr(m.cle)}</span>
+                  {p.flatFee != null && (
+                    <span className="text-[11px] font-semibold bg-violet-100 text-violet-800 px-2 py-0.5 rounded-full">Hors immo</span>
+                  )}
+                  <span className="text-xs text-teal-900/70 capitalize">{m.libelle}</span>
                   <span className="text-sm font-bold fa-navy ml-auto">{fmtEuroPrecis(m.montant)}</span>
                   {!ouvert && (
-                    <button onClick={() => { setOuvertId(cle); setDate(aujourdhui()); setFichier(null); }}
+                    <button onClick={() => { setOuvertId(cle); setDate(aujourdhui()); setFichier(null); setMode(modeParDefaut(p)); }}
                       className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">
                       Enregistrer le virement
                     </button>
@@ -5071,9 +5115,13 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
                       <input type="date" value={date} onChange={e => setDate(e.target.value)}
                         className="text-xs border border-amber-300 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500" />
                     </label>
+                    <select value={mode} onChange={e => setMode(e.target.value)}
+                      className="text-xs border border-amber-300 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      {PAYMENT_METHODS.map(x => <option key={x} value={x}>{x}</option>)}
+                    </select>
                     <button onClick={() => champ.current?.click()}
                       className="text-xs font-medium bg-white border border-amber-300 text-teal-900 px-3 py-1.5 rounded-lg transition">
-                      {fichier ? fichier.name : "Joindre l'ordre de virement"}
+                      {fichier ? fichier.name : (mode === "Carte cadeau" ? "Joindre la carte cadeau" : "Joindre l'ordre de virement")}
                     </button>
                     <input type="file" accept="application/pdf,image/*" className="hidden" ref={champ}
                       onChange={e => setFichier(e.target.files?.[0] || null)} />
@@ -5101,14 +5149,14 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
               {reglees.map(({ p, m }) => (
                 <div key={p.id + "|" + m.cle} className="flex items-center justify-between gap-2 flex-wrap bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
                   <span className="text-sm fa-navy font-medium">{nomDe(p)}</span>
-                  <span className="text-xs text-gray-500 capitalize">{moisFr(m.cle)}</span>
+                  <span className="text-xs text-gray-500 capitalize">{m.libelle}</span>
                   <span className="text-xs text-emerald-700">
-                    versé le {fmtDate(new Date(m.versement.dateVirement + "T12:00:00").getTime())}
+                    {m.versement.mode === "Carte cadeau" ? "carte cadeau remise" : "versé"} le {fmtDate(new Date(m.versement.dateVirement + "T12:00:00").getTime())}
                   </span>
                   {m.versement.ordre && (
                     <button onClick={() => downloadStoredFile(m.versement.ordre.key, m.versement.ordre.name)}
                       className="flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline">
-                      <Download size={12} /> justificatif
+                      <Download size={12} /> {m.versement.mode === "Carte cadeau" ? "carte cadeau" : "ordre de virement"}
                     </button>
                   )}
                   <span className="text-sm font-bold text-emerald-700 ml-auto">{fmtEuroPrecis(m.versement.montant)}</span>
@@ -7549,6 +7597,40 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                     <div className="font-display text-2xl font-bold text-red-500">{deletedPartners.length} <span className="text-sm font-normal text-gray-400">({pct(deletedPartners.length)}%)</span></div>
                   </div>
                 </div>
+
+                {/* Deux réseaux dans le réseau : les apporteurs immobiliers,
+                    rémunérés en pourcentage, et les apporteurs hors immobilier,
+                    au forfait et réglés le plus souvent en carte cadeau. */}
+                {(() => {
+                  const vivants = partners.filter(p => !p.deleted);
+                  const horsImmo = vivants.filter(p => p.flatFee != null);
+                  const immo = vivants.filter(p => p.flatFee == null);
+                  const forfaitMoyen = horsImmo.length
+                    ? horsImmo.reduce((sm, p) => sm + (Number(p.flatFee) || 0), 0) / horsImmo.length
+                    : 0;
+                  const dossiersDe = (liste) => {
+                    const ids = new Set(liste.map(p => p.id));
+                    return dossiers.filter(d => ids.has(d.partnerId)).length;
+                  };
+                  return (
+                    <div className="grid sm:grid-cols-2 gap-4 mt-4">
+                      <div className="bg-white border border-gray-200 rounded-2xl p-5">
+                        <div className="text-xs text-gray-400 mb-1">Apporteurs immobiliers</div>
+                        <div className="font-display text-2xl font-bold fa-teal-text">{immo.length}</div>
+                        <div className="text-xs text-gray-400 mt-1">
+                          rémunérés en pourcentage · {dossiersDe(immo)} dossier{dossiersDe(immo) > 1 ? "s" : ""}
+                        </div>
+                      </div>
+                      <div className="bg-white border border-violet-200 rounded-2xl p-5">
+                        <div className="text-xs text-gray-400 mb-1">Apporteurs hors immobilier</div>
+                        <div className="font-display text-2xl font-bold text-violet-700">{horsImmo.length}</div>
+                        <div className="text-xs text-gray-400 mt-1">
+                          au forfait{forfaitMoyen > 0 && <> · {fmtEuro(forfaitMoyen)} en moyenne</>} · {dossiersDe(horsImmo)} dossier{dossiersDe(horsImmo) > 1 ? "s" : ""}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div>
