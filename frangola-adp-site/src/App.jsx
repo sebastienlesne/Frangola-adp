@@ -892,13 +892,14 @@ function forfaitsRetrocession(partner, dossiers) {
   return (dossiers || [])
     .filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status))
     .map(d => {
-      const montant = (d.commissionAmount || 0) > 0 ? d.commissionAmount : forfaitPartenaire;
+      const bonus = bonusTotalDossier(d);
+      const montant = ((d.commissionAmount || 0) > 0 ? d.commissionAmount : forfaitPartenaire) + bonus;
       const encaisse = partEncaissee(d, d.caAmount || 0);
       const cle = "d:" + d.id;
       const versement = versements.find(v => (v.cle ?? v.mois) === cle) || null;
       const couvert = montant > 0 && encaisse + 0.005 >= montant;
       return {
-        dossier: d, cle, libelle: clientName(d), montant, encaisse, couvert, versement,
+        dossier: d, cle, libelle: clientName(d), montant, bonus, encaisse, couvert, versement,
         etat: versement ? "regle" : (couvert ? "a_regler" : "a_venir"),
       };
     })
@@ -915,12 +916,12 @@ function calendrierRetrocession(partner, dossiers) {
     let m = mois.find(x => x.cle === cle);
     if (!m) {
       m = {
-        cle, montant: 0, nb: 0, recus: 0,
+        cle, montant: 0, bonus: 0, nb: 0, recus: 0,
         libelle: new Date(l.datePrevue + "T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }),
       };
       mois.push(m);
     }
-    m.montant += l.montant; m.nb += 1; if (l.recu) m.recus += 1;
+    m.montant += l.montant; m.bonus += (l.bonus || 0); m.nb += 1; if (l.recu) m.recus += 1;
   }
   for (const m of mois) {
     // Tolérance de lecture : les versements enregistrés avant le renommage
@@ -939,12 +940,16 @@ function echeancesRetrocession(dossiers) {
   return (dossiers || []).filter(d => d.status !== "KO").flatMap(d => {
     const ech = echeancesDe(d);
     const parts = repartir(d.commissionAmount || 0, ech.length);
+    // La prime de challenge se fractionne sur le même échéancier que la
+    // commission : elle est attachée au dossier, elle suit son règlement.
+    const partsBonus = repartir(bonusTotalDossier(d), ech.length);
     return ech.map((e, i) => ({
       cle: d.id + "-" + (e.numero || i + 1),
       dossier: d,
       numero: e.numero || i + 1,
       total: ech.length,
       montant: parts[i],
+      bonus: partsBonus[i],
       datePrevue: e.datePrevue,
       encaisseLe: e.encaisseLe || null,
       recu: !!(e.encaisseLe || e.payeSansDate),
@@ -954,11 +959,11 @@ function echeancesRetrocession(dossiers) {
 
 // Ce que le partenaire a déjà gagné, et ce qui lui reste à venir.
 function remunerationEncaissee(dossier) {
-  return partEncaissee(dossier, dossier.commissionAmount || 0);
+  return partEncaissee(dossier, (dossier.commissionAmount || 0) + bonusTotalDossier(dossier));
 }
 function remunerationAVenir(dossier) {
   if (dossier.status === "KO") return 0;
-  return partAVenir(dossier, dossier.commissionAmount || 0);
+  return partAVenir(dossier, (dossier.commissionAmount || 0) + bonusTotalDossier(dossier));
 }
 
 function bilanParrainage(partnerId) {
@@ -3330,8 +3335,9 @@ function BanniereBoost({ challenge, partner, dossiers, debut, fin, detail, setDe
             </div>
           ))}
           <div className="text-[11px] text-violet-900/50 pt-1">
-            Ce bonus s'ajoute à votre rétrocession habituelle. Il vous est versé une fois les
-            honoraires du dossier encaissés, comme le reste.
+            Ce bonus s'ajoute à votre rétrocession habituelle et suit le même rythme : si les
+            honoraires d'un dossier sont collectés en douze fois, sa prime vous est versée en douze
+            fois elle aussi. Vous la retrouvez mois par mois dans votre calendrier de versements.
           </div>
         </div>
       )}
@@ -4202,8 +4208,11 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
                 if (lignesVue.length === 0) return null;
                 const totalRecu = lignesVue.filter(x => x.etat === "regle")
                   .reduce((sm, x) => sm + (x.versement?.montant || 0), 0);
+                // Le bonus de challenge est fractionné sur le même échéancier
+                // que la commission : il s'ajoute au montant du mois.
+                const duMois = (x) => x.montant + (auForfait ? 0 : (x.bonus || 0));
                 const totalAVenir = lignesVue.filter(x => x.etat !== "regle")
-                  .reduce((sm, x) => sm + x.montant, 0);
+                  .reduce((sm, x) => sm + duMois(x), 0);
                 if (totalRecu < 0.005 && totalAVenir < 0.005) return null;
 
                 return (
@@ -4253,9 +4262,19 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
                                   <Download size={12} /> {m.versement.mode === "Carte cadeau" ? "carte cadeau" : "ordre de virement"}
                                 </button>
                               )}
-                              <span className={`text-sm font-bold ${m.etat === "regle" ? "text-emerald-700" : "fa-navy"}`}>
-                                {fmtEuroPrecis(m.etat === "regle" ? m.versement.montant : m.montant)}
-                              </span>
+                              {(m.bonus || 0) > 0.005 && m.etat !== "regle" ? (
+                                <span className="flex flex-col items-end leading-tight">
+                                  <span className="text-[11px] text-gray-500">rétrocession {fmtEuroPrecis(m.montant)}</span>
+                                  <span className="text-[11px] font-semibold text-violet-700">⚡ bonus +{fmtEuroPrecis(m.bonus)}</span>
+                                  <span className="text-sm font-bold fa-navy border-t border-black/15 mt-0.5 pt-0.5">
+                                    {fmtEuroPrecis(duMois(m))}
+                                  </span>
+                                </span>
+                              ) : (
+                                <span className={`text-sm font-bold ${m.etat === "regle" ? "text-emerald-700" : "fa-navy"}`}>
+                                  {fmtEuroPrecis(m.etat === "regle" ? m.versement.montant : duMois(m))}
+                                </span>
+                              )}
                             </span>
                           </div>
                         ))}
@@ -5627,6 +5646,34 @@ function dossiersBoostes(ch, dossiers, partnerId) {
   if (!valide || !challengeCible(ch, partnerId)) return [];
   return (dossiers || []).filter(d => {
     if (d.partnerId !== partnerId || d.status === "KO") return false;
+    const t = dateGain(d);
+    return t !== null && t >= debut && t <= fin;
+  });
+}
+
+// Bonus total dû sur un dossier, tous boosts publiés confondus. La prime est
+// attachée au dossier : elle se règle donc exactement comme lui — si les
+// honoraires sont collectés en douze fois, la prime l'est aussi.
+function bonusTotalDossier(d) {
+  if (!d || d.status === "KO") return 0;
+  const challenges = challengesDe(_colorDataRef).filter(c => estBoost(c) && c.publie);
+  let total = 0;
+  for (const ch of challenges) {
+    const { debut, fin, valide } = bornesChallenge(ch);
+    if (!valide || !challengeCible(ch, d.partnerId)) continue;
+    const t = dateGain(d);
+    if (t === null || t < debut || t > fin) continue;
+    total += bonusDossier(ch, d);
+  }
+  return total;
+}
+// Les opérations qui bonifient ce dossier, pour pouvoir les nommer à l'écran.
+function boostsDuDossier(d) {
+  if (!d || d.status === "KO") return [];
+  return challengesDe(_colorDataRef).filter(c => {
+    if (!estBoost(c) || !c.publie) return false;
+    const { debut, fin, valide } = bornesChallenge(c);
+    if (!valide || !challengeCible(c, d.partnerId)) return false;
     const t = dateGain(d);
     return t !== null && t >= debut && t <= fin;
   });
@@ -7425,9 +7472,6 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
   const nomDe = (p) => nomPartenaire(p);
-  // Toutes les opérations « commission boostée », publiées ou passées : un
-  // boost terminé reste dû tant qu'il n'a pas été versé.
-  const boosts = challengesDe(data).filter(c => estBoost(c) && bornesChallenge(c).valide && c.publie);
 
   // Deux mécaniques distinctes : les apporteurs immobiliers sont réglés mois
   // par mois au rythme des encaissements ; les hors immobilier reçoivent leur
@@ -7440,44 +7484,19 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
     const forfait = p.flatFee != null;
     const items = forfait
       ? forfaitsRetrocession(p, siens).map(f => ({
-          cle: f.cle, libelle: f.libelle, montant: f.montant, etat: f.etat, versement: f.versement,
+          cle: f.cle, libelle: f.libelle, montant: f.montant, bonus: f.bonus || 0, etat: f.etat, versement: f.versement,
           detail: f.etat === "a_venir" ? `${fmtEuroPrecis(f.encaisse)} encaissés sur ${fmtEuroPrecis(f.montant)}` : null,
         }))
       : calendrierRetrocession(p, siens).mois.map(m => ({
-          cle: m.cle, libelle: m.libelle, montant: m.montant, etat: m.etat, versement: m.versement, detail: null,
+          cle: m.cle, libelle: m.libelle, montant: m.montant + (m.bonus || 0), bonus: m.bonus || 0,
+          etat: m.etat, versement: m.versement, detail: null,
         }));
     for (const it of items) {
       if (it.etat === "a_regler") lignes.push({ p, m: it, forfait });
       else if (it.etat === "regle") reglees.push({ p, m: it, forfait });
     }
-
-    // Bonus de challenge : une ligne par opération, distincte de la
-    // rétrocession. On ne touche pas aux commissions enregistrées, le bonus
-    // se calcule et se règle à part — et il suit la même règle que le reste,
-    // on ne verse que sur des honoraires déjà encaissés.
-    const versements = p.retrocessionVersements || [];
-    for (const ch of boosts) {
-      const concernes = dossiersBoostes(ch, siens, p.id);
-      if (concernes.length === 0) continue;
-      const acquis = concernes.filter(d => partEncaissee(d, d.caAmount || 0) + 0.005 >= (d.caAmount || 0));
-      const montant = acquis.reduce((s2, d) => s2 + bonusDossier(ch, d), 0);
-      const aVenir = concernes.reduce((s2, d) => s2 + bonusDossier(ch, d), 0) - montant;
-      const cle = "bonus:" + ch.id;
-      const versement = versements.find(v => (v.cle ?? v.mois) === cle) || null;
-      if (!versement && montant < 0.005) continue;
-      const it = {
-        cle,
-        libelle: `Bonus « ${ch.titre || "challenge"} » — ${acquis.length} dossier${acquis.length > 1 ? "s" : ""}`,
-        montant: versement ? versement.montant : montant,
-        etat: versement ? "regle" : "a_regler",
-        versement,
-        detail: aVenir > 0.005 ? `${fmtEuroPrecis(aVenir)} encore à venir sur cette opération` : null,
-        bonus: true,
-      };
-      if (it.etat === "a_regler") lignes.push({ p, m: it, forfait });
-      else reglees.push({ p, m: it, forfait });
-    }
   }
+
   lignes.sort((a, b) => a.m.cle.localeCompare(b.m.cle));
   reglees.sort((a, b) => (b.m.versement?.at || 0) - (a.m.versement?.at || 0));
 
@@ -7526,6 +7545,11 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
                     <span className="text-[11px] font-semibold bg-violet-100 text-violet-800 px-2 py-0.5 rounded-full">Hors immo</span>
                   )}
                   <span className="text-xs text-teal-900/70 capitalize">{m.libelle}</span>
+                  {(m.bonus || 0) > 0.005 && (
+                    <span className="text-[11px] font-semibold text-violet-800 bg-white/70 rounded-full px-2 py-0.5">
+                      dont ⚡ {fmtEuroPrecis(m.bonus)} de prime
+                    </span>
+                  )}
                   <span className="text-sm font-bold fa-navy ml-auto">{fmtEuroPrecis(m.montant)}</span>
                   {!ouvert && (
                     <button onClick={() => { setOuvertId(cle); setDate(aujourdhui()); setFichier(null); setMode(modeParDefaut(p)); }}
