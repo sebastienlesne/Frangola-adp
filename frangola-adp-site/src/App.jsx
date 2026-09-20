@@ -343,6 +343,21 @@ function clientName(d) {
 }
 // Identité affichée d'un partenaire (ou d'un filleul). Point de passage unique
 // pour que le mode discret n'en laisse échapper aucun.
+// Un partenaire peut avoir plusieurs contrats : un avenant, une version
+// renégociée, un second réseau. Le champ historique `contractFile` reste en
+// place et se lit simplement en tête de liste — on n'écrase jamais un nom de
+// champ déjà présent dans les données de production, on en ajoute un et on
+// lit les deux.
+const TYPES_CONTRAT = ["Contrat partenariat", "Contrat parrainage"];
+function contratsDe(p) {
+  // Les documents déposés avant l'ajout des libellés sont forcément le contrat
+  // de partenariat : c'était le seul possible.
+  const ancien = p?.contractFile
+    ? [{ ...p.contractFile, id: "contrat-initial", libelle: p.contractFile.libelle || TYPES_CONTRAT[0] }]
+    : [];
+  return [...ancien, ...(p?.contractFiles || [])].map(c => ({ ...c, libelle: c.libelle || TYPES_CONTRAT[0] }));
+}
+
 function nomPartenaire(p) {
   if (!p) return "—";
   return p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
@@ -1606,14 +1621,53 @@ export default function App() {
     }));
   }
 
-  async function setChallengePartenaires(fields) {
+  // Ajout / modification / suppression d'un challenge ponctuel. L'ancien
+  // challenge unique garde son emplacement d'origine : on le modifie là où il
+  // est plutôt que de le recopier ailleurs.
+  async function ajouterChallenge(fields) {
+    const c = { id: uid(), creeLe: Date.now(), publie: false, ...fields };
     await mutateData(base => ({
       ...base,
-      settings: {
-        ...base.settings,
-        challengePartenaires: { ...(base.settings.challengePartenaires || {}), ...fields },
-      },
+      settings: { ...base.settings, challenges: [...(base.settings.challenges || []), c] },
     }));
+    return c;
+  }
+  async function majChallenge(id, fields) {
+    await mutateData(base => {
+      if (id === ID_CHALLENGE_INITIAL) {
+        const { publie, ...reste } = fields;
+        const maj = { ...reste };
+        if (publie !== undefined) maj.actif = publie;
+        return {
+          ...base,
+          settings: {
+            ...base.settings,
+            challengePartenaires: { ...(base.settings.challengePartenaires || {}), ...maj },
+          },
+        };
+      }
+      return {
+        ...base,
+        settings: {
+          ...base.settings,
+          challenges: (base.settings.challenges || []).map(c => c.id === id ? { ...c, ...fields } : c),
+        },
+      };
+    });
+  }
+  async function supprimerChallenge(id) {
+    await mutateData(base => {
+      if (id === ID_CHALLENGE_INITIAL) {
+        return { ...base, settings: { ...base.settings, challengePartenaires: null } };
+      }
+      return {
+        ...base,
+        settings: {
+          ...base.settings,
+          challenges: (base.settings.challenges || []).filter(c => c.id !== id),
+        },
+      };
+    });
   }
 
   async function setChallengeGoals(fields) {
@@ -1686,7 +1740,7 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
-  async function uploadPartnerContract(partnerId, file) {
+  async function uploadPartnerContract(partnerId, file, libelle) {
     if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
     setBusy(true);
     try {
@@ -1696,11 +1750,31 @@ export default function App() {
       await mutateData(base => ({
         ...base,
         partners: base.partners.map(p => p.id === partnerId
-          ? { ...p, contractFile: { name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() } }
+          ? { ...p, contractFiles: [...(p.contractFiles || []), { id: uid(), libelle: libelle || TYPES_CONTRAT[0], name: file.name, key: fileKey, size: file.size, uploadedAt: Date.now() }] }
           : p),
       }));
       return true;
     } finally { setBusy(false); }
+  }
+
+  // En démonstration on ne touche à rien dans Supabase, suppressions comprises.
+  async function supprimerFichier(key) {
+    if (demoRef.current || !key) return;
+    try { await storage.delete(key, true); } catch (e) { /* le blob restera orphelin, sans conséquence */ }
+  }
+
+  async function removePartnerContract(partnerId, contratId) {
+    const partenaire = data.partners.find(p => p.id === partnerId);
+    const cible = contratsDe(partenaire).find(c => c.id === contratId);
+    await mutateData(base => ({
+      ...base,
+      partners: base.partners.map(p => {
+        if (p.id !== partnerId) return p;
+        if (contratId === "contrat-initial") return { ...p, contractFile: null };
+        return { ...p, contractFiles: (p.contractFiles || []).filter(c => c.id !== contratId) };
+      }),
+    }));
+    await supprimerFichier(cible?.key);
   }
 
   // Le partenaire dépose sa facture de commission ; l'admin en suit le paiement.
@@ -2176,7 +2250,7 @@ export default function App() {
             <PartnerDashboard
               partner={cible}
               dossiers={data.dossiers.filter(d => d.partnerId === cible.id)}
-              challenge={data.settings?.challengePartenaires || null}
+              challenges={challengesDe(data)}
               onLogout={() => setApercuPartnerId(null)}
               onCreateDossier={bloque}
               onDeclarerParrainage={bloque}
@@ -2198,7 +2272,7 @@ export default function App() {
         <PartnerDashboard
           partner={data.partners.find(p => p.id === currentPartner.id) || currentPartner}
           dossiers={data.dossiers.filter(d => d.partnerId === currentPartner.id)}
-          challenge={data.settings?.challengePartenaires || null}
+          challenges={challengesDe(data)}
           onLogout={logout}
           onCreateDossier={createDossier}
                     onDeclarerParrainage={declarerParrainage}
@@ -2233,6 +2307,7 @@ export default function App() {
           onAddPartner={addPartner}
           onUpdatePartner={updatePartner}
           onUploadPartnerContract={uploadPartnerContract}
+          onRemovePartnerContract={removePartnerContract}
           onUploadContratType={uploadContratType}
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
@@ -2241,7 +2316,9 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
-          onSetChallengePartenaires={setChallengePartenaires}
+          onAjouterChallenge={ajouterChallenge}
+          onMajChallenge={majChallenge}
+          onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
@@ -2284,6 +2361,7 @@ export default function App() {
           onAddPartner={addPartner}
           onUpdatePartner={updatePartner}
           onUploadPartnerContract={uploadPartnerContract}
+          onRemovePartnerContract={removePartnerContract}
           onUploadContratType={uploadContratType}
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
@@ -2292,7 +2370,9 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
-          onSetChallengePartenaires={setChallengePartenaires}
+          onAjouterChallenge={ajouterChallenge}
+          onMajChallenge={majChallenge}
+          onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
@@ -3187,11 +3267,19 @@ function ParrainageCard({ partner, onDeclarer }) {
 // Bannière de challenge dans l'espace du partenaire. Elle n'a d'intérêt que
 // si elle dit combien il en reste et combien de temps : « plus que 2 avant le
 // 30 » agit, « participez à notre challenge » n'agit pas.
+// Toutes les bannières à afficher au partenaire — c'est-à-dire, uniquement les
+// challenges publiés et en cours. Un brouillon, un challenge programmé ou
+// terminé n'apparaît pas : de son côté, il n'existe pas.
+function BannieresChallenges({ challenges, partner, dossiers }) {
+  const visibles = (challenges || []).filter(challengeVisible);
+  if (visibles.length === 0) return null;
+  return <>{visibles.map(c => <BanniereChallenge key={c.id} challenge={c} partner={partner} dossiers={dossiers} />)}</>;
+}
+
 function BanniereChallenge({ challenge, partner, dossiers }) {
-  if (!challenge?.actif || !challenge.debut || !challenge.fin || !challenge.recompense) return null;
+  if (!challengeVisible(challenge)) return null;
   const debut = new Date(challenge.debut + "T00:00:00").getTime();
   const fin = new Date(challenge.fin + "T23:59:59").getTime();
-  if (!(fin > debut) || Date.now() > fin || Date.now() < debut) return null;
 
   const objectif = Math.max(1, Number(challenge.objectif) || 1);
   const n = (dossiers || []).filter(d => {
@@ -3229,7 +3317,7 @@ function BanniereChallenge({ challenge, partner, dossiers }) {
   );
 }
 
-function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -3390,7 +3478,7 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
           </button>
         </div>
 
-        <BanniereChallenge challenge={challenge} partner={partner} dossiers={dossiers} />
+        <BannieresChallenges challenges={challenges} partner={partner} dossiers={dossiers} />
 
         {(tab === "encours" || tab === "clotures") && (
         <>
@@ -4164,16 +4252,25 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
                 <FileCheck2 size={18} className="fa-teal-text" /> Contrat d'apporteur d'affaires
               </div>
               <p className="text-sm text-gray-500 mb-4">Votre contrat signé par les deux parties, déposé par Frangola Assure.</p>
-              {partner.contractFile ? (
-                <div className="flex flex-wrap gap-2">
-                  <button onClick={() => previewStoredFile(partner.contractFile.key)}
-                    className="flex items-center gap-2 text-sm font-medium fa-navy border border-gray-300 hover:border-teal-400 px-4 py-2.5 rounded-lg transition w-fit">
-                    <FileCheck2 size={15} /> Aperçu
-                  </button>
-                  <button onClick={() => downloadStoredFile(partner.contractFile.key, partner.contractFile.name)}
-                    className="flex items-center gap-2 text-sm font-medium fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition w-fit">
-                    <Download size={15} /> Télécharger mon contrat signé
-                  </button>
+              {contratsDe(partner).length > 0 ? (
+                <div className="space-y-3">
+                  {contratsDe(partner).map((c, i) => (
+                    <div key={c.id}>
+                      {contratsDe(partner).length > 1 && (
+                        <div className="text-sm fa-navy font-semibold mb-1.5">{c.libelle}</div>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        <button onClick={() => previewStoredFile(c.key)}
+                          className="flex items-center gap-2 text-sm font-medium fa-navy border border-gray-300 hover:border-teal-400 px-4 py-2.5 rounded-lg transition w-fit">
+                          <FileCheck2 size={15} /> Aperçu
+                        </button>
+                        <button onClick={() => downloadStoredFile(c.key, c.name)}
+                          className="flex items-center gap-2 text-sm font-medium fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition w-fit">
+                          <Download size={15} /> {contratsDe(partner).length > 1 ? "Télécharger" : "Télécharger mon contrat signé"}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <div className="text-sm text-gray-400 bg-gray-50 rounded-lg px-4 py-3">
@@ -5358,6 +5455,47 @@ function souscritsSurPeriode(dossiers, partnerId, debut, fin) {
   }).length;
 }
 
+// Les challenges ponctuels sont une LISTE : on en prépare plusieurs, on publie
+// celui qu'on veut, et les autres restent invisibles des partenaires. Le champ
+// historique `challengePartenaires` (un seul challenge) est conservé et relu en
+// tête de liste, pour ne pas perdre celui qui tourne peut-être déjà.
+const ID_CHALLENGE_INITIAL = "challenge-initial";
+function challengesDe(data) {
+  const ancien = data?.settings?.challengePartenaires;
+  const repris = (ancien && (ancien.titre || ancien.recompense))
+    ? [{
+        id: ID_CHALLENGE_INITIAL,
+        titre: ancien.titre || "", objectif: ancien.objectif, recompense: ancien.recompense || "",
+        debut: ancien.debut, fin: ancien.fin,
+        publie: !!ancien.actif, creeLe: 0,
+      }]
+    : [];
+  return [...repris, ...(data?.settings?.challenges || [])];
+}
+
+// Un challenge n'est visible du partenaire que s'il est publié ET dans sa
+// fenêtre de dates. Tant qu'il est en brouillon, il n'existe pas pour lui.
+function challengeVisible(ch) {
+  if (!ch?.publie || !ch.debut || !ch.fin || !ch.recompense) return false;
+  const { debut, fin, valide } = bornesChallenge(ch);
+  if (!valide) return false;
+  const t = Date.now();
+  return t >= debut && t <= fin;
+}
+
+// État lisible pour le pilotage côté admin.
+function etatChallenge(ch) {
+  const { debut, fin, valide } = bornesChallenge(ch);
+  // Incomplet vaut brouillon : sans récompense ni dates cohérentes, la
+  // bannière ne s'afficherait pas — l'étiquette ne doit pas prétendre
+  // l'inverse.
+  if (!valide || !ch.publie || !ch.recompense) return "brouillon";
+  const t = Date.now();
+  if (t < debut) return "programme";
+  if (t > fin) return "termine";
+  return "encours";
+}
+
 function bornesChallenge(ch) {
   const d = ch?.debut ? new Date(ch.debut + "T00:00:00").getTime() : null;
   const f = ch?.fin ? new Date(ch.fin + "T23:59:59").getTime() : null;
@@ -5617,150 +5755,226 @@ function FicheAdmin({ admin, onUpdate }) {
   );
 }
 
-function ChallengePartenaires({ data, onSet, canEdit }) {
-  const ch = data.settings?.challengePartenaires || null;
-  const [edition, setEdition] = useState(false);
+function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) {
+  const liste = challengesDe(data);
+  const [edition, setEdition] = useState(null);      // id en cours d'édition, ou "nouveau"
   const [b, setB] = useState({});
+  const [aSupprimer, setASupprimer] = useState(null);
+  const [deplie, setDeplie] = useState(null);
 
   const now = new Date();
   const defautDebut = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
   const defautFin = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
 
-  function ouvrir() {
+  function ouvrirNouveau() {
     setB({
-      titre: ch?.titre || `Challenge ${now.toLocaleDateString("fr-FR", { month: "long" })}`,
-      objectif: ch?.objectif ?? 3,
-      recompense: ch?.recompense || "",
-      debut: ch?.debut || defautDebut,
-      fin: ch?.fin || defautFin,
+      titre: `Challenge ${now.toLocaleDateString("fr-FR", { month: "long" })}`,
+      objectif: 3, recompense: "", debut: defautDebut, fin: defautFin,
     });
-    setEdition(true);
+    setEdition("nouveau");
+  }
+  function ouvrirEdition(c) {
+    setB({
+      titre: c.titre || "", objectif: c.objectif ?? 3, recompense: c.recompense || "",
+      debut: c.debut || defautDebut, fin: c.fin || defautFin,
+    });
+    setEdition(c.id);
   }
   function enregistrer() {
-    onSet({
+    const champs = {
       titre: (b.titre || "").trim(),
       objectif: Math.max(1, Number(b.objectif) || 1),
       recompense: (b.recompense || "").trim(),
-      debut: b.debut, fin: b.fin, actif: true,
-    });
-    setEdition(false);
+      debut: b.debut, fin: b.fin,
+    };
+    // Un challenge naît toujours en brouillon : on le prépare tranquillement,
+    // on le publie quand on a décidé de le lancer.
+    if (edition === "nouveau") onAjouter(champs);
+    else onMaj(edition, champs);
+    setEdition(null);
   }
 
-  const bornes = bornesChallenge(ch);
-  const actif = ch?.actif && bornes.valide;
-  const enCours = actif && Date.now() >= bornes.debut && Date.now() <= bornes.fin;
-  const joursRestants = actif ? Math.max(0, Math.ceil((bornes.fin - Date.now()) / 86400000)) : 0;
-
-  const classement = actif
-    ? data.partners.filter(p => !p.deleted)
-        .map(p => ({ p, n: souscritsSurPeriode(data.dossiers, p.id, bornes.debut, bornes.fin) }))
-        .filter(x => x.n > 0)
-        .sort((a, b2) => b2.n - a.n)
-    : [];
-  const gagnants = classement.filter(x => x.n >= (ch?.objectif || 0));
+  // En cours d'abord, puis ce qui va démarrer, les brouillons, et l'historique.
+  const rang = { encours: 0, programme: 1, brouillon: 2, termine: 3 };
+  const ordonnee = [...liste].sort((x, y) => {
+    const d = rang[etatChallenge(x)] - rang[etatChallenge(y)];
+    return d !== 0 ? d : (y.creeLe || 0) - (x.creeLe || 0);
+  });
 
   const champ = "text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const ETIQUETTES = {
+    brouillon: { texte: "Brouillon — invisible des partenaires", classe: "bg-gray-100 text-gray-600" },
+    programme: { texte: "Programmé", classe: "bg-sky-100 text-sky-800" },
+    encours: { texte: "En cours — visible des partenaires", classe: "bg-emerald-100 text-emerald-800" },
+    termine: { texte: "Terminé", classe: "bg-gray-100 text-gray-500" },
+  };
+
+  // Fonction et non composant : un composant déclaré dans le rendu change
+  // d'identité à chaque frappe, React le remonte, et le champ perd le focus.
+  const formulaire = () => (
+      <div className="space-y-2 my-3 fa-bg-offwhite rounded-lg p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={b.titre} onChange={e => setB(x => ({ ...x, titre: e.target.value }))}
+            placeholder="Intitulé" className={champ + " flex-1 min-w-[180px]"} />
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            Objectif
+            <input type="number" onFocus={selectionTotale} min="1" value={b.objectif}
+              onChange={e => setB(x => ({ ...x, objectif: sansZeroDeTete(e.target.value) }))}
+              className={champ + " w-16 text-center"} />
+            dossiers souscrits
+          </label>
+        </div>
+        <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
+          placeholder="Récompense — ex. une paire d'AirPods" className={champ + " w-full"} />
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            Du <input type="date" value={b.debut} onChange={e => setB(x => ({ ...x, debut: e.target.value }))} className={champ} />
+          </label>
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            au <input type="date" value={b.fin} onChange={e => setB(x => ({ ...x, fin: e.target.value }))} className={champ} />
+          </label>
+          <button onClick={enregistrer} disabled={!b.recompense?.trim() || !b.debut || !b.fin}
+            className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">
+            {edition === "nouveau" ? "Enregistrer en brouillon" : "Enregistrer"}
+          </button>
+          <button onClick={() => setEdition(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+        </div>
+        <p className="text-xs text-gray-400">
+          Les dossiers sont comptés à leur <strong>souscription</strong>, pas à leur dépôt. Un dossier déposé
+          le 28 et souscrit le 3 comptera pour la période suivante — annoncez-le à vos partenaires.
+          {edition === "nouveau" && <> Rien n'est visible des partenaires tant que vous n'avez pas publié.</>}
+        </p>
+      </div>
+  );
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
       <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
-        <div className="font-display font-semibold fa-navy">Challenge partenaires</div>
-        {canEdit && !edition && (
-          <div className="flex items-center gap-3">
-            {actif && (
-              <button onClick={() => onSet({ actif: false })} className="text-xs text-gray-400 hover:text-red-600">
-                Arrêter
-              </button>
-            )}
-            <button onClick={ouvrir} className="text-xs fa-teal-text hover:underline">
-              {ch?.titre ? "Modifier" : "Créer un challenge"}
-            </button>
-          </div>
+        <div className="font-display font-semibold fa-navy">Challenges partenaires</div>
+        {canEdit && edition === null && (
+          <button onClick={ouvrirNouveau} className="text-xs fa-teal-text hover:underline">
+            + Créer un challenge
+          </button>
         )}
       </div>
+      <p className="text-sm text-gray-500 mb-3">
+        Préparez autant de challenges ponctuels que vous voulez. Un challenge n'apparaît dans
+        l'espace des partenaires qu'une fois <strong className="fa-navy">publié</strong>, et seulement
+        pendant sa période.
+      </p>
 
-      {edition ? (
-        <div className="space-y-2 my-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <input value={b.titre} onChange={e => setB(x => ({ ...x, titre: e.target.value }))}
-              placeholder="Intitulé" className={champ + " flex-1 min-w-[180px]"} />
-            <label className="text-xs text-gray-500 flex items-center gap-1.5">
-              Objectif
-              <input type="number" onFocus={selectionTotale} min="1" value={b.objectif} onChange={e => setB(x => ({ ...x, objectif: e.target.value }))}
-                className={champ + " w-16 text-center"} />
-              dossiers souscrits
-            </label>
-          </div>
-          <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
-            placeholder="Récompense — ex. une paire d'AirPods" className={champ + " w-full"} />
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-xs text-gray-500 flex items-center gap-1.5">
-              Du <input type="date" value={b.debut} onChange={e => setB(x => ({ ...x, debut: e.target.value }))} className={champ} />
-            </label>
-            <label className="text-xs text-gray-500 flex items-center gap-1.5">
-              au <input type="date" value={b.fin} onChange={e => setB(x => ({ ...x, fin: e.target.value }))} className={champ} />
-            </label>
-            <button onClick={enregistrer} disabled={!b.recompense?.trim() || !b.debut || !b.fin}
-              className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">
-              Lancer
-            </button>
-            <button onClick={() => setEdition(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
-          </div>
-          <p className="text-xs text-gray-400">
-            Les dossiers sont comptés à leur <strong>souscription</strong>, pas à leur dépôt. Un dossier déposé
-            le 28 et souscrit le 3 comptera pour la période suivante — annoncez-le à vos partenaires.
-          </p>
+      {edition === "nouveau" && formulaire()}
+
+      {ordonnee.length === 0 && edition !== "nouveau" ? (
+        <div className="text-sm text-gray-400 py-4 text-center border border-dashed border-gray-200 rounded-xl">
+          Aucun challenge pour l'instant.
         </div>
-      ) : !actif ? (
-        <p className="text-sm text-gray-500">
-          Aucun challenge en cours. Un objectif et une récompense suffisent à déclencher les premiers dossiers
-          de partenaires qui n'en ont jamais déposé — c'est là que l'argent travaille le mieux.
-        </p>
       ) : (
-        <>
-          <p className="text-sm text-gray-500 mb-3">
-            <strong className="fa-navy">{ch.titre}</strong> — {ch.objectif} dossier{ch.objectif > 1 ? "s" : ""} souscrit{ch.objectif > 1 ? "s" : ""} pour gagner
-            {" "}<strong className="fa-navy">{ch.recompense}</strong>.
-            {enCours
-              ? <> Il reste {joursRestants} jour{joursRestants > 1 ? "s" : ""}.</>
-              : <> Période terminée ou pas encore commencée.</>}
-          </p>
+        <div className="space-y-3">
+          {ordonnee.map(c => {
+            const etat = etatChallenge(c);
+            const et = ETIQUETTES[etat];
+            const bornes = bornesChallenge(c);
+            const objectif = Math.max(1, Number(c.objectif) || 1);
+            const classement = bornes.valide
+              ? data.partners.filter(p => !p.deleted)
+                  .map(p => ({ p, n: souscritsSurPeriode(data.dossiers, p.id, bornes.debut, bornes.fin) }))
+                  .filter(x => x.n > 0)
+                  .sort((a, b2) => b2.n - a.n)
+              : [];
+            const gagnants = classement.filter(x => x.n >= objectif);
+            const joursRestants = bornes.valide ? Math.max(0, Math.ceil((bornes.fin - Date.now()) / 86400000)) : 0;
+            const ouvert = deplie === c.id || etat === "encours";
 
-          {gagnants.length > 0 && (
-            <div className="fa-bg-gold rounded-lg px-3 py-2.5 mb-3">
-              <div className="text-sm fa-navy font-semibold mb-1">
-                🏆 {gagnants.length} partenaire{gagnants.length > 1 ? "s ont" : " a"} atteint l'objectif
-              </div>
-              <div className="text-xs text-teal-900/80">
-                {gagnants.map(x => `${x.p.firstName || ""} ${up(x.p.name)} (${x.n})`).join(" · ")}
-              </div>
-            </div>
-          )}
-
-          {classement.length === 0 ? (
-            <div className="text-sm text-gray-400">Aucun dossier souscrit sur la période pour l'instant.</div>
-          ) : (
-            <div className="space-y-1.5">
-              {classement.map(x => {
-                const pct = Math.min(100, Math.round((x.n / (ch.objectif || 1)) * 100));
-                const atteint = x.n >= ch.objectif;
-                return (
-                  <div key={x.p.id} className="flex items-center gap-3 flex-wrap">
-                    <span className="text-sm fa-navy font-medium w-44 shrink-0 truncate">
-                      <LienPartenaire p={x.p} />
-                    </span>
-                    <div className="flex-1 min-w-[120px] h-3 bg-gray-100 rounded-full overflow-hidden">
-                      <div className={`h-full ${atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
-                    </div>
-                    <span className={`text-xs font-semibold shrink-0 ${atteint ? "text-emerald-700" : "text-gray-500"}`}>
-                      {x.n} / {ch.objectif}
-                    </span>
+            return (
+              <div key={c.id} className={`rounded-xl border p-3 ${etat === "encours" ? "border-emerald-200 bg-emerald-50/40" : "border-gray-200"}`}>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm fa-navy font-bold">{c.titre || "Sans intitulé"}</span>
+                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${et.classe}`}>{et.texte}</span>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </>
+                  {canEdit && edition === null && (
+                    <div className="flex items-center gap-3 shrink-0">
+                      {etat !== "termine" && (
+                        <button onClick={() => onMaj(c.id, { publie: !c.publie })}
+                          className={`text-xs font-semibold hover:underline ${c.publie ? "text-gray-500" : "fa-teal-text"}`}>
+                          {c.publie ? "Dépublier" : "Publier"}
+                        </button>
+                      )}
+                      <button onClick={() => ouvrirEdition(c)} className="text-xs fa-teal-text hover:underline">Modifier</button>
+                      {aSupprimer === c.id ? (
+                        <span className="flex items-center gap-2 text-xs">
+                          <span className="text-red-700">Supprimer ?</span>
+                          <button onClick={() => { onSupprimer(c.id); setASupprimer(null); }}
+                            className="font-semibold text-red-700 hover:underline">Oui</button>
+                          <button onClick={() => setASupprimer(null)} className="text-gray-500 hover:underline">Non</button>
+                        </span>
+                      ) : (
+                        <button onClick={() => setASupprimer(c.id)} className="text-xs text-gray-400 hover:text-red-600">Supprimer</button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {edition === c.id ? formulaire() : (
+                  <>
+                    <div className="text-xs text-gray-500 mt-1">
+                      {objectif} dossier{objectif > 1 ? "s" : ""} souscrit{objectif > 1 ? "s" : ""} pour gagner
+                      {" "}<strong className="fa-navy">{c.recompense || "—"}</strong>
+                      {bornes.valide && <> · du {fmtDate(bornes.debut)} au {fmtDate(bornes.fin)}</>}
+                      {etat === "encours" && <> · {joursRestants} jour{joursRestants > 1 ? "s" : ""} restant{joursRestants > 1 ? "s" : ""}</>}
+                    </div>
+
+                    {gagnants.length > 0 && (
+                      <div className="fa-bg-gold rounded-lg px-3 py-2 mt-2">
+                        <div className="text-xs fa-navy font-semibold">
+                          🏆 {gagnants.length} partenaire{gagnants.length > 1 ? "s ont" : " a"} atteint l'objectif
+                        </div>
+                        <div className="text-[11px] text-teal-900/80">
+                          {gagnants.map(x => `${x.p.firstName || ""} ${up(x.p.name)} (${x.n})`).join(" · ")}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Le classement d'un challenge terminé ou en brouillon est
+                        replié par défaut : on ne veut pas dérouler cinq
+                        classements les uns sous les autres. */}
+                    {etat !== "encours" && classement.length > 0 && (
+                      <button onClick={() => setDeplie(v => v === c.id ? null : c.id)}
+                        className="text-xs fa-teal-text hover:underline mt-2">
+                        {ouvert ? "Masquer le classement" : `Voir le classement (${classement.length})`}
+                      </button>
+                    )}
+
+                    {ouvert && (classement.length === 0 ? (
+                      <div className="text-xs text-gray-400 mt-2">Aucun dossier souscrit sur la période pour l'instant.</div>
+                    ) : (
+                      <div className="space-y-1.5 mt-2">
+                        {classement.map(x => {
+                          const pct = Math.min(100, Math.round((x.n / objectif) * 100));
+                          const atteint = x.n >= objectif;
+                          return (
+                            <div key={x.p.id} className="flex items-center gap-3 flex-wrap">
+                              <span className="text-sm fa-navy font-medium w-44 shrink-0 truncate">
+                                <LienPartenaire p={x.p} />
+                              </span>
+                              <div className="flex-1 min-w-[120px] h-3 bg-gray-100 rounded-full overflow-hidden">
+                                <div className={`h-full ${atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
+                              </div>
+                              <span className={`text-xs font-semibold shrink-0 ${atteint ? "text-emerald-700" : "text-gray-500"}`}>
+                                {x.n} / {objectif}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -7142,7 +7356,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onSetChallengePartenaires, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -7213,6 +7427,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     const [partnerSearch, setPartnerSearch] = useState("");
   const [corbeilleMandataireSearch, setCorbeilleMandataireSearch] = useState("");
   const [confirmDeleteMandataireId, setConfirmDeleteMandataireId] = useState(null);
+  const [contratASupprimer, setContratASupprimer] = useState(null);
   async function confirmDeleteMandataire(id) {
     await onDeleteMandataire(id);
     setConfirmDeleteMandataireId(null);
@@ -7317,6 +7532,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     setCreatedPartner(p);
     setNewPartnerName(""); setNewPartnerFirstName(""); setNewPartnerCompany("");
     setNewPartnerPostalCode(""); setNewPartnerVille(""); setNewPartnerDepartement(""); setNewPartnerEmail(""); setNewPartnerCommercial(COMMERCIAUX[0]); setNewPartnerFlatFee(""); setNewPartnerTelephone(""); setNewPartnerSiret("");
+  }
+  // Fermer le formulaire efface aussi la confirmation de création : sinon on
+  // rouvre « Ajouter un partenaire » sur le message du partenaire précédent.
+  function fermerAjoutPartenaire() {
+    setShowAddPartnerForm(false);
+    setCreatedPartner(null);
   }
   function startEdit(p) {
     setEditingId(p.id);
@@ -8583,7 +8804,13 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
             {showAddPartnerForm && (
             <div className="bg-white border border-gray-200 rounded-2xl p-6 mb-6 shadow-sm">
-              <h3 className="font-display font-semibold fa-navy mb-4 flex items-center gap-2"><Landmark size={17} className="fa-teal-text" /> Ajouter un partenaire</h3>
+              <div className="flex items-start justify-between gap-2 mb-4">
+                <h3 className="font-display font-semibold fa-navy flex items-center gap-2"><Landmark size={17} className="fa-teal-text" /> Ajouter un partenaire</h3>
+                <button onClick={fermerAjoutPartenaire} title="Fermer"
+                  className="text-gray-400 hover:text-gray-700 transition shrink-0 -mt-1 -mr-1 p-1">
+                  <X size={18} />
+                </button>
+              </div>
               <div className="grid sm:grid-cols-2 gap-4 mb-4">
                 <input value={newPartnerName} onChange={e => setNewPartnerName(e.target.value)} placeholder="Nom du partenaire"
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
@@ -8654,7 +8881,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   className="fa-bg-teal disabled:opacity-50 text-white text-sm font-medium px-5 py-2 rounded-lg transition">
                   Créer l'accès
                 </button>
-                <button onClick={() => setShowAddPartnerForm(false)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
+                <button onClick={fermerAjoutPartenaire} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-2">Annuler</button>
               </div>
               {createdPartner && (
                 <div className="mt-4 text-sm bg-teal-50 border border-teal-200 rounded-lg px-4 py-3">
@@ -9022,22 +9249,59 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                         {viewingPartnerTab === "contrat" && (
                           <div className="space-y-4">
                             <div className="fa-bg-offwhite rounded-xl p-4">
-                              <div className="text-sm font-semibold fa-navy mb-2">Contrat d'apporteur d'affaires</div>
-                              {p.contractFile ? (
-                                <div className="flex items-center justify-between flex-wrap gap-2">
-                                  <button onClick={() => downloadStoredFile(p.contractFile.key, p.contractFile.name)}
-                                    className="text-xs fa-teal-text hover:underline font-medium">
-                                    📄 {p.contractFile.name} — déposé le {fmtDate(p.contractFile.uploadedAt)}
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="text-xs text-gray-400 mb-2">Aucun contrat déposé pour l'instant.</div>
-                              )}
-                              <label className="inline-block mt-2 text-xs border border-gray-300 rounded-lg px-3 py-1.5 cursor-pointer bg-white hover:border-teal-400 transition">
-                                {p.contractFile ? "Remplacer le contrat signé" : "Déposer le contrat signé"}
-                                <input type="file" accept="application/pdf,image/*" className="hidden"
-                                  onChange={e => e.target.files?.[0] && onUploadPartnerContract(p.id, e.target.files[0])} />
-                              </label>
+                              {(() => {
+                                const contrats = contratsDe(p);
+                                return (
+                                  <>
+                                    <div className="text-sm font-semibold fa-navy mb-2">
+                                      Contrat d'apporteur d'affaires
+                                      {contrats.length > 1 && <span className="ml-2 text-xs font-normal text-gray-400">{contrats.length} documents</span>}
+                                    </div>
+                                    {contrats.length > 0 ? (
+                                      <div className="space-y-1.5">
+                                        {contrats.map(c => (
+                                          <div key={c.id} className="flex items-center justify-between flex-wrap gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
+                                            <button onClick={() => downloadStoredFile(c.key, c.name)}
+                                              className="text-left">
+                                              <span className="text-xs fa-navy font-semibold block">📄 {c.libelle}</span>
+                                              <span className="text-[11px] text-gray-400">{c.name} — déposé le {fmtDate(c.uploadedAt)}</span>
+                                            </button>
+                                            {contratASupprimer === c.id ? (
+                                              <span className="flex items-center gap-2 shrink-0 text-xs">
+                                                <span className="text-red-700">Retirer ce document ?</span>
+                                                <button onClick={() => { onRemovePartnerContract(p.id, c.id); setContratASupprimer(null); }}
+                                                  className="font-semibold text-red-700 hover:underline">Oui</button>
+                                                <button onClick={() => setContratASupprimer(null)}
+                                                  className="text-gray-500 hover:underline">Non</button>
+                                              </span>
+                                            ) : (
+                                              <button onClick={() => setContratASupprimer(c.id)}
+                                                title="Retirer ce document"
+                                                className="text-xs text-gray-400 hover:text-red-600 shrink-0">✕</button>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div className="text-xs text-gray-400 mb-2">Aucun contrat déposé pour l'instant.</div>
+                                    )}
+                                    {/* On ajoute, on ne remplace pas : l'annexe de parrainage
+                                        ne doit pas faire disparaître le contrat d'origine.
+                                        Un bouton par type, pour que le libellé soit choisi au
+                                        dépôt sans écran intermédiaire. */}
+                                    <div className="flex flex-wrap gap-2 mt-2">
+                                      {TYPES_CONTRAT.map(type => (
+                                        <label key={type}
+                                          className="text-xs border border-gray-300 rounded-lg px-3 py-1.5 cursor-pointer bg-white hover:border-teal-400 transition">
+                                          + {type}
+                                          <input type="file" accept="application/pdf,image/*" className="hidden"
+                                            onChange={e => { if (e.target.files?.[0]) { onUploadPartnerContract(p.id, e.target.files[0], type); e.target.value = ""; } }} />
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </>
+                                );
+                              })()}
                             </div>
 
                             <div className="fa-bg-offwhite rounded-xl p-4">
@@ -9812,7 +10076,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 un seul endroit pour une même valeur. */}
             <ProductionDuMois data={data} commerciaux={COMMERCIAUX}
               onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
-            <ChallengePartenaires data={data} onSet={onSetChallengePartenaires} canEdit={isFullAdmin} />
+            <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} />
             <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
               onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
           </div>
