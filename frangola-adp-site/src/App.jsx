@@ -6068,6 +6068,7 @@ function Vision360({ data }) {
                                 <th className="font-medium py-1 text-right">Dont mandataires</th>
                                 <th className="font-medium py-1 text-right">Dont Frangola</th>
                                 <th className="font-medium py-1 text-right">Cagnotte cumulée</th>
+                                <th className="font-medium py-1 text-right">Soit par mois</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -6081,6 +6082,10 @@ function Vision360({ data }) {
                                     <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * PART_MANDATAIRE)}</td>
                                     <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * (1 - PART_MANDATAIRE))}</td>
                                     <td className="py-1 text-right fa-navy font-bold">{fmtEuroPrecis(cumul + cumul2)}</td>
+                                    {/* Le revenu mensuel moyen de l'année : le chiffre
+                                        qu'on a en tête quand on pense « ça me rapporte
+                                        tant par mois ». */}
+                                    <td className="py-1 text-right text-violet-700 font-semibold">{fmtEuroPrecis(montant / 12)}</td>
                                   </tr>
                                 );
                               })}
