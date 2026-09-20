@@ -139,6 +139,37 @@ function getStoredTab(key, fallback) {
 function setStoredTab(key, value) {
   try { localStorage.setItem(key, value); } catch (e) { /* ignore */ }
 }
+
+// ── Onglets de l'espace admin ───────────────────────────────────────────────
+// Catalogue de référence : c'est lui qui fait foi. L'ordre choisi par
+// l'utilisateur n'est qu'une liste d'identifiants rangée à côté, ce qui permet
+// d'ajouter un onglet plus tard sans casser la personnalisation existante.
+const ONGLETS_ADMIN = [
+  { id: "accueil", label: "Accueil", icone: "Home" },
+  { id: "dossiers", label: "Dossiers", icone: "FileText" },
+  { id: "partenaires", label: "Partenaires", icone: "Building2" },
+  { id: "facturation", label: "Facturation", icone: "Wallet" },
+  { id: "corbeille", label: "Corbeille", icone: "Trash2" },
+  { id: "stats", label: "Statistiques", icone: "BarChart3" },
+  { id: "challenge", label: "Challenge", emoji: "🏆" },
+  { id: "mandataires", label: "Mandataires", icone: "Landmark", fullAdmin: true },
+];
+const ICONES_ONGLETS = { Home, FileText, Building2, Wallet, Trash2, BarChart3, Landmark };
+const ORDRE_ONGLETS_DEFAUT = ONGLETS_ADMIN.map(o => o.id);
+function lireOrdreOnglets() {
+  try {
+    const brut = JSON.parse(localStorage.getItem("adp:ordreOnglets") || "null");
+    if (!Array.isArray(brut)) return ORDRE_ONGLETS_DEFAUT;
+    // On repart toujours du catalogue : un onglet ajouté après coup doit
+    // apparaître même si l'ordre enregistré date d'avant lui, et un onglet
+    // supprimé ne doit pas laisser de trou.
+    const gardes = brut.filter(id => ORDRE_ONGLETS_DEFAUT.includes(id));
+    return [...gardes, ...ORDRE_ONGLETS_DEFAUT.filter(id => !gardes.includes(id))];
+  } catch (e) { return ORDRE_ONGLETS_DEFAUT; }
+}
+function ecrireOrdreOnglets(ids) {
+  try { localStorage.setItem("adp:ordreOnglets", JSON.stringify(ids)); } catch (e) { /* ignore */ }
+}
 function genCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -216,18 +247,81 @@ function joursDepuis(ts) {
   return `depuis ${j} j`;
 }
 
+// ── Mode discret ────────────────────────────────────────────────────────────
+// En visio avec un futur partenaire, l'outil doit pouvoir se montrer sans
+// montrer nos chiffres. Le drapeau est volontairement global : il est lu par
+// les quelques fonctions par lesquelles passent TOUS les affichages sensibles
+// (montants, noms de clients, noms de partenaires, logos de réseau). Une seule
+// bascule suffit donc à couvrir l'application entière, sans avoir à retoucher
+// les centaines d'endroits qui affichent une valeur.
+// Aucun useMemo n'existe dans ce fichier : un simple re-rendu suffit à ce que
+// tout soit recalculé avec le drapeau à jour.
+let MODE_DISCRET = false;
+function setModeDiscret(v) {
+  MODE_DISCRET = !!v;
+  try { localStorage.setItem("adp:discret", MODE_DISCRET ? "1" : "0"); } catch { /* navigation privée */ }
+}
+// Le mode est mémorisé : si la page se recharge en pleine démonstration,
+// les chiffres ne réapparaissent pas à l'écran.
+function initModeDiscret() {
+  let v = false;
+  try { v = localStorage.getItem("adp:discret") === "1"; } catch { v = false; }
+  MODE_DISCRET = v;
+  return v;
+}
+// Masque un compteur (effectifs, volumes) qui n'est pas un montant.
+function masqueNb(n) {
+  return MODE_DISCRET ? "•••" : n;
+}
+// Noms de substitution : plutôt qu'un pavé noir, on affiche une identité
+// crédible et stable (le même dossier montre toujours le même faux nom),
+// pour que la démonstration reste lisible et réaliste.
+const NOMS_DEMO = ["MARTIN", "BERNARD", "DUBOIS", "THOMAS", "ROBERT", "RICHARD", "PETIT", "DURAND", "LEROY", "MOREAU", "SIMON", "LAURENT", "LEFEBVRE", "MICHEL", "GARCIA", "DAVID", "BERTRAND", "ROUX", "VINCENT", "FOURNIER"];
+const PRENOMS_DEMO = ["Julie", "Marc", "Sophie", "Thomas", "Camille", "Nicolas", "Laura", "Julien", "Emma", "Antoine", "Chloé", "Maxime", "Léa", "Pierre", "Sarah", "Hugo", "Manon", "Lucas", "Inès", "Paul"];
+const RESEAUX_DEMO = ["Agence Horizon", "Immo Panorama", "Cap Habitat", "Résidence & Co", "Atlas Immobilier", "Optima Immo", "Via Nova", "Le Clos Immobilier"];
+function hachage(s) {
+  let h = 0;
+  const t = String(s || "");
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0;
+  return h;
+}
+function nomFictif(cle) {
+  const h = hachage(cle);
+  // Décalage NON signé : avec `>>` un hachage haut devient négatif et l'index
+  // sort du tableau (prénom « undefined »).
+  return `${NOMS_DEMO[h % NOMS_DEMO.length]} ${PRENOMS_DEMO[(h >>> 5) % PRENOMS_DEMO.length]}`;
+}
+function reseauFictif(cle) {
+  return RESEAUX_DEMO[hachage(cle) % RESEAUX_DEMO.length];
+}
+// Nom de réseau / société affiché à l'écran.
+function afficheReseau(c) {
+  if (!c) return c;
+  return MODE_DISCRET ? reseauFictif(c) : c;
+}
+
 function fmtEuro(n) {
+  if (MODE_DISCRET) return "••• €";
   return (n || 0).toLocaleString("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 }
 function fmtEuroPrecis(n) {
+  if (MODE_DISCRET) return "••• €";
   return (n || 0).toLocaleString("fr-FR", { style: "currency", currency: "EUR", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function up(s) {
   return (s || "").toUpperCase();
 }
 function clientName(d) {
+  if (MODE_DISCRET) return nomFictif(d?.id || "");
   const full = `${(d.clientLastName || "").toUpperCase()} ${d.clientFirstName || ""}`.trim();
   return full || "(Sans nom)";
+}
+// Identité affichée d'un partenaire (ou d'un filleul). Point de passage unique
+// pour que le mode discret n'en laisse échapper aucun.
+function nomPartenaire(p) {
+  if (!p) return "—";
+  if (MODE_DISCRET) return nomFictif(p.id || p.email || p.name || "");
+  return p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
 }
 const MOTIFS_REFUS = [
   "Ce confrère fait déjà partie du réseau FRANGOLA.",
@@ -519,7 +613,7 @@ function bilanParrainage(partnerId) {
 function nomParrain(partnerId) {
   const p = _colorDataRef?.partners.find(x => x.id === partnerId);
   if (!p) return null;
-  return p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+  return nomPartenaire(p);
 }
 
 function CoEmprunteurBadge({ d }) {
@@ -595,7 +689,7 @@ function downloadJson(filename, obj) {
   URL.revokeObjectURL(url);
 }
 function exportDossiersCsv(dossiers, partners) {
-  const partnerName = (id) => { const p = partners.find(p => p.id === id); return p ? (p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)) : "—"; };
+  const partnerName = (id) => { const p = partners.find(p => p.id === id); return p ? (nomPartenaire(p)) : "—"; };
   const rows = [
     ["Client Nom", "Client Prénom", "Client Téléphone", "Partenaire", "Statut", "Déposé le", "Dernière mise à jour", "CA généré (€)", "Rétrocession (€)", "Mode de paiement", "Date de paiement", "Notes"],
     ...dossiers.map(d => [d.clientLastName, d.clientFirstName, d.clientPhone || "", partnerName(d.partnerId), d.status, fmtDate(d.createdAt), fmtDate(d.updatedAt || d.createdAt), d.caAmount ?? "", d.commissionAmount ?? "", d.paymentMethod || "", d.paymentDate || "", d.notes || ""]),
@@ -612,6 +706,10 @@ function exportPartnersCsv(partners) {
 
 const BRAND_STYLES = `
 @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap');
+/* Mode discret : les graphiques n'ont pas de point de passage commun où
+   masquer leurs valeurs, on les floute donc en bloc. */
+.mode-discret .recharts-wrapper,
+.mode-discret .recharts-surface { filter: blur(7px); }
 :root{
   --fa-teal:#008BA8;
   --fa-teal-dark:#006C82;
@@ -1675,7 +1773,7 @@ export default function App() {
           <div className="fixed inset-0 z-50 bg-gray-50 overflow-y-auto">
             <div className="sticky top-0 z-10 fa-bg-gold px-5 py-2.5 flex items-center justify-between flex-wrap gap-2">
               <span className="text-sm fa-navy">
-                👁 Aperçu de l'espace de <strong>{cible.firstName ? `${cible.firstName} ${up(cible.name)}` : up(cible.name)}</strong> — lecture seule
+                👁 Aperçu de l'espace de <strong>{nomPartenaire(cible)}</strong> — lecture seule
               </span>
               <button onClick={() => setApercuPartnerId(null)}
                 className="text-xs font-semibold fa-navy bg-white/70 hover:bg-white px-3 py-1.5 rounded-lg transition">
@@ -2842,7 +2940,7 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
               <span className="font-bold">{up(partner.name)} {partner.firstName}</span>
               {partner.company && (
                 <span className="flex items-center gap-1.5 font-medium">
-                  - {partner.company}
+                  - {afficheReseau(partner.company)}
                   {reseauLogoFor(partner.company) && (
                     <img src={reseauLogoFor(partner.company).data} alt="" className="w-8 h-8 rounded object-contain" />
                   )}
@@ -3451,7 +3549,7 @@ function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDoss
                             <div key={f.partner.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
                               <div>
                                 <div className="text-sm fa-navy font-bold">
-                                  {f.partner.firstName ? `${f.partner.firstName} ${up(f.partner.name)}` : up(f.partner.name)}
+                                  {nomPartenaire(f.partner)}
                                 </div>
                                 <div className="text-xs text-gray-400">
                                   {f.dossiers} dossier{f.dossiers !== 1 ? "s" : ""} · CA généré {fmtEuro(f.ca)}
@@ -3753,6 +3851,9 @@ function commercialLabel(name) {
   return name;
 }
 function reseauLogoFor(companyName) {
+  // En mode discret, un logo d'agence trahirait le réseau aussi sûrement
+  // qu'un nom : on n'en affiche aucun.
+  if (MODE_DISCRET) return null;
   if (!companyName || !_colorDataRef?.reseaux) return null;
   const found = _colorDataRef.reseaux.find(r => r.name.trim().toLowerCase() === companyName.trim().toLowerCase());
   return found?.logoData ? { data: found.logoData } : null;
@@ -3858,7 +3959,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
             <div className="space-y-2">
               {partnerStats.map(ps => (
                 <div key={ps.partner.id} className="flex items-center justify-between text-sm fa-bg-offwhite rounded-lg px-3 py-2.5">
-                  <span className="fa-navy font-bold">{ps.partner.firstName ? `${ps.partner.firstName} ${up(ps.partner.name)}` : up(ps.partner.name)}</span>
+                  <span className="fa-navy font-bold">{nomPartenaire(ps.partner)}</span>
                   <span className="text-gray-500 text-xs">{ps.count} dossier{ps.count !== 1 ? "s" : ""} · CA {fmtEuro(ps.ca)}</span>
                 </div>
               ))}
@@ -3881,7 +3982,7 @@ function RegistreParrainages({ data, onTraiter }) {
 
   const nomParrainDe = (id) => {
     const p = data.partners.find(x => x.id === id);
-    return p ? (p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)) : "—";
+    return p ? (nomPartenaire(p)) : "—";
   };
 
   function confirmerRefus(id) {
@@ -4181,7 +4282,7 @@ function VersementsParrainage({ data, onAddVersement }) {
   const totalDu = parrains.reduce((s, x) => s + x.gainTotal, 0);
   const totalVerse = parrains.reduce((s, x) => s + x.verse, 0);
   const aRegler = parrains.filter(x => x.reste > 0.5);
-  const nomDe = (p) => p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+  const nomDe = (p) => nomPartenaire(p);
 
   async function enregistrer(partnerId) {
     const ok = await onAddVersement(partnerId, montant, note);
@@ -4280,7 +4381,7 @@ function VersementsParrainage({ data, onAddVersement }) {
                     ) : justificatifs.map(({ d, filleul }) => (
                       <div key={d.id} className="flex items-center justify-between flex-wrap gap-2 text-xs py-0.5">
                         <span className="text-gray-600">
-                          {clientName(d)} <span className="text-gray-400">— via {filleul.firstName ? `${filleul.firstName} ${up(filleul.name)}` : up(filleul.name)}</span>
+                          {clientName(d)} <span className="text-gray-400">— via {nomPartenaire(filleul)}</span>
                         </span>
                         <span className="fa-navy">
                           CA {fmtEuroPrecis(d.caAmount || 0)} → prime {fmtEuroPrecis((d.caAmount || 0) * PARRAINAGE_TAUX)}
@@ -5252,7 +5353,7 @@ function ChallengePartenaires({ data, onSet, canEdit }) {
                 return (
                   <div key={x.p.id} className="flex items-center gap-3 flex-wrap">
                     <span className="text-sm fa-navy font-medium w-44 shrink-0 truncate">
-                      {x.p.firstName ? `${x.p.firstName} ${up(x.p.name)}` : up(x.p.name)}
+                      {nomPartenaire(x.p)}
                     </span>
                     <div className="flex-1 min-w-[120px] h-3 bg-gray-100 rounded-full overflow-hidden">
                       <div className={`h-full ${atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
@@ -6178,7 +6279,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
   const champ = useRef(null);
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
-  const nomDe = (p) => p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+  const nomDe = (p) => nomPartenaire(p);
 
   // Deux mécaniques distinctes : les apporteurs immobiliers sont réglés mois
   // par mois au rythme des encaissements ; les hors immobilier reçoivent leur
@@ -6316,7 +6417,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
 function FacturationAdmin({ data, onSetStatut, onAddVersement, onVirementPartenaire, onAnnulerVirement, busy }) {
   const [toutHistorique, setToutHistorique] = useState(false);
 
-  const nomDe = (p) => p ? (p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)) : "—";
+  const nomDe = (p) => p ? (nomPartenaire(p)) : "—";
   const vivants = data.partners.filter(p => !p.deleted);
 
   // --- Encaissements : ce que nous avons réellement reçu, échéance par
@@ -6491,7 +6592,7 @@ function FacturesPartenaires({ data, onSetStatut }) {
   const attente = lignes.filter(x => x.f.statut === "Déposée").sort((a, b) => a.f.at - b.f.at);
   const traitees = lignes.filter(x => x.f.statut !== "Déposée").sort((a, b) => b.f.at - a.f.at).slice(0, 8);
   const totalDu = attente.reduce((s, x) => s + (x.f.montant || 0), 0);
-  const nomDe = (p) => p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+  const nomDe = (p) => nomPartenaire(p);
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-4">
@@ -6638,6 +6739,18 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:adminTab", "accueil"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:adminTab", t); };
   useEffect(() => { if (tab === "mandataires" && !isFullAdmin) setTab("accueil"); }, []);
+  // Ordre personnalisé des onglets et mode discret : deux réglages de confort,
+  // propres à cet ordinateur, qui n'ont pas à voyager dans les données.
+  const [ordreOnglets, setOrdreOnglets] = useState(lireOrdreOnglets);
+  const [reorganiser, setReorganiser] = useState(false);
+  // initModeDiscret positionne le drapeau global AVANT le premier rendu :
+  // au rechargement d'une page en pleine visio, aucun chiffre n'apparaît.
+  const [discret, setDiscretState] = useState(initModeDiscret);
+  function basculerDiscret() {
+    const v = !discret;
+    setModeDiscret(v);
+    setDiscretState(v);
+  }
   const [newPartnerName, setNewPartnerName] = useState("");
   const [newPartnerFirstName, setNewPartnerFirstName] = useState("");
   const [newPartnerCompany, setNewPartnerCompany] = useState("");
@@ -6994,7 +7107,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
   }
 
   return (
-    <div className="min-h-screen">
+    <div className={`min-h-screen ${discret ? "mode-discret" : ""}`}>
       <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
@@ -7010,63 +7123,118 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-8">
-        <div className="flex gap-2 mb-8 overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
-          <button onClick={() => setTab("accueil")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "accueil" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            <Home size={15} /> Accueil
-          </button>
-          <button onClick={() => setTab("dossiers")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "dossiers" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            <FileText size={15} /> Dossiers
-            {newDeposits > 0 && <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{newDeposits}</span>}
-          </button>
-          <button onClick={() => setTab("partenaires")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "partenaires" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            <Building2 size={15} /> Partenaires
-            {actionsPartenaires > 0 && (
-              <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full min-w-[20px] h-5 px-1.5 flex items-center justify-center"
-                title={[
-                  parrainagesEnAttente > 0 ? `${parrainagesEnAttente} déclaration${parrainagesEnAttente > 1 ? "s" : ""} de parrainage à traiter` : null,
-                  facturesEnAttente > 0 ? `${facturesEnAttente} facture${facturesEnAttente > 1 ? "s" : ""} à régler` : null,
-                ].filter(Boolean).join(" · ")}>
-                {actionsPartenaires}
-              </span>
-            )}
-          </button>
-          <button onClick={() => setTab("facturation")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "facturation" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            <Wallet size={15} /> Facturation
-            {(() => {
-              const n = data.partners.filter(p => !p.deleted).reduce((s2, p) => s2 + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
-              return n > 0 ? (
-                <span className="bg-amber-400 text-amber-950 text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{n}</span>
+        {(() => {
+          // Barre d'onglets : elle est construite à partir du catalogue et de
+          // l'ordre choisi par l'utilisateur, avec deux commandes à droite —
+          // le mode discret (démonstration en visio) et la réorganisation.
+          const catalogue = Object.fromEntries(ONGLETS_ADMIN.map(o => [o.id, o]));
+          const visibles = ordreOnglets
+            .map(id => catalogue[id])
+            .filter(o => o && (!o.fullAdmin || isFullAdmin));
+
+          const puce = "text-xs font-bold rounded-full min-w-[20px] h-5 px-1.5 flex items-center justify-center";
+          const badgeDe = (id) => {
+            if (id === "dossiers") {
+              return newDeposits > 0
+                ? <span className={`fa-bg-gold fa-navy ${puce}`}>{masqueNb(newDeposits)}</span>
+                : null;
+            }
+            if (id === "partenaires") {
+              return actionsPartenaires > 0 ? (
+                <span className={`fa-bg-gold fa-navy ${puce}`}
+                  title={[
+                    parrainagesEnAttente > 0 ? `${parrainagesEnAttente} déclaration${parrainagesEnAttente > 1 ? "s" : ""} de parrainage à traiter` : null,
+                    facturesEnAttente > 0 ? `${facturesEnAttente} facture${facturesEnAttente > 1 ? "s" : ""} à régler` : null,
+                  ].filter(Boolean).join(" · ")}>
+                  {masqueNb(actionsPartenaires)}
+                </span>
               ) : null;
-            })()}
-          </button>
-          <button onClick={() => setTab("corbeille")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "corbeille" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            <Trash2 size={15} /> Corbeille
-            {data.partners.filter(p => p.deleted).length > 0 && (
-              <span className="bg-gray-200 text-gray-600 text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
-                {data.partners.filter(p => p.deleted).length}
-              </span>
-            )}
-          </button>
-          <button onClick={() => setTab("stats")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "stats" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            <BarChart3 size={15} /> Statistiques
-          </button>
-                    <button onClick={() => setTab("challenge")}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "challenge" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-            🏆 Challenge
-          </button>
-          {isFullAdmin && (
-            <button onClick={() => setTab("mandataires")}
-              className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "mandataires" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
-              <Landmark size={15} /> Mandataires
-            </button>
-          )}
-        </div>
+            }
+            if (id === "facturation") {
+              const n = data.partners.filter(p => !p.deleted).reduce((s2, p) => s2 + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
+              return n > 0 ? <span className={`bg-amber-400 text-amber-950 ${puce}`}>{masqueNb(n)}</span> : null;
+            }
+            if (id === "corbeille") {
+              const n = data.partners.filter(p => p.deleted).length;
+              return n > 0 ? <span className={`bg-gray-200 text-gray-600 ${puce}`}>{masqueNb(n)}</span> : null;
+            }
+            return null;
+          };
+
+          // On permute dans l'ordre complet, mais d'après le voisin VISIBLE :
+          // un onglet caché ne doit pas absorber un déplacement.
+          const deplacer = (id, sens) => {
+            const rang = visibles.findIndex(o => o.id === id);
+            const cible = visibles[rang + sens];
+            if (!cible) return;
+            const suivant = [...ordreOnglets];
+            const a = suivant.indexOf(id), b = suivant.indexOf(cible.id);
+            if (a < 0 || b < 0) return;
+            suivant[a] = cible.id; suivant[b] = id;
+            setOrdreOnglets(suivant);
+            ecrireOrdreOnglets(suivant);
+          };
+
+          return (
+            <div className="mb-8">
+              <div className="flex gap-2 items-center overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
+                {visibles.map((o, i) => {
+                  const Icone = o.icone ? ICONES_ONGLETS[o.icone] : null;
+                  return (
+                    <div key={o.id} className="flex items-center shrink-0">
+                      {reorganiser && (
+                        <button onClick={() => deplacer(o.id, -1)} disabled={i === 0}
+                          title="Déplacer vers la gauche"
+                          className="text-gray-400 hover:fa-teal-text disabled:opacity-20 px-1 text-lg leading-none">‹</button>
+                      )}
+                      <button onClick={() => { if (!reorganiser) setTab(o.id); }}
+                        className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap ${tab === o.id ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"} ${reorganiser ? "ring-2 ring-teal-300" : ""}`}>
+                        {Icone ? <Icone size={15} /> : <span>{o.emoji}</span>} {o.label}
+                        {badgeDe(o.id)}
+                      </button>
+                      {reorganiser && (
+                        <button onClick={() => deplacer(o.id, 1)} disabled={i === visibles.length - 1}
+                          title="Déplacer vers la droite"
+                          className="text-gray-400 hover:fa-teal-text disabled:opacity-20 px-1 text-lg leading-none">›</button>
+                      )}
+                    </div>
+                  );
+                })}
+                <div className="flex items-center gap-1 shrink-0 sm:ml-auto">
+                  <button onClick={basculerDiscret}
+                    title={discret ? "Réafficher les chiffres" : "Mode discret : masquer chiffres et noms le temps d'une démonstration"}
+                    className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${discret ? "bg-amber-100 border-amber-300 text-amber-900" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
+                    {discret ? <EyeOff size={15} /> : <Eye size={15} />}
+                    {discret && <span className="hidden sm:inline">Discret</span>}
+                  </button>
+                  <button onClick={() => setReorganiser(r => !r)}
+                    title="Réorganiser mes onglets"
+                    className={`flex items-center text-sm font-medium px-3 py-2 rounded-full transition whitespace-nowrap border ${reorganiser ? "fa-bg-teal text-white border-transparent" : "bg-white border-gray-200 text-gray-500 hover:fa-teal-text"}`}>
+                    <ArrowLeftRight size={15} />
+                  </button>
+                </div>
+              </div>
+
+              {reorganiser && (
+                <div className="mt-3 flex items-center gap-3 flex-wrap text-xs bg-teal-50 border border-teal-200 rounded-xl px-3 py-2">
+                  <span className="fa-teal-text">Range tes onglets avec les flèches ‹ › — l'ordre est mémorisé sur cet ordinateur.</span>
+                  <button onClick={() => { setOrdreOnglets([...ORDRE_ONGLETS_DEFAUT]); ecrireOrdreOnglets(ORDRE_ONGLETS_DEFAUT); }}
+                    className="underline fa-teal-text">Remettre l'ordre d'origine</button>
+                  <button onClick={() => setReorganiser(false)}
+                    className="ml-auto fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg">Terminé</button>
+                </div>
+              )}
+
+              {discret && (
+                <div className="mt-3 flex items-center gap-2 flex-wrap text-xs bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-amber-900">
+                  <EyeOff size={14} />
+                  <span><strong>Mode discret actif</strong> — montants, compteurs, noms de clients, réseaux et graphiques sont masqués. Tu peux partager ton écran.</span>
+                  <button onClick={basculerDiscret} className="ml-auto underline font-medium">Réafficher mes chiffres</button>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {tab === "accueil" && (() => {
           const priorityItems = liveDossiers
@@ -7076,9 +7244,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
           // File d'attente unique : tout ce qui attend une action de Frangola,
           // quelle qu'en soit la nature, trié du plus ancien au plus récent.
           // Sans cela l'information reste éparpillée entre quatre onglets.
-          const nomPartenaire = (id) => {
+          const nomPartenaireParId = (id) => {
             const x = data.partners.find(p => p.id === id);
-            return x ? (x.firstName ? `${x.firstName} ${up(x.name)}` : up(x.name)) : "—";
+            return x ? nomPartenaire(x) : "—";
           };
 
           const fileAttente = [
@@ -7095,8 +7263,8 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               cle: "p-" + x.id,
               categorie: "Parrainage",
               couleur: "bg-amber-100 text-amber-800",
-              titre: `${x.prenom || ""} ${up(x.nom || "")}`.trim() || "Filleul sans nom",
-              detail: `présenté par ${nomPartenaire(x.parrainId)} — à valider`,
+              titre: MODE_DISCRET ? nomFictif(x.id || "") : (`${x.prenom || ""} ${up(x.nom || "")}`.trim() || "Filleul sans nom"),
+              detail: `présenté par ${nomPartenaireParId(x.parrainId)} — à valider`,
               depuis: x.at,
               aller: () => setTab("partenaires"),
             })),
@@ -7105,7 +7273,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                 cle: "f-" + f.id,
                 categorie: "Facture",
                 couleur: "bg-violet-100 text-violet-800",
-                titre: nomPartenaire(p.id),
+                titre: nomPartenaire(p),
                 detail: `facture de ${fmtEuroPrecis(f.montant || 0)} à régler`,
                 depuis: f.at,
                 aller: () => setTab("partenaires"),
@@ -7118,7 +7286,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               cle: "v-" + x.p.id,
               categorie: "Parrainage",
               couleur: "bg-amber-100 text-amber-800",
-              titre: nomPartenaire(x.p.id),
+              titre: nomPartenaire(x.p),
               detail: `rétrocession de ${fmtEuroPrecis(x.reste)} à verser`,
               depuis: x.p.createdAt,
               aller: () => setTab("partenaires"),
@@ -7128,7 +7296,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                   cle: "c-" + p.id,
                   categorie: "Contrat",
                   couleur: "bg-red-100 text-red-800",
-                  titre: nomPartenaire(p.id),
+                  titre: nomPartenaire(p),
                   detail: "contrat de partenariat pas encore accepté",
                   depuis: p.createdAt,
                   aller: () => setTab("partenaires"),
@@ -7138,7 +7306,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               cle: "i-" + p.id,
               categorie: "Fiche",
               couleur: "bg-gray-200 text-gray-700",
-              titre: nomPartenaire(p.id),
+              titre: nomPartenaire(p),
               detail: "email manquant — accès impossible",
               depuis: p.createdAt,
               aller: () => setTab("partenaires"),
@@ -7171,11 +7339,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               <div className="grid sm:grid-cols-4 gap-4">
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
                   <div className="text-xs text-gray-400 mb-1">Dossiers actifs</div>
-                  <div className="font-display text-2xl font-bold fa-navy">{dossiersActifs}</div>
+                  <div className="font-display text-2xl font-bold fa-navy">{masqueNb(dossiersActifs)}</div>
                 </div>
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
                   <div className="text-xs text-gray-400 mb-1">Nouveaux dépôts</div>
-                  <div className="font-display text-2xl font-bold text-amber-600">{newDeposits}</div>
+                  <div className="font-display text-2xl font-bold text-amber-600">{masqueNb(newDeposits)}</div>
                 </div>
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
                   <div className="text-xs text-gray-400 mb-1">Encaissé ce mois</div>
@@ -7183,7 +7351,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                 </div>
                 <div className="bg-white border border-gray-200 rounded-2xl p-5">
                   <div className="text-xs text-gray-400 mb-1">Partenaires actifs</div>
-                  <div className="font-display text-2xl font-bold fa-teal-text">{partenairesActifs}</div>
+                  <div className="font-display text-2xl font-bold fa-teal-text">{masqueNb(partenairesActifs)}</div>
                 </div>
               </div>
 
@@ -7360,10 +7528,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                                   {isCollapsed ? <Folder className="fa-teal-text" size={20} /> : <FolderOpen className="fa-teal-text" size={20} />}
                                   <div className="text-left">
                                     <div className="font-display font-semibold fa-navy flex items-center gap-2">
-                                      <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
+                                      <span className="font-bold">{nomPartenaire(p)}</span>
                                       {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                                     </div>
-                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {partnerDossiers.length} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
+                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{afficheReseau(p.company) || "—"} {!MODE_DISCRET && p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2.5">
@@ -7936,11 +8104,11 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                       <div key={p.id} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
                         <div>
                           <div className="text-sm fa-navy font-bold">
-                            {p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}
+                            {nomPartenaire(p)}
                             {p.issuDuParrainage && <span className="ml-2 text-xs text-teal-700">issu du parrainage</span>}
                           </div>
                           <div className="text-xs text-gray-400">
-                            {p.company || "réseau non précisé"}
+                            {afficheReseau(p.company) || "réseau non précisé"}
                             {p.telephone && ` · ${p.telephone}`}
                             {p.siret && ` · SIRET ${p.siret}`}
                             {p.parrainId && nomParrain(p.parrainId) && ` · parrainé par ${nomParrain(p.parrainId)}`}
@@ -8185,7 +8353,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                           <option value="">Parrainé par… (aucun)</option>
                           {data.partners.filter(x => !x.deleted && x.id !== p.id).map(x => (
                             <option key={x.id} value={x.id}>
-                              {x.firstName ? `${x.firstName} ${up(x.name)}` : up(x.name)}
+                              {nomPartenaire(x)}
                             </option>
                           ))}
                         </select>
@@ -8212,7 +8380,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div>
                         <div className="font-medium fa-navy flex items-center gap-2">
-                          <span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span>
+                          <span className="font-bold">{nomPartenaire(p)}</span>
                           {p.flatFee != null && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Forfait {p.flatFee}€</span>}
                           {filleulsDe(p.id).length > 0 && (() => {
                             const n = filleulsDe(p.id).length;
@@ -8243,13 +8411,13 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                           )}
                         </div>
                         <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">
-                          {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
+                          {afficheReseau(p.company) || "—"} {!MODE_DISCRET && p.ville && `· ${p.ville}`} {!MODE_DISCRET && p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
                           {filleulsOuverts.has(p.id) && filleulsDe(p.id).length > 0 && (() => {
                             const bilan = bilanParrainage(p.id);
                             return (
                               <div className="w-full mt-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
                                 <div className="text-xs font-semibold fa-navy mb-2">
-                                  Filleuls de {p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}
+                                  Filleuls de {nomPartenaire(p)}
                                 </div>
                                 <div className="space-y-1.5">
                                   {filleulsDe(p.id).map(f => {
@@ -8257,8 +8425,8 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                                     return (
                                       <div key={f.id} className="flex items-baseline justify-between gap-3 flex-wrap text-xs">
                                         <span className="fa-navy font-medium">
-                                          {f.firstName ? `${f.firstName} ${up(f.name)}` : up(f.name)}
-                                          {f.company && <span className="text-gray-500 font-normal"> · {f.company}</span>}
+                                          {nomPartenaire(f)}
+                                          {f.company && <span className="text-gray-500 font-normal"> · {afficheReseau(f.company)}</span>}
                                           {f.active === false && <span className="text-gray-400 font-normal"> · inactif</span>}
                                         </span>
                                         <span className="text-gray-500">
@@ -8486,9 +8654,9 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
               {filtered.map(p => (
                 <div key={p.id} className="bg-white border border-gray-200 rounded-xl px-5 py-4 flex items-center justify-between flex-wrap gap-2 opacity-80">
                   <div>
-                    <div className="font-medium fa-navy"><span className="font-bold">{p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)}</span></div>
+                    <div className="font-medium fa-navy"><span className="font-bold">{nomPartenaire(p)}</span></div>
                     <div className="text-xs text-gray-400">
-                      {p.company || "—"} {p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
+                      {afficheReseau(p.company) || "—"} {!MODE_DISCRET && p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
                     </div>
                   </div>
                   <button onClick={() => onRestorePartner(p.id)}
@@ -8681,7 +8849,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
           const topReseaux = (() => {
             const m = new Map();
             for (const p of partners.filter(x => !x.deleted)) {
-              const nom = (p.company || "").trim() || "Sans réseau";
+              const nom = afficheReseau((p.company || "").trim()) || "Sans réseau";
               if (!m.has(nom)) m.set(nom, { nom, partenaires: 0, dossiers: 0, ca: 0, rec: 0 });
               const g = m.get(nom);
               g.partenaires += 1;
@@ -9008,7 +9176,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                     {topPartners.map((tp, i) => (
                       <div key={tp.partner.id} className="flex items-center justify-between text-sm">
                         <span className="flex items-center gap-2">
-                          <span className="fa-navy font-bold">{i + 1}. {tp.partner.firstName ? `${tp.partner.firstName} ${up(tp.partner.name)}` : up(tp.partner.name)}</span>
+                          <span className="fa-navy font-bold">{i + 1}. {nomPartenaire(tp.partner)}</span>
                           {reseauLogoFor(tp.partner.company) && (
                             <img src={reseauLogoFor(tp.partner.company).data} alt={tp.partner.company} className="h-4 max-w-[52px] object-contain" />
                           )}
@@ -9027,7 +9195,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                   {topPartnersByRevenue.map((tp, i) => (
                     <div key={tp.partner.id} className="flex items-center justify-between text-sm">
                       <span className="flex items-center gap-2">
-                        <span className="fa-navy font-bold">{i + 1}. {tp.partner.firstName ? `${tp.partner.firstName} ${up(tp.partner.name)}` : up(tp.partner.name)}</span>
+                        <span className="fa-navy font-bold">{i + 1}. {nomPartenaire(tp.partner)}</span>
                         {reseauLogoFor(tp.partner.company) && (
                           <img src={reseauLogoFor(tp.partner.company).data} alt={tp.partner.company} className="h-4 max-w-[52px] object-contain" />
                         )}
@@ -9150,7 +9318,7 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                           {classement.map((x, i) => (
                             <div key={x.p.id} className="flex items-center justify-between flex-wrap gap-2 text-sm py-1">
                               <span className="fa-navy font-bold">
-                                {i + 1}. {x.p.firstName ? `${x.p.firstName} ${up(x.p.name)}` : up(x.p.name)}
+                                {i + 1}. {nomPartenaire(x.p)}
                               </span>
                               <span className="text-xs text-gray-500">
                                 {x.filleuls.length} filleul{x.filleuls.length > 1 ? "s" : ""} · {x.actifs} actif{x.actifs > 1 ? "s" : ""} · CA {fmtEuroPrecis(x.caTotal)} · prime {fmtEuroPrecis(x.gainTotal)}
