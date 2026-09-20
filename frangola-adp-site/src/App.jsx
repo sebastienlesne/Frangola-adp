@@ -21,6 +21,14 @@ const STATUS_COLORS = {
   "Payé": "bg-green-100 text-green-800 border-green-300",
   "KO": "bg-red-100 text-red-800 border-red-300",
 };
+// Dès le devis, le dossier est engagé auprès de l'assureur : le partenaire ne
+// peut plus renommer le client ni retirer une pièce, sous peine de créer un
+// écart entre le contrat et la fiche. Il peut toujours en ajouter une.
+const STATUTS_MODIFIABLES = ["Déposé", "En vérification"];
+function dossierVerrouille(dossier) {
+  return !STATUTS_MODIFIABLES.includes(dossier?.status);
+}
+
 const DOC_LABELS = { offre: "Offre de prêt", tableau: "Tableau d'amortissement", cni: "Carte d'identité" };
 const MAX_FILE_BYTES = 3.5 * 1024 * 1024;
 
@@ -412,6 +420,36 @@ function caGenerePar(partnerId) {
 // Toutes les échéances de rétrocession d'un partenaire, mises à plat et
 // datées. C'est ce qui permet de lui montrer non seulement ce qu'il a touché,
 // mais ce qui va tomber et quand.
+// Calendrier mensuel des rétrocessions d'un partenaire : un mois par ligne,
+// avec son état. « Réglé » quand l'ordre de virement est déposé, « à régler »
+// quand Frangola a encaissé mais n'a pas encore reversé, « à venir » sinon.
+function calendrierRetrocession(partner, dossiers) {
+  const lignes = echeancesRetrocession(dossiers);
+  const versements = partner?.retrocessionVersements || [];
+  const mois = [];
+  for (const l of lignes) {
+    if (!l.datePrevue) continue;
+    const cle = l.datePrevue.slice(0, 7);
+    let m = mois.find(x => x.cle === cle);
+    if (!m) {
+      m = {
+        cle, montant: 0, nb: 0, recus: 0,
+        libelle: new Date(l.datePrevue + "T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }),
+      };
+      mois.push(m);
+    }
+    m.montant += l.montant; m.nb += 1; if (l.recu) m.recus += 1;
+  }
+  for (const m of mois) {
+    m.versement = versements.find(v => v.mois === m.cle) || null;
+    m.encaisse = m.nb > 0 && m.recus === m.nb;
+    m.etat = m.versement ? "regle" : (m.encaisse ? "a_regler" : "a_venir");
+  }
+  mois.sort((a, b) => a.cle.localeCompare(b.cle));
+  const sansDate = lignes.filter(l => !l.datePrevue).length;
+  return { mois, sansDate };
+}
+
 function echeancesRetrocession(dossiers) {
   return (dossiers || []).filter(d => d.status !== "KO").flatMap(d => {
     const ech = echeancesDe(d);
@@ -1144,6 +1182,40 @@ export default function App() {
 
   // Un versement s'ajoute à un historique daté : un simple cumul ne permet
   // ni de justifier un paiement, ni de retrouver ce qui a été réglé quand.
+  // Règlement d'une échéance de rétrocession à un partenaire, mois par mois.
+  // L'ordre de virement est joint : le partenaire n'a pas à demander la preuve,
+  // il la télécharge depuis son calendrier.
+  async function enregistrerVirementPartenaire(partnerId, mois, montant, dateVirement, file) {
+    if (!mois || !dateVirement) { setGlobalError("Mois et date de virement requis."); return false; }
+    setBusy(true);
+    try {
+      let ordre = null;
+      if (file) {
+        if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return false; }
+        const b64 = await fileToBase64(file);
+        const key = "adp:file:" + uid();
+        await storage.set(key, JSON.stringify({ name: file.name, mime: file.type, data: b64 }), true);
+        ordre = { name: file.name, key, size: file.size };
+      }
+      const versement = { id: uid(), mois, montant: Number(montant) || 0, dateVirement, ordre, at: Date.now() };
+      return await mutateData(base => withLog({
+        ...base,
+        partners: base.partners.map(p => p.id === partnerId
+          ? { ...p, retrocessionVersements: [...(p.retrocessionVersements || []).filter(v => v.mois !== mois), versement] }
+          : p),
+      }, `a réglé la rétrocession de ${mois} à un partenaire`));
+    } finally { setBusy(false); }
+  }
+
+  async function annulerVirementPartenaire(partnerId, versementId) {
+    return await mutateData(base => ({
+      ...base,
+      partners: base.partners.map(p => p.id === partnerId
+        ? { ...p, retrocessionVersements: (p.retrocessionVersements || []).filter(v => v.id !== versementId) }
+        : p),
+    }));
+  }
+
   async function addVersementParrainage(partnerId, montant, note) {
     const valeur = Number(montant);
     if (!valeur || valeur <= 0) return false;
@@ -1622,6 +1694,8 @@ export default function App() {
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
+          onVirementPartenaire={enregistrerVirementPartenaire}
+          onAnnulerVirement={annulerVirementPartenaire}
                     onApercuPartner={setApercuPartnerId}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
@@ -1666,6 +1740,8 @@ export default function App() {
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
+          onVirementPartenaire={enregistrerVirementPartenaire}
+          onAnnulerVirement={annulerVirementPartenaire}
                     onApercuPartner={setApercuPartnerId}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
@@ -2841,7 +2917,9 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                   <div>
                     <div className="font-bold fa-navy flex items-center gap-2 flex-wrap">
                       {clientName(d)} <CoEmprunteurBadge d={d} />
-                      <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
+{!dossierVerrouille(d) && (
+                        <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
+                      )}
                     </div>
                     <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.clientPhone && ` · ${d.clientPhone}`}</div>
                   </div>
@@ -2871,7 +2949,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                     <button onClick={() => previewStoredFile(d.docs[k].key)} className="flex items-center gap-1 hover:fa-teal-text transition">
                       <FileText size={12} /> {DOC_LABELS[k]}
                     </button>
-                    {d.status !== "KO" && (
+                    {!dossierVerrouille(d) && (
                       <button onClick={() => onRemoveDoc(d.id, k)} className="fa-tap text-gray-400 hover:text-red-600 ml-0.5" title="Retirer ce document">
                         <X size={12} />
                       </button>
@@ -2883,7 +2961,7 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                     <button onClick={() => previewStoredFile(ed.key)} className="flex items-center gap-1 hover:underline">
                       <FileText size={12} /> {ed.label}
                     </button>
-                    {d.status !== "KO" && (
+                    {!dossierVerrouille(d) && (
                       <button onClick={() => onRemoveExtraDoc(d.id, i)} className="fa-tap text-teal-500 hover:text-red-600 ml-0.5" title="Retirer ce document">
                         <X size={12} />
                       </button>
@@ -2891,6 +2969,15 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                   </span>
                 ))}
               </div>
+              {dossierVerrouille(d) && d.status !== "KO" && (
+                <div className="text-xs text-gray-400 mt-2 flex items-start gap-1.5">
+                  <Shield size={12} className="mt-0.5 shrink-0" />
+                  <span>
+                    Le dossier est engagé auprès de l'assureur : le nom du client et les pièces déjà
+                    transmises ne sont plus modifiables. Vous pouvez toujours ajouter un document.
+                  </span>
+                </div>
+              )}
 
               {d.status !== "KO" && (
                 extraDocOpenId === d.id ? (
@@ -3260,21 +3347,10 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                 const totalAVenir = aVenir.reduce((sm, x) => sm + x.montant, 0);
                 if (totalRecu < 0.005 && totalAVenir < 0.005) return null;
 
-                // Regroupe les échéances à venir par mois : c'est la vue qui
-                // parle — « voilà ce qui tombe le mois prochain ».
-                const parMois = [];
-                for (const x of aVenir) {
-                  if (!x.datePrevue) continue;
-                  const cle = x.datePrevue.slice(0, 7);
-                  let ligne = parMois.find(m => m.cle === cle);
-                  if (!ligne) {
-                    ligne = { cle, montant: 0, nb: 0,
-                      libelle: new Date(x.datePrevue + "T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }) };
-                    parMois.push(ligne);
-                  }
-                  ligne.montant += x.montant; ligne.nb += 1;
-                }
-                const sansDate = aVenir.filter(x => !x.datePrevue);
+                // Un mois par ligne, du premier au dernier, avec son état.
+                // Le vert n'est pas décoratif : il signifie « virement parti,
+                // justificatif disponible ».
+                const cal = calendrierRetrocession(partner, dossiers);
 
                 return (
                   <div className="bg-white border border-gray-200 rounded-2xl p-6">
@@ -3293,21 +3369,42 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
                         <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(totalAVenir)}</div>
                       </div>
                     </div>
-                    {parMois.length > 0 && (
+
+                    {cal.mois.length > 0 && (
                       <div className="space-y-1.5">
-                        <div className="text-xs font-semibold fa-navy mb-1">Calendrier prévisionnel</div>
-                        {parMois.map(m => (
-                          <div key={m.cle} className="flex items-center justify-between fa-bg-offwhite rounded-lg px-3 py-2">
-                            <span className="text-sm fa-navy capitalize">{m.libelle}</span>
-                            <span className="text-xs text-gray-400">{m.nb} échéance{m.nb > 1 ? "s" : ""}</span>
-                            <span className="text-sm font-bold fa-navy">{fmtEuroPrecis(m.montant)}</span>
+                        <div className="text-xs font-semibold fa-navy mb-1">Calendrier des versements</div>
+                        {cal.mois.map(m => (
+                          <div key={m.cle}
+                            className={`flex items-center justify-between gap-2 flex-wrap rounded-lg px-3 py-2 border ${
+                              m.etat === "regle" ? "bg-emerald-50 border-emerald-200"
+                              : m.etat === "a_regler" ? "fa-bg-gold border-amber-300"
+                              : "fa-bg-offwhite border-transparent"}`}>
+                            <span className="text-sm fa-navy capitalize font-medium">{m.libelle}</span>
+                            <span className="text-xs text-gray-500">
+                              {m.etat === "regle"
+                                ? <>versé le {fmtDate(new Date(m.versement.dateVirement + "T12:00:00").getTime())}</>
+                                : m.etat === "a_regler"
+                                  ? "encaissé par Frangola — versement en préparation"
+                                  : `${m.nb} échéance${m.nb > 1 ? "s" : ""}`}
+                            </span>
+                            <span className="flex items-center gap-2">
+                              {m.etat === "regle" && m.versement.ordre && (
+                                <button onClick={() => downloadStoredFile(m.versement.ordre.key, m.versement.ordre.name)}
+                                  className="flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline">
+                                  <Download size={12} /> ordre de virement
+                                </button>
+                              )}
+                              <span className={`text-sm font-bold ${m.etat === "regle" ? "text-emerald-700" : "fa-navy"}`}>
+                                {fmtEuroPrecis(m.etat === "regle" ? m.versement.montant : m.montant)}
+                              </span>
+                            </span>
                           </div>
                         ))}
                       </div>
                     )}
-                    {sansDate.length > 0 && (
+                    {cal.sansDate > 0 && (
                       <div className="text-xs text-gray-400 mt-2">
-                        {sansDate.length} échéance{sansDate.length > 1 ? "s" : ""} en attente de date d'effet.
+                        {cal.sansDate} échéance{cal.sansDate > 1 ? "s" : ""} en attente de date d'effet.
                       </div>
                     )}
                   </div>
@@ -4898,7 +4995,137 @@ function Vision360({ data }) {
   );
 }
 
-function FacturationAdmin({ data, onSetStatut, onAddVersement }) {
+// =============================================================================
+// VERSEMENTS AUX PARTENAIRES
+//
+// Mois par mois, ce qui est dû à chaque partenaire une fois que Frangola a
+// encaissé. On dépose l'ordre de virement avec la date : la ligne passe au
+// vert, et le partenaire télécharge lui-même son justificatif.
+// =============================================================================
+function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
+  const [ouvertId, setOuvertId] = useState(null);      // "partnerId|mois"
+  const [date, setDate] = useState("");
+  const [fichier, setFichier] = useState(null);
+  const [historique, setHistorique] = useState(false);
+  const champ = useRef(null);
+
+  const aujourdhui = () => new Date().toISOString().slice(0, 10);
+  const nomDe = (p) => p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name);
+  const moisFr = (cle) => new Date(cle + "-01T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+
+  const lignes = [];
+  const reglees = [];
+  for (const p of data.partners.filter(x => !x.deleted)) {
+    const siens = data.dossiers.filter(d => d.partnerId === p.id);
+    if (siens.length === 0) continue;
+    const cal = calendrierRetrocession(p, siens);
+    for (const m of cal.mois) {
+      if (m.etat === "a_regler") lignes.push({ p, m });
+      else if (m.etat === "regle") reglees.push({ p, m });
+    }
+  }
+  lignes.sort((a, b) => a.m.cle.localeCompare(b.m.cle));
+  reglees.sort((a, b) => b.m.cle.localeCompare(a.m.cle));
+
+  const total = lignes.reduce((s, x) => s + x.m.montant, 0);
+
+  async function valider(p, m) {
+    const ok = await onVirement(p.id, m.cle, m.montant, date || aujourdhui(), fichier);
+    if (ok !== false) { setOuvertId(null); setDate(""); setFichier(null); }
+  }
+
+  if (lignes.length === 0 && reglees.length === 0) return null;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="font-display font-semibold fa-navy mb-1">Versements aux partenaires</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Uniquement ce que Frangola a déjà encaissé — on ne verse pas d'argent qu'on n'a pas reçu.
+        {lignes.length > 0 && <> Total à régler : <strong className="fa-navy">{fmtEuroPrecis(total)}</strong>.</>}
+      </p>
+
+      {lignes.length === 0 ? (
+        <div className="text-sm text-gray-400 mb-3">Rien à régler pour l'instant.</div>
+      ) : (
+        <div className="space-y-1.5">
+          {lignes.map(({ p, m }) => {
+            const cle = p.id + "|" + m.cle;
+            const ouvert = ouvertId === cle;
+            return (
+              <div key={cle} className="fa-bg-gold rounded-lg px-3 py-2.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-sm fa-navy font-bold">{nomDe(p)}</span>
+                  <span className="text-xs text-teal-900/70 capitalize">{moisFr(m.cle)}</span>
+                  <span className="text-sm font-bold fa-navy ml-auto">{fmtEuroPrecis(m.montant)}</span>
+                  {!ouvert && (
+                    <button onClick={() => { setOuvertId(cle); setDate(aujourdhui()); setFichier(null); }}
+                      className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">
+                      Enregistrer le virement
+                    </button>
+                  )}
+                </div>
+                {ouvert && (
+                  <div className="flex items-center gap-2 flex-wrap mt-2">
+                    <label className="text-xs text-teal-900/80 flex items-center gap-1.5">
+                      Date du virement
+                      <input type="date" value={date} onChange={e => setDate(e.target.value)}
+                        className="text-xs border border-amber-300 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                    </label>
+                    <button onClick={() => champ.current?.click()}
+                      className="text-xs font-medium bg-white border border-amber-300 text-teal-900 px-3 py-1.5 rounded-lg transition">
+                      {fichier ? fichier.name : "Joindre l'ordre de virement"}
+                    </button>
+                    <input type="file" accept="application/pdf,image/*" className="hidden" ref={champ}
+                      onChange={e => setFichier(e.target.files?.[0] || null)} />
+                    <button onClick={() => valider(p, m)} disabled={busy || !date}
+                      className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg transition">
+                      {busy ? "Enregistrement…" : "Valider"}
+                    </button>
+                    <button onClick={() => { setOuvertId(null); setFichier(null); }}
+                      className="text-xs text-teal-900/60 hover:text-teal-900 px-2">Annuler</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {reglees.length > 0 && (
+        <>
+          <button onClick={() => setHistorique(v => !v)} className="text-xs fa-teal-text hover:underline mt-3">
+            {historique ? "Masquer les versements effectués" : `Voir les ${reglees.length} versement${reglees.length > 1 ? "s" : ""} effectué${reglees.length > 1 ? "s" : ""}`}
+          </button>
+          {historique && (
+            <div className="space-y-1.5 mt-2">
+              {reglees.map(({ p, m }) => (
+                <div key={p.id + "|" + m.cle} className="flex items-center justify-between gap-2 flex-wrap bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                  <span className="text-sm fa-navy font-medium">{nomDe(p)}</span>
+                  <span className="text-xs text-gray-500 capitalize">{moisFr(m.cle)}</span>
+                  <span className="text-xs text-emerald-700">
+                    versé le {fmtDate(new Date(m.versement.dateVirement + "T12:00:00").getTime())}
+                  </span>
+                  {m.versement.ordre && (
+                    <button onClick={() => downloadStoredFile(m.versement.ordre.key, m.versement.ordre.name)}
+                      className="flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline">
+                      <Download size={12} /> justificatif
+                    </button>
+                  )}
+                  <span className="text-sm font-bold text-emerald-700 ml-auto">{fmtEuroPrecis(m.versement.montant)}</span>
+                  <button onClick={() => onAnnuler(p.id, m.versement.id)}
+                    title="Annuler ce versement — à n'utiliser qu'en cas d'erreur de saisie"
+                    className="text-xs text-gray-400 hover:text-red-600">✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function FacturationAdmin({ data, onSetStatut, onAddVersement, onVirementPartenaire, onAnnulerVirement, busy }) {
   const [toutHistorique, setToutHistorique] = useState(false);
 
   const nomDe = (p) => p ? (p.firstName ? `${p.firstName} ${up(p.name)}` : up(p.name)) : "—";
@@ -5056,6 +5283,7 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement }) {
         )}
       </div>
 
+      <VersementsPartenaires data={data} onVirement={onVirementPartenaire} onAnnuler={onAnnulerVirement} busy={busy} />
       <FacturesPartenaires data={data} onSetStatut={onSetStatut} />
       <VersementsParrainage data={data} onAddVersement={onAddVersement} />
     </div>
@@ -5212,7 +5440,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUploadContratType, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -7585,7 +7813,8 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
         })()}
 
               {tab === "facturation" && (
-          <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} />
+          <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage}
+            onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} />
         )}
         {tab === "challenge" && (
           <div className="space-y-6">
