@@ -3278,16 +3278,21 @@ function BannieresChallenges({ challenges, partner, dossiers }) {
 }
 
 function BanniereChallenge({ challenge, partner, dossiers }) {
+  const [detail, setDetail] = useState(false);
   if (!challengeVisible(challenge)) return null;
   const debut = new Date(challenge.debut + "T00:00:00").getTime();
   const fin = new Date(challenge.fin + "T23:59:59").getTime();
 
   // Chaque partenaire a son propre objectif quand le challenge est ciblé.
   const objectif = objectifChallenge(challenge, partner?.id);
-  const n = (dossiers || []).filter(d => {
-    const t = dateGain(d);
-    return t !== null && t >= debut && t <= fin;
-  }).length;
+  // On garde les dossiers eux-mêmes, pas seulement leur nombre : le partenaire
+  // doit pouvoir vérifier lesquels comptent, sinon le compteur est une
+  // affirmation qu'il ne peut pas recouper.
+  const comptes = (dossiers || [])
+    .map(d => ({ d, t: dateGain(d) }))
+    .filter(x => x.t !== null && x.t >= debut && x.t <= fin)
+    .sort((a, b2) => b2.t - a.t);
+  const n = comptes.length;
   const restants = Math.max(0, objectif - n);
   const jours = Math.max(0, Math.ceil((fin - Date.now()) / 86400000));
   const pct = Math.min(100, Math.round((n / objectif) * 100));
@@ -3311,10 +3316,47 @@ function BanniereChallenge({ challenge, partner, dossiers }) {
           : <>Plus que <strong>{restants} dossier{restants > 1 ? "s" : ""} souscrit{restants > 1 ? "s" : ""}</strong> pour gagner <strong>{challenge.recompense}</strong>.</>}
       </div>
 
-      <div className="h-3 bg-white/60 rounded-full overflow-hidden">
-        <div className={`h-full ${gagne ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
+      {/* Une case par dossier attendu : d'un coup d'œil on voit le chemin
+          parcouru et ce qu'il reste, mieux qu'un pourcentage. Au-delà de dix
+          on repasse à une barre, sinon la ligne devient illisible. */}
+      {objectif <= 10 ? (
+        <div className="flex gap-1.5 flex-wrap">
+          {Array.from({ length: objectif }, (_, i) => (
+            <div key={i} title={i < n ? `Dossier ${i + 1} souscrit` : "À souscrire"}
+              className={`h-3 flex-1 min-w-[18px] rounded-full ${i < n ? (gagne ? "bg-emerald-500" : "fa-bg-teal") : "bg-white/60"}`} />
+          ))}
+        </div>
+      ) : (
+        <div className="h-3 bg-white/60 rounded-full overflow-hidden">
+          <div className={`h-full ${gagne ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mt-1">
+        <span className="text-xs text-teal-900/70">
+          <strong className="fa-navy">{n}</strong> / {objectif} dossier{objectif > 1 ? "s" : ""} souscrit{n > 1 ? "s" : ""} · {pct} %
+        </span>
+        {n > 0 && (
+          <button onClick={() => setDetail(v => !v)} className="text-xs font-medium fa-navy hover:underline">
+            {detail ? "Masquer le détail" : "Quels dossiers comptent ?"}
+          </button>
+        )}
       </div>
-      <div className="text-xs text-teal-900/70 mt-1">{n} / {objectif} dossiers souscrits</div>
+
+      {detail && n > 0 && (
+        <div className="mt-2 bg-white/70 rounded-lg px-3 py-2 space-y-1">
+          {comptes.map(({ d, t }) => (
+            <div key={d.id} className="flex items-baseline justify-between gap-2 text-xs flex-wrap">
+              <span className="fa-navy font-medium">{clientName(d)}</span>
+              <span className="text-teal-900/60">souscrit le {fmtDate(t)}</span>
+            </div>
+          ))}
+          <div className="text-[11px] text-teal-900/50 pt-1">
+            Seuls les dossiers passés en souscription entre le {new Date(debut).toLocaleDateString("fr-FR")} et
+            le {dateFin} comptent — un dossier déposé pendant la période mais souscrit après comptera pour la suite.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
