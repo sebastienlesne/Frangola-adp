@@ -4,7 +4,7 @@ import { supabase } from "./supabaseClient";
 import {
   Shield, Users, Building2, Upload, FileText, CheckCircle2, Clock,
   Bell, LogOut, Download, Plus, ArrowLeft, Copy, Check, AlertCircle,
-  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus, Sparkles, ArrowLeftRight, TrendingUp, Key, Wallet
+  FileCheck2, Landmark, X, Folder, FolderOpen, ChevronDown, Trash2, RotateCcw, BarChart3, StickyNote, History, Home, Target, Eye, EyeOff, ImagePlus, Sparkles, ArrowLeftRight, TrendingUp, Key, Wallet, RefreshCw
 } from "lucide-react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
@@ -1093,6 +1093,19 @@ export default function App() {
         : `a refusé le parrainage de ${etiquette}`);
     });
   }
+  // Challenge à destination des partenaires : un objectif, une récompense,
+  // une période. Compté en dossiers SOUSCRITS — c'est le seul critère qui
+  // aligne sa motivation sur celle de Frangola.
+  async function setChallengePartenaires(fields) {
+    await mutateData(base => ({
+      ...base,
+      settings: {
+        ...base.settings,
+        challengePartenaires: { ...(base.settings.challengePartenaires || {}), ...fields },
+      },
+    }));
+  }
+
   async function setChallengeGoals(fields) {
     await mutateData(base => ({
       ...base,
@@ -1653,6 +1666,7 @@ export default function App() {
             <PartnerDashboard
               partner={cible}
               dossiers={data.dossiers.filter(d => d.partnerId === cible.id)}
+              challenge={data.settings?.challengePartenaires || null}
               onLogout={() => setApercuPartnerId(null)}
               onCreateDossier={bloque}
               onDeclarerParrainage={bloque}
@@ -1674,6 +1688,7 @@ export default function App() {
         <PartnerDashboard
           partner={data.partners.find(p => p.id === currentPartner.id) || currentPartner}
           dossiers={data.dossiers.filter(d => d.partnerId === currentPartner.id)}
+          challenge={data.settings?.challengePartenaires || null}
           onLogout={logout}
           onCreateDossier={createDossier}
                     onDeclarerParrainage={declarerParrainage}
@@ -1714,6 +1729,8 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
+          onSetChallengePartenaires={setChallengePartenaires}
+          onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
@@ -1760,6 +1777,8 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
+          onSetChallengePartenaires={setChallengePartenaires}
+          onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
@@ -2636,7 +2655,52 @@ function ParrainageCard({ partner, onDeclarer }) {
     </div>
   );
 }
-function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+// Bannière de challenge dans l'espace du partenaire. Elle n'a d'intérêt que
+// si elle dit combien il en reste et combien de temps : « plus que 2 avant le
+// 30 » agit, « participez à notre challenge » n'agit pas.
+function BanniereChallenge({ challenge, partner, dossiers }) {
+  if (!challenge?.actif || !challenge.debut || !challenge.fin || !challenge.recompense) return null;
+  const debut = new Date(challenge.debut + "T00:00:00").getTime();
+  const fin = new Date(challenge.fin + "T23:59:59").getTime();
+  if (!(fin > debut) || Date.now() > fin || Date.now() < debut) return null;
+
+  const objectif = Math.max(1, Number(challenge.objectif) || 1);
+  const n = (dossiers || []).filter(d => {
+    const t = dateGain(d);
+    return t !== null && t >= debut && t <= fin;
+  }).length;
+  const restants = Math.max(0, objectif - n);
+  const jours = Math.max(0, Math.ceil((fin - Date.now()) / 86400000));
+  const pct = Math.min(100, Math.round((n / objectif) * 100));
+  const gagne = n >= objectif;
+  const dateFin = new Date(fin).toLocaleDateString("fr-FR", { day: "numeric", month: "long" });
+
+  return (
+    <div className={`rounded-2xl p-5 mb-6 ${gagne ? "bg-emerald-50 border border-emerald-300" : "fa-bg-gold"}`}>
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
+        <span className="font-display font-semibold fa-navy">
+          {gagne ? "🏆 Objectif atteint !" : "🎯 " + (challenge.titre || "Challenge en cours")}
+        </span>
+        <span className="text-xs text-teal-900/70">
+          jusqu'au {dateFin} · {jours} jour{jours > 1 ? "s" : ""} restant{jours > 1 ? "s" : ""}
+        </span>
+      </div>
+
+      <div className="text-sm fa-navy mb-2">
+        {gagne
+          ? <>Vous avez souscrit {n} dossier{n > 1 ? "s" : ""} — <strong>{challenge.recompense}</strong> vous revient. Nous vous contactons.</>
+          : <>Plus que <strong>{restants} dossier{restants > 1 ? "s" : ""} souscrit{restants > 1 ? "s" : ""}</strong> pour gagner <strong>{challenge.recompense}</strong>.</>}
+      </div>
+
+      <div className="h-3 bg-white/60 rounded-full overflow-hidden">
+        <div className={`h-full ${gagne ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
+      </div>
+      <div className="text-xs text-teal-900/70 mt-1">{n} / {objectif} dossiers souscrits</div>
+    </div>
+  );
+}
+
+function PartnerDashboard({ partner, dossiers, challenge, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -2795,6 +2859,8 @@ function PartnerDashboard({ partner, dossiers, onLogout, onCreateDossier, onDecl
             🤝 Parrainage
           </button>
         </div>
+
+        <BanniereChallenge challenge={challenge} partner={partner} dossiers={dossiers} />
 
         {(tab === "encours" || tab === "clotures") && (
         <>
@@ -3605,6 +3671,9 @@ const COMMERCIAL_COLORS = new Proxy({}, { get: (_, name) => commercialColor(name
 function commercialLabel(name) {
   if (!name) return name;
   if (_colorDataRef) {
+    if (name === "Sébastien" && _colorDataRef.settings?.admin?.firstName) {
+      return _colorDataRef.settings.admin.firstName;
+    }
     const found = _colorDataRef.mandataires?.find(m => m.name === name);
     if (found?.firstName) return found.firstName;
   }
@@ -4188,6 +4257,95 @@ function VersementsParrainage({ data, onAddVersement }) {
 // date d'effet du contrat, et le nombre d'échéances quand c'est l'assureur qui
 // collecte. Le reste se calcule. On coche ce qui est reçu au fur et à mesure.
 // =============================================================================
+// =============================================================================
+// RÉCURRENCE ASSUREUR — réservé à l'administration
+//
+// Le partenaire n'a pas connaissance de cette rémunération : elle n'est pas
+// rétrocédée et n'apparaît nulle part dans son espace.
+// =============================================================================
+function RecurrenceDossier({ dossier, onUpdate }) {
+  const [ouvert, setOuvert] = useState(false);
+  const mensuelle = recurrenceMensuelle(dossier);
+  const mois = mensualitesEcoulees(dossier);
+  const cumul = recurrenceCumulee(dossier);
+  const court = contratEnCours(dossier);
+  const petitChamp = "text-xs border border-gray-300 rounded-lg px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-teal-500";
+
+  return (
+    <div className="mt-2">
+      <button onClick={() => setOuvert(v => !v)}
+        className="flex items-center gap-1.5 text-xs font-semibold fa-navy hover:fa-teal-text transition">
+        <RefreshCw size={13} />
+        Récurrence assureur
+        {mensuelle > 0 ? (
+          <span className="font-normal text-gray-500">
+            — {fmtEuroPrecis(mensuelle)}/mois
+            {court ? <> · {mois} versée{mois > 1 ? "s" : ""} · {fmtEuroPrecis(cumul)} perçus</> : (dossier.resilieLe ? " · résilié" : " · en attente de date d'effet")}
+          </span>
+        ) : (
+          <span className="font-normal text-amber-700">— à renseigner</span>
+        )}
+        <ChevronDown size={13} className={ouvert ? "rotate-180 transition" : "transition"} />
+      </button>
+
+      {ouvert && (
+        <div className="mt-2 bg-violet-50 border border-violet-200 rounded-lg p-3 space-y-2">
+          <div className="text-[11px] text-violet-800 font-semibold">
+            Non rétrocédé — invisible pour le partenaire.
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="text-xs text-gray-600 flex items-center gap-1.5">
+              Cotisation du client
+              <input type="number" min="0" step="0.01" value={dossier.cotisationMensuelle ?? ""}
+                onChange={e => onUpdate(dossier.id, { cotisationMensuelle: e.target.value === "" ? null : Number(e.target.value) })}
+                placeholder="€ / mois" className={petitChamp} />
+              € / mois
+            </label>
+            <label className="text-xs text-gray-600 flex items-center gap-1.5">
+              Commission
+              <input type="number" min="0" max="100" step="1" value={dossier.tauxCommissionAssureur ?? ""}
+                onChange={e => onUpdate(dossier.id, { tauxCommissionAssureur: e.target.value === "" ? null : Number(e.target.value) })}
+                placeholder="%" className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-16 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              % HT
+            </label>
+          </div>
+
+          {mensuelle > 0 && (
+            <div className="text-xs text-gray-600">
+              Soit <strong className="fa-navy">{fmtEuroPrecis(mensuelle)} par mois</strong>
+              {dossier.dateEffet
+                ? <> à partir du {fmtDate(new Date(dossier.dateEffet + "T12:00:00").getTime())} —
+                    <strong className="fa-navy"> {fmtEuroPrecis(cumul)}</strong> perçus à ce jour sur {mois} mensualité{mois > 1 ? "s" : ""},
+                    et <strong className="fa-navy">{fmtEuroPrecis(mensuelle * 12)}</strong> par an tant que le contrat vit.</>
+                : <span className="text-amber-700"> — renseignez la date d'effet dans l'échéancier pour lancer le compteur.</span>}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-violet-200">
+            {dossier.resilieLe ? (
+              <>
+                <span className="text-xs text-red-700 font-medium">
+                  Contrat résilié le {fmtDate(new Date(dossier.resilieLe + "T12:00:00").getTime())} — la récurrence s'arrête à cette date.
+                </span>
+                <button onClick={() => onUpdate(dossier.id, { resilieLe: null })}
+                  className="text-xs text-gray-400 hover:fa-teal-text">annuler</button>
+              </>
+            ) : (
+              <label className="text-xs text-gray-500 flex items-center gap-1.5">
+                Résilié le
+                <input type="date" value=""
+                  onChange={e => e.target.value && onUpdate(dossier.id, { resilieLe: e.target.value })}
+                  className="text-xs border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                <span className="text-gray-400">(laisser vide tant que le contrat court)</span>
+              </label>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EcheancierDossier({ dossier, onUpdate }) {
   const [ouvert, setOuvert] = useState(false);
   const mode = dossier.modeReglement || "";
@@ -4334,6 +4492,61 @@ function EcheancierDossier({ dossier, onUpdate }) {
 // c'est un outil de pilotage, il doit fonctionner avant même d'avoir des
 // données, sur les chiffres que Sébastien estime justes.
 // =============================================================================
+// =============================================================================
+// REVENU RÉCURRENT
+//
+// Au-delà des honoraires, l'assureur verse chaque mois un pourcentage de la
+// cotisation du client, pour toute la vie du contrat. Cette part n'est pas
+// rétrocédée : elle revient entièrement à Frangola et au mandataire. Elle est
+// donc strictement réservée à l'administration — le partenaire ne la voit pas.
+//
+// Le compteur démarre à la date d'effet et s'arrête à la résiliation.
+// =============================================================================
+const STATUTS_CONTRAT_VIVANT = ["Souscrit", "Bordereau émis", "Payé"];
+
+function recurrenceMensuelle(dossier) {
+  const cotisation = Number(dossier?.cotisationMensuelle) || 0;
+  const taux = Number(dossier?.tauxCommissionAssureur) || 0;
+  if (cotisation <= 0 || taux <= 0) return 0;
+  return (cotisation * taux) / 100;
+}
+
+// Le contrat produit-il encore aujourd'hui ?
+function contratEnCours(dossier) {
+  if (!STATUTS_CONTRAT_VIVANT.includes(dossier?.status)) return false;
+  if (dossier.resilieLe) return false;
+  if (!dossier.dateEffet) return false;
+  return new Date(dossier.dateEffet + "T12:00:00").getTime() <= Date.now();
+}
+
+// Nombre de mensualités déjà versées : une à la date d'effet, puis une par
+// mois, jusqu'à aujourd'hui ou jusqu'à la résiliation.
+function mensualitesEcoulees(dossier) {
+  if (!dossier?.dateEffet) return 0;
+  const debut = new Date(dossier.dateEffet + "T12:00:00");
+  if (isNaN(debut.getTime())) return 0;
+  const borne = dossier.resilieLe ? new Date(dossier.resilieLe + "T12:00:00") : new Date();
+  if (borne < debut) return 0;
+  let n = (borne.getFullYear() - debut.getFullYear()) * 12 + (borne.getMonth() - debut.getMonth());
+  if (borne.getDate() >= debut.getDate()) n += 1;
+  return Math.max(0, n);
+}
+
+function recurrenceCumulee(dossier) {
+  if (!STATUTS_CONTRAT_VIVANT.includes(dossier?.status)) return 0;
+  return recurrenceMensuelle(dossier) * mensualitesEcoulees(dossier);
+}
+
+// Revenu récurrent mensuel du cabinet : la somme des contrats qui courent.
+// C'est le chiffre qui dit ce qui tombe tous les mois sans rien faire.
+function recurrenceMensuelleTotale(dossiers) {
+  return (dossiers || []).filter(contratEnCours).reduce((s, d) => s + recurrenceMensuelle(d), 0);
+}
+
+function recurrenceCumuleeTotale(dossiers) {
+  return (dossiers || []).reduce((s, d) => s + recurrenceCumulee(d), 0);
+}
+
 // Date à laquelle un dossier a été gagné, lue dans l'historique des statuts
 // plutôt que devinée d'après la date de dépôt : un dossier déposé en février
 // et souscrit en mars appartient à mars.
@@ -4356,6 +4569,256 @@ function dateGain(dossier) {
 // La barre est segmentée par commercial : le total et la répartition se lisent
 // dans le même geste.
 // =============================================================================
+// Compte les dossiers souscrits d'un partenaire sur une période. La date
+// retenue est celle de la souscription, pas du dépôt : un dossier déposé le 28
+// et souscrit le 3 compte pour le mois suivant.
+function souscritsSurPeriode(dossiers, partnerId, debut, fin) {
+  return (dossiers || []).filter(d => {
+    if (d.partnerId !== partnerId) return false;
+    const t = dateGain(d);
+    return t !== null && t >= debut && t <= fin;
+  }).length;
+}
+
+function bornesChallenge(ch) {
+  const d = ch?.debut ? new Date(ch.debut + "T00:00:00").getTime() : null;
+  const f = ch?.fin ? new Date(ch.fin + "T23:59:59").getTime() : null;
+  return { debut: d, fin: f, valide: d !== null && f !== null && f > d };
+}
+
+// =============================================================================
+// CHALLENGE PARTENAIRES — pilotage côté Frangola
+// =============================================================================
+// Fiche du gérant. Il est administrateur, mais il est aussi commercial : sa
+// couleur apparaît sur chaque dossier et chaque jauge, il doit pouvoir la
+// changer sans passer par moi.
+function FicheAdmin({ admin, onUpdate }) {
+  const [edition, setEdition] = useState(false);
+  const [b, setB] = useState({});
+
+  function ouvrir() {
+    setB({
+      color: admin?.color || "#2F448B",
+      telephone: admin?.telephone || "",
+      firstName: admin?.firstName || "",
+    });
+    setEdition(true);
+  }
+  function enregistrer() {
+    onUpdate({ color: b.color, telephone: (b.telephone || "").trim(), firstName: (b.firstName || "").trim() });
+    setEdition(false);
+  }
+
+  const champ = "text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500";
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full"
+            style={{ backgroundColor: admin?.color || "#2F448B" }}>
+            {admin?.firstName || "Sébastien"}
+          </span>
+          <div>
+            <div className="font-display font-semibold fa-navy">Ma fiche</div>
+            <div className="text-xs text-gray-400">
+              {admin?.email}
+              {admin?.telephone && <> · {admin.telephone}</>}
+              {" "}· gérant et commercial
+            </div>
+          </div>
+        </div>
+        {!edition && (
+          <button onClick={ouvrir} className="text-sm fa-teal-text hover:underline">Modifier</button>
+        )}
+      </div>
+
+      {edition && (
+        <div className="mt-4 pt-4 border-t border-gray-100 space-y-3">
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="text-xs text-gray-500 flex items-center gap-2">
+              Ma couleur
+              <input type="color" value={b.color} onChange={e => setB(x => ({ ...x, color: e.target.value }))}
+                className="w-10 h-8 rounded cursor-pointer border border-gray-300" />
+              <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: b.color }}>
+                {b.firstName || "Sébastien"}
+              </span>
+            </label>
+            <label className="text-xs text-gray-500 flex items-center gap-2">
+              Prénom affiché
+              <input value={b.firstName} onChange={e => setB(x => ({ ...x, firstName: e.target.value }))}
+                placeholder="Sébastien" className={champ + " w-32"} />
+            </label>
+            <label className="text-xs text-gray-500 flex items-center gap-2">
+              Téléphone
+              <input type="tel" value={b.telephone} onChange={e => setB(x => ({ ...x, telephone: e.target.value }))}
+                placeholder="06 12 34 56 78" className={champ + " w-40"} />
+            </label>
+          </div>
+          <p className="text-xs text-gray-400">
+            Votre adresse de connexion ne se change pas ici : elle est détenue par Supabase, qui garde vos
+            mots de passe. La couleur s'applique partout — dossiers, jauges, classements — y compris
+            rétroactivement.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={enregistrer} className="fa-bg-teal text-sm font-medium px-4 py-1.5 rounded-lg transition">Enregistrer</button>
+            <button onClick={() => setEdition(false)} className="text-sm text-gray-500 hover:text-gray-700 px-3">Annuler</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChallengePartenaires({ data, onSet, canEdit }) {
+  const ch = data.settings?.challengePartenaires || null;
+  const [edition, setEdition] = useState(false);
+  const [b, setB] = useState({});
+
+  const now = new Date();
+  const defautDebut = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  const defautFin = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+
+  function ouvrir() {
+    setB({
+      titre: ch?.titre || `Challenge ${now.toLocaleDateString("fr-FR", { month: "long" })}`,
+      objectif: ch?.objectif ?? 3,
+      recompense: ch?.recompense || "",
+      debut: ch?.debut || defautDebut,
+      fin: ch?.fin || defautFin,
+    });
+    setEdition(true);
+  }
+  function enregistrer() {
+    onSet({
+      titre: (b.titre || "").trim(),
+      objectif: Math.max(1, Number(b.objectif) || 1),
+      recompense: (b.recompense || "").trim(),
+      debut: b.debut, fin: b.fin, actif: true,
+    });
+    setEdition(false);
+  }
+
+  const bornes = bornesChallenge(ch);
+  const actif = ch?.actif && bornes.valide;
+  const enCours = actif && Date.now() >= bornes.debut && Date.now() <= bornes.fin;
+  const joursRestants = actif ? Math.max(0, Math.ceil((bornes.fin - Date.now()) / 86400000)) : 0;
+
+  const classement = actif
+    ? data.partners.filter(p => !p.deleted)
+        .map(p => ({ p, n: souscritsSurPeriode(data.dossiers, p.id, bornes.debut, bornes.fin) }))
+        .filter(x => x.n > 0)
+        .sort((a, b2) => b2.n - a.n)
+    : [];
+  const gagnants = classement.filter(x => x.n >= (ch?.objectif || 0));
+
+  const champ = "text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500";
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div className="font-display font-semibold fa-navy">Challenge partenaires</div>
+        {canEdit && !edition && (
+          <div className="flex items-center gap-3">
+            {actif && (
+              <button onClick={() => onSet({ actif: false })} className="text-xs text-gray-400 hover:text-red-600">
+                Arrêter
+              </button>
+            )}
+            <button onClick={ouvrir} className="text-xs fa-teal-text hover:underline">
+              {ch?.titre ? "Modifier" : "Créer un challenge"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {edition ? (
+        <div className="space-y-2 my-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <input value={b.titre} onChange={e => setB(x => ({ ...x, titre: e.target.value }))}
+              placeholder="Intitulé" className={champ + " flex-1 min-w-[180px]"} />
+            <label className="text-xs text-gray-500 flex items-center gap-1.5">
+              Objectif
+              <input type="number" min="1" value={b.objectif} onChange={e => setB(x => ({ ...x, objectif: e.target.value }))}
+                className={champ + " w-16 text-center"} />
+              dossiers souscrits
+            </label>
+          </div>
+          <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
+            placeholder="Récompense — ex. une paire d'AirPods" className={champ + " w-full"} />
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs text-gray-500 flex items-center gap-1.5">
+              Du <input type="date" value={b.debut} onChange={e => setB(x => ({ ...x, debut: e.target.value }))} className={champ} />
+            </label>
+            <label className="text-xs text-gray-500 flex items-center gap-1.5">
+              au <input type="date" value={b.fin} onChange={e => setB(x => ({ ...x, fin: e.target.value }))} className={champ} />
+            </label>
+            <button onClick={enregistrer} disabled={!b.recompense?.trim() || !b.debut || !b.fin}
+              className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">
+              Lancer
+            </button>
+            <button onClick={() => setEdition(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+          </div>
+          <p className="text-xs text-gray-400">
+            Les dossiers sont comptés à leur <strong>souscription</strong>, pas à leur dépôt. Un dossier déposé
+            le 28 et souscrit le 3 comptera pour la période suivante — annoncez-le à vos partenaires.
+          </p>
+        </div>
+      ) : !actif ? (
+        <p className="text-sm text-gray-500">
+          Aucun challenge en cours. Un objectif et une récompense suffisent à déclencher les premiers dossiers
+          de partenaires qui n'en ont jamais déposé — c'est là que l'argent travaille le mieux.
+        </p>
+      ) : (
+        <>
+          <p className="text-sm text-gray-500 mb-3">
+            <strong className="fa-navy">{ch.titre}</strong> — {ch.objectif} dossier{ch.objectif > 1 ? "s" : ""} souscrit{ch.objectif > 1 ? "s" : ""} pour gagner
+            {" "}<strong className="fa-navy">{ch.recompense}</strong>.
+            {enCours
+              ? <> Il reste {joursRestants} jour{joursRestants > 1 ? "s" : ""}.</>
+              : <> Période terminée ou pas encore commencée.</>}
+          </p>
+
+          {gagnants.length > 0 && (
+            <div className="fa-bg-gold rounded-lg px-3 py-2.5 mb-3">
+              <div className="text-sm fa-navy font-semibold mb-1">
+                🏆 {gagnants.length} partenaire{gagnants.length > 1 ? "s ont" : " a"} atteint l'objectif
+              </div>
+              <div className="text-xs text-teal-900/80">
+                {gagnants.map(x => `${x.p.firstName || ""} ${up(x.p.name)} (${x.n})`).join(" · ")}
+              </div>
+            </div>
+          )}
+
+          {classement.length === 0 ? (
+            <div className="text-sm text-gray-400">Aucun dossier souscrit sur la période pour l'instant.</div>
+          ) : (
+            <div className="space-y-1.5">
+              {classement.map(x => {
+                const pct = Math.min(100, Math.round((x.n / (ch.objectif || 1)) * 100));
+                const atteint = x.n >= ch.objectif;
+                return (
+                  <div key={x.p.id} className="flex items-center gap-3 flex-wrap">
+                    <span className="text-sm fa-navy font-medium w-44 shrink-0 truncate">
+                      {x.p.firstName ? `${x.p.firstName} ${up(x.p.name)}` : up(x.p.name)}
+                    </span>
+                    <div className="flex-1 min-w-[120px] h-3 bg-gray-100 rounded-full overflow-hidden">
+                      <div className={`h-full ${atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
+                    </div>
+                    <span className={`text-xs font-semibold shrink-0 ${atteint ? "text-emerald-700" : "text-gray-500"}`}>
+                      {x.n} / {ch.objectif}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
   const [edition, setEdition] = useState(false);
   const [brouillon, setBrouillon] = useState({});
@@ -4728,25 +5191,41 @@ function ProjectionCA({ data }) {
   // Trajectoire : la production du mois en cours est un PLANCHER. Chaque mois
   // on y ajoute ce qu'apportent les partenaires activés depuis, avec un délai
   // de démarrage — un apporteur recruté en mars ne produit pas en mars.
+  // Récurrence : chaque contrat souscrit ajoute sa commission mensuelle, qui
+  // court ensuite tous les mois. C'est ce qui fait qu'un mois de production
+  // continue de rapporter longtemps après.
+  const mrrActuel = recurrenceMensuelleTotale(data.dossiers);
+  const avecRecurrence = gagnes.filter(d => recurrenceMensuelle(d) > 0);
+  const recMoyenne = avecRecurrence.length > 0
+    ? avecRecurrence.reduce((s2, d) => s2 + recurrenceMensuelle(d), 0) / avecRecurrence.length
+    : 0;
+
   const trajectoire = [];
   if (assezDeDonnees) {
-    let cumul = 0;
+    let cumul = 0, cumulRec = 0, mrr = mrrActuel;
     for (let m = 1; m <= 12; m++) {
       const vaguesActives = Math.max(0, m - delai);
       const nouveauxActifs = vaguesActives * recrutementUtilise * (activationUtilisee / 100);
       const dossiersMois = rythmeMensuel + nouveauxActifs * productivite;
       const caMois = dossiersMois * caParDossier;
+      // Les dossiers gagnés du mois grossissent le revenu récurrent des mois
+      // suivants — l'effet cumulatif est ici, pas dans les honoraires.
+      mrr += dossiersMois * (tauxTransfo || 0) * recMoyenne;
       cumul += caMois;
+      cumulRec += mrr;
       const d = new Date(now.getFullYear(), now.getMonth() + m, 1);
       trajectoire.push({
         mois: d.toLocaleDateString("fr-FR", { month: "short", year: "2-digit" }),
         actifs: Math.round(actifs.length + nouveauxActifs),
         dossiers: dossiersMois,
         ca: caMois,
+        rec: mrr,
         cumul,
+        cumulTotal: cumul + cumulRec,
       });
     }
   }
+  const total12Recurrence = trajectoire.length ? trajectoire[11].cumulTotal - trajectoire[11].cumul : null;
 
   const total12Gele = assezDeDonnees ? caMensuelActuel * 12 : null;
   const total12Scenario = trajectoire.length ? trajectoire[11].cumul : null;
@@ -4805,6 +5284,26 @@ function ProjectionCA({ data }) {
             </div>
           </div>
 
+          {total12Recurrence > 0 && (
+            <div className="grid sm:grid-cols-3 gap-3 mb-4">
+              <div className="bg-white border border-gray-200 rounded-xl p-4">
+                <div className="text-xs text-gray-500 mb-1">Honoraires</div>
+                <div className="font-display text-lg font-bold fa-navy">{fmtEuro(total12Scenario)}</div>
+              </div>
+              <div className="bg-violet-50 border border-violet-200 rounded-xl p-4">
+                <div className="text-xs text-gray-500 mb-1">Récurrence assureur</div>
+                <div className="font-display text-lg font-bold text-violet-700">{fmtEuro(total12Recurrence)}</div>
+                <div className="text-[11px] text-gray-400">
+                  {fmtEuroPrecis(mrrActuel)}/mois aujourd'hui → {fmtEuroPrecis(trajectoire[11].rec)}/mois dans un an
+                </div>
+              </div>
+              <div className="fa-bg-teal rounded-xl p-4">
+                <div className="text-xs text-white/80 mb-1">Total sur 12 mois</div>
+                <div className="font-display text-lg font-bold text-white">{fmtEuro(total12Scenario + total12Recurrence)}</div>
+              </div>
+            </div>
+          )}
+
           <div className="fa-bg-offwhite rounded-lg px-3 py-3 mb-3">
             <div className="text-xs font-semibold fa-navy mb-2">Hypothèses du scénario</div>
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-gray-600">
@@ -4854,8 +5353,9 @@ function ProjectionCA({ data }) {
                     <th className="font-medium py-1">Mois</th>
                     <th className="font-medium py-1 text-right">Partenaires actifs</th>
                     <th className="font-medium py-1 text-right">Dossiers</th>
-                    <th className="font-medium py-1 text-right">C.A. du mois</th>
-                    <th className="font-medium py-1 text-right">Cumul</th>
+                    <th className="font-medium py-1 text-right">Honoraires</th>
+                    <th className="font-medium py-1 text-right">Récurrence</th>
+                    <th className="font-medium py-1 text-right">Cumul total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4865,7 +5365,8 @@ function ProjectionCA({ data }) {
                       <td className="py-1 text-right text-gray-500">{t.actifs}</td>
                       <td className="py-1 text-right text-gray-500">{t.dossiers.toFixed(1)}</td>
                       <td className="py-1 text-right fa-navy font-medium">{fmtEuro(t.ca)}</td>
-                      <td className="py-1 text-right fa-navy font-bold">{fmtEuro(t.cumul)}</td>
+                      <td className="py-1 text-right text-violet-700">{fmtEuro(t.rec)}</td>
+                      <td className="py-1 text-right fa-navy font-bold">{fmtEuro(t.cumulTotal)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -4982,6 +5483,47 @@ function Vision360({ data }) {
           <div className="text-[11px] text-gray-400 mt-0.5">après rétrocessions et primes</div>
         </div>
       </div>
+
+      {(() => {
+        const mrr = recurrenceMensuelleTotale(data.dossiers);
+        const cumul = recurrenceCumuleeTotale(data.dossiers);
+        const contrats = data.dossiers.filter(contratEnCours);
+        const sansRecurrence = gagnes.filter(d => recurrenceMensuelle(d) <= 0).length;
+        if (mrr <= 0 && cumul <= 0 && sansRecurrence === 0) return null;
+        return (
+          <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 mb-4">
+            <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
+              <span className="font-display font-semibold fa-navy">Revenu récurrent</span>
+              <span className="text-xs text-violet-800">
+                commissions versées par l'assureur — non rétrocédées
+              </span>
+            </div>
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">Tous les mois</div>
+                <div className="font-display text-xl font-bold text-violet-700">{fmtEuroPrecis(mrr)}</div>
+                <div className="text-[11px] text-gray-400">sur {contrats.length} contrat{contrats.length > 1 ? "s" : ""} en cours</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">Déjà perçu</div>
+                <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(cumul)}</div>
+                <div className="text-[11px] text-gray-400">depuis la première date d'effet</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">Sur 12 mois</div>
+                <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(mrr * 12)}</div>
+                <div className="text-[11px] text-gray-400">à périmètre constant</div>
+              </div>
+            </div>
+            {sansRecurrence > 0 && (
+              <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
+                {sansRecurrence} dossier{sansRecurrence > 1 ? "s" : ""} gagné{sansRecurrence > 1 ? "s" : ""} sans cotisation ni taux renseignés :
+                leur récurrence n'est comptée nulle part. C'est autant de chiffre d'affaires invisible.
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {sansCalendrier.length > 0 && (
         <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
@@ -5488,7 +6030,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onSetChallengePartenaires, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -6411,7 +6953,10 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                                       </div>
 
                                       {["Souscrit", "Bordereau émis", "Payé"].includes(d.status) && (
-                                        <EcheancierDossier dossier={d} onUpdate={onUpdateDossierClient} />
+                                        <>
+                                          <EcheancierDossier dossier={d} onUpdate={onUpdateDossierClient} />
+                                          <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} />
+                                        </>
                                       )}
 
                                       <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100">
@@ -7904,12 +8449,15 @@ function AdminDashboard({ data, currentAdmin, isFullAdmin, viewerLabel, viewerTe
                 un seul endroit pour une même valeur. */}
             <ProductionDuMois data={data} commerciaux={COMMERCIAUX}
               onSetGoals={onSetChallengeGoals} canEdit={false} />
+            <ChallengePartenaires data={data} onSet={onSetChallengePartenaires} canEdit={isFullAdmin} />
             <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
               onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
           </div>
         )}
         {tab === "mandataires" && isFullAdmin && (
           <div>
+            <FicheAdmin admin={data.settings.admin} onUpdate={onUpdateAdmin} />
+
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Mandataires</h2>
               <button onClick={() => setShowAddMandataireForm(v => !v)}
