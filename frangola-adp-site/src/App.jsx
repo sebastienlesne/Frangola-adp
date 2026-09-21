@@ -320,6 +320,36 @@ function sansZeroDeTete(v) {
 function fmtDate(ts) {
   return new Date(ts).toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" });
 }
+// Dernière connexion d'un partenaire, lisible d'un coup d'œil : date, heure,
+// ancienneté, et une couleur qui dit s'il faut le relancer.
+function derniereConnexion(ts, maintenant = Date.now()) {
+  if (!ts) return { jamais: true, court: "jamais connecté", long: "Jamais connecté", teinte: "text-gray-400", pastille: "bg-gray-300" };
+  const min = Math.max(0, Math.round((maintenant - ts) / 60000));
+  const jours = Math.floor(min / 1440);
+  const relatif = min < 2 ? "à l'instant" : min < 60 ? `il y a ${min} min` : min < 1440 ? `il y a ${Math.floor(min / 60)} h`
+    : jours === 1 ? "hier" : jours < 60 ? `il y a ${jours} j` : `il y a ${Math.floor(jours / 30)} mois`;
+  const heure = new Date(ts).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  const teinte = jours <= 7 ? "text-emerald-700" : jours <= 30 ? "text-amber-700" : "text-red-700";
+  const pastille = jours <= 7 ? "bg-emerald-500" : jours <= 30 ? "bg-amber-500" : "bg-red-500";
+  return { jamais: false, court: relatif, long: `${fmtDate(ts)} à ${heure} · ${relatif}`, teinte, pastille, jours };
+}
+// Date d'entrée du partenaire chez Frangola. Par défaut, le jour de création de
+// sa fiche ; modifiable pour un partenaire qui travaillait déjà avec nous avant
+// l'outil (champ neuf `dateEntree`, la date de création n'est jamais touchée).
+function dateEntreeDe(p) {
+  if (p?.dateEntree) { const t = new Date(p.dateEntree + "T12:00:00").getTime(); if (!isNaN(t)) return t; }
+  return p?.createdAt || null;
+}
+function ancienneteTexte(ts, maintenant = Date.now()) {
+  if (!ts) return "";
+  const jours = Math.max(0, Math.floor((maintenant - ts) / 86400000));
+  if (jours < 1) return "aujourd'hui";
+  if (jours < 31) return `${jours} jour${jours > 1 ? "s" : ""}`;
+  const mois = Math.floor(jours / 30.44);
+  if (mois < 12) return `${mois} mois`;
+  const ans = Math.floor(mois / 12), reste = mois % 12;
+  return `${ans} an${ans > 1 ? "s" : ""}${reste ? ` et ${reste} mois` : ""}`;
+}
 function fmtSize(bytes) {
   if (!bytes) return "";
   return (bytes / 1024 / 1024).toFixed(1) + " Mo";
@@ -1659,11 +1689,28 @@ export default function App() {
     if (p) {
       if (p.active === false) { deconnexion("desactive"); return; }
       setCurrentPartner(p); setView("partnerDash");
-      updatePartner(p.id, { lastLoginAt: Date.now() });
+      updatePartner(p.id, { lastLoginAt: Date.now(), connexions: (p.connexions || 0) + 1 });
       return;
     }
     deconnexion("sansFiche");
   }, [data, authUser, emailConnecte]);
+
+  // Un partenaire qui laisse son espace ouvert plusieurs jours doit quand même
+  // apparaître comme « vu » : à chaque retour sur l'onglet, on rafraîchit sa
+  // dernière connexion, au plus une fois par demi-heure.
+  const partenaireConnecteId = currentPartner?.id || null;
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  useEffect(() => {
+    if (!partenaireConnecteId) return;
+    const surRetour = () => {
+      if (document.visibilityState !== "visible") return;
+      const p = (dataRef.current?.partners || []).find(x => x.id === partenaireConnecteId);
+      if (p && Date.now() - (p.lastLoginAt || 0) > 30 * 60000) updatePartner(p.id, { lastLoginAt: Date.now() });
+    };
+    document.addEventListener("visibilitychange", surRetour);
+    return () => document.removeEventListener("visibilitychange", surRetour);
+  }, [partenaireConnecteId]);
 
   // Numéro de version réellement écrit, mis à jour immédiatement après chaque
   // enregistrement réussi. React met son état à jour de façon différée : s'y
@@ -3245,11 +3292,11 @@ function messageEnHtml(corps) {
       return `<div style="margin:14px 0"><span style="font-family:${POLICE_MAIL};font-size:${TAILLE_MAIL}">Votre code d'activation : </span>`
         + `<span style="font-family:${POLICE_MAIL};font-size:16px;font-weight:bold;letter-spacing:2px;background:#FFE9A8;padding:4px 10px;border-radius:5px">${echapperHtml(m[1])}</span></div>`;
     }
-    const url = l.match(/^(\d\. Rendez-vous sur )(https?:\/\/\S+)$/);
-    if (url) {
-      return `<div>${echapperHtml(url[1])}<a href="${url[2]}" style="color:#008BA8">${echapperHtml(url[2])}</a></div>`;
-    }
-    return `<div>${echapperHtml(l)}</div>`;
+    // Intertitres du message appli : en gras pour qu'on repère son téléphone.
+    if (/^Sur (iPhone|Android)$/.test(l.trim())) return `<div style="font-weight:bold;margin-top:4px">${echapperHtml(l)}</div>`;
+    // Toute adresse web devient un lien cliquable.
+    const html = echapperHtml(l).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" style="color:#008BA8">$1</a>');
+    return `<div>${html}</div>`;
   }).join("");
   return `<div style="font-family:${POLICE_MAIL};font-size:${TAILLE_MAIL};line-height:1.55;color:#2b2b2b">${lignes}</div>`;
 }
@@ -3267,6 +3314,35 @@ async function copierRiche(html, texte) {
     }
   } catch (e) { /* on tente le texte simple */ }
   try { await navigator.clipboard.writeText(texte); return true; } catch (e) { return false; }
+}
+
+// Message pour installer l'espace partenaire sur le téléphone, comme une appli.
+function messageAppliMobile(cible) {
+  const prenom = (cible.firstName || "").trim();
+  return {
+    sujet: "Frangola sur votre téléphone",
+    corps: [
+      prenom ? `Bonjour ${prenom},` : "Bonjour,",
+      "",
+      "Pour avoir votre espace Frangola toujours sous la main, vous pouvez l'installer sur votre téléphone comme une application. Rien à télécharger, cela prend 30 secondes :",
+      "",
+      "Sur iPhone",
+      `1. Ouvrez ${SITE_URL} dans Safari`,
+      "2. Touchez le bouton Partager (le carré avec une flèche vers le haut, en bas de l'écran)",
+      "3. Choisissez « Sur l'écran d'accueil », puis « Ajouter »",
+      "",
+      "Sur Android",
+      `1. Ouvrez ${SITE_URL} dans Chrome`,
+      "2. Touchez les trois points ⋮ en haut à droite",
+      "3. Choisissez « Installer l'application » ou « Ajouter à l'écran d'accueil »",
+      "",
+      "L'icône Frangola apparaît alors sur votre écran d'accueil. Vous y déposez vos dossiers, prenez vos documents en photo directement depuis le téléphone, et suivez leur avancement où que vous soyez.",
+      "",
+      "Votre identifiant reste le même : votre adresse email et votre mot de passe.",
+      "",
+      "À très vite,",
+    ].join("\n"),
+  };
 }
 
 function messageInvitation(cible, expediteur, genre, telephone) {
@@ -3530,6 +3606,18 @@ function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "par
           title="Copie le message d'accueil complet — mise en forme conservée dans Gmail, texte simple dans WhatsApp"
           className="text-xs font-semibold bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200 px-2.5 py-1 rounded-lg transition">
           ✉ Copier le message d'accueil
+        </button>
+      )}
+      {genre === "partenaire" && (
+        <button onClick={async () => {
+            const { corps } = messageAppliMobile(cible);
+            const ok = await copierRiche(messageEnHtml(corps), corps);
+            setPret(ok ? "ok" : "echec");
+            setTimeout(() => setPret(null), 4000);
+          }}
+          title="Copie le message qui explique comment installer l'espace Frangola sur son téléphone (iPhone et Android)"
+          className="text-xs font-semibold bg-violet-50 text-violet-700 hover:bg-violet-100 border border-violet-200 px-2.5 py-1 rounded-lg transition">
+          📱 Copier le message appli
         </button>
       )}
       {pret === "ok" && <span className="text-xs text-emerald-700 font-medium">Message copié</span>}
@@ -8128,7 +8216,8 @@ function realiseProduction(data, commerciaux, debut, fin) {
   };
   const partenaires = parCommercial(ajoute => {
     for (const p of data.partners) {
-      if (p.deleted || p.createdAt < debut || p.createdAt >= fin) continue;
+      const entree = dateEntreeDe(p);
+      if (p.deleted || entree < debut || entree >= fin) continue;
       ajoute(p.commercial, 1);
     }
   });
@@ -9874,6 +9963,339 @@ function SauvegardesPanel() {
   );
 }
 
+// =============================================================================
+// RYTHME DES PARTENAIRES
+//
+// Mesuré depuis la date d'entrée : combien de dossiers, en combien de temps,
+// et dans quel sens ça va. On compte les dossiers DÉPOSÉS — c'est l'activité
+// du partenaire — et on affiche les gagnés à côté.
+// =============================================================================
+const MOIS_MS = 30.44 * 86400000;
+const JOUR_MS = 86400000;
+
+function rythmePartenaire(p, dossiers, maintenant = Date.now()) {
+  const entree = dateEntreeDe(p) || maintenant;
+  const siens = (dossiers || []).filter(d => d.partnerId === p.id).sort((a, b) => a.createdAt - b.createdAt);
+  const n = siens.length;
+  const anciennete = Math.max(0, maintenant - entree);
+  const moisAnc = anciennete / MOIS_MS;
+  const premier = n ? siens[0].createdAt : null;
+  const dernier = n ? siens[n - 1].createdAt : null;
+  const dern90 = siens.filter(d => d.createdAt > maintenant - 90 * JOUR_MS).length;
+  const prec90 = siens.filter(d => d.createdAt <= maintenant - 90 * JOUR_MS && d.createdAt > maintenant - 180 * JOUR_MS).length;
+  let tendance = null;
+  if (anciennete >= 120 * JOUR_MS) {
+    if (prec90 > 0) tendance = (dern90 - prec90) / prec90;
+    else if (dern90 > 0) tendance = Infinity;
+  }
+  const nbMois = Math.min(24, Math.max(1, Math.ceil(moisAnc)));
+  const parMois = Array.from({ length: nbMois }, (_, i) =>
+    siens.filter(d => d.createdAt >= entree + i * MOIS_MS && d.createdAt < entree + (i + 1) * MOIS_MS).length);
+  return {
+    entree, n, anciennete, moisAnc,
+    gagnes: siens.filter(d => dateGain(d) !== null).length,
+    delaiPremier: premier !== null ? Math.max(0, Math.round((premier - entree) / JOUR_MS)) : null,
+    rythme: n / Math.max(1, moisAnc),
+    dern90, prec90, tendance,
+    dernier,
+    intervalle: n > 1 ? Math.round((dernier - premier) / (n - 1) / JOUR_MS) : null,
+    parMois,
+  };
+}
+
+function mediane(liste) {
+  if (!liste.length) return null;
+  const t = [...liste].sort((a, b) => a - b);
+  const m = Math.floor(t.length / 2);
+  return t.length % 2 ? t[m] : (t[m - 1] + t[m]) / 2;
+}
+
+function rythmeReseau(data, commercial = "tous", maintenant = Date.now()) {
+  const partenaires = data.partners.filter(p => !p.deleted && (commercial === "tous" || p.commercial === commercial));
+  const r = partenaires.map(p => ({ p, ...rythmePartenaire(p, data.dossiers, maintenant) }));
+  const mur = r.filter(x => x.anciennete >= 30 * JOUR_MS);           // au moins un mois d'ancienneté
+  const delais = mur.map(x => x.delaiPremier).filter(v => v !== null);
+  const part = (liste, jours) => {
+    const base = liste.filter(x => x.anciennete >= jours * JOUR_MS);
+    if (!base.length) return null;
+    return base.filter(x => x.delaiPremier !== null && x.delaiPremier <= jours).length / base.length;
+  };
+  const actifs = mur.filter(x => x.n > 0);
+  // Dossiers cumulés moyens selon l'ancienneté, mois 1 à 12.
+  const courbe = (liste) => Array.from({ length: 12 }, (_, i) => {
+    const m = i + 1;
+    const base = liste.filter(x => x.anciennete >= m * MOIS_MS);
+    if (base.length < 3) return null;
+    const total = base.reduce((s, x) => s + x.parMois.slice(0, m).reduce((a, b) => a + b, 0), 0);
+    return total / base.length;
+  });
+  const classes = [...mur].sort((a, b) => b.rythme - a.rythme);
+  const quart = classes.slice(0, Math.max(1, Math.ceil(classes.length / 4)));
+  // Moyenne au même âge, mois par mois (non cumulée) : repère de la fiche.
+  const memeAge = Array.from({ length: 24 }, (_, i) => {
+    const base = r.filter(x => x.anciennete >= (i + 1) * MOIS_MS);
+    return base.length >= 3 ? base.reduce((s, x) => s + (x.parMois[i] || 0), 0) / base.length : null;
+  });
+  return {
+    r, mur, classes, nbMur: mur.length,
+    delaiMedian: mediane(delais),
+    delaiMoyen: delais.length ? delais.reduce((a, b) => a + b, 0) / delais.length : null,
+    actifs30: part(mur, 30), actifs90: part(mur, 90),
+    rythmeMoyen: actifs.length ? actifs.reduce((s, x) => s + x.rythme, 0) / actifs.length : null,
+    courbeMoyenne: courbe(mur), courbeQuart: courbe(quart), memeAge,
+  };
+}
+
+const fmtRythme = (v) => `${(Math.round(v * 10) / 10).toLocaleString("fr-FR")} / mois`;
+function libelleTendance(t) {
+  if (t === null) return { texte: "pas assez de recul", ton: "bg-gray-100 text-gray-500" };
+  if (t === Infinity) return { texte: "▲ reprise", ton: "bg-emerald-50 text-emerald-700" };
+  const pct = Math.round(t * 100);
+  if (Math.abs(pct) < 15) return { texte: "= stable", ton: "bg-amber-50 text-amber-800" };
+  return pct > 0 ? { texte: `▲ +${pct} %`, ton: "bg-emerald-50 text-emerald-700" } : { texte: `▼ ${pct} %`, ton: "bg-red-50 text-red-700" };
+}
+
+// Petit graphique en SVG, sans dépendance : barres (le partenaire) et une
+// ligne pointillée (le repère), ou deux lignes pour la vue réseau.
+function GraphiqueRythme({ barres, lignes, etiquettes, hauteur = 150 }) {
+  const W = 880, H = hauteur, g = 36, b = 22, h = 8;
+  const toutes = [...(barres || []), ...(lignes || []).flatMap(l => l.valeurs.filter(v => v !== null))];
+  const brut = Math.max(1, ...toutes) * 1.1;
+  // Graduations rondes : 2, 4, 10, 20… plutôt que 16,9.
+  const max = brut <= 2 ? 2 : brut <= 4 ? 4 : Math.ceil(brut / (brut > 20 ? 10 : 2)) * (brut > 20 ? 10 : 2);
+  const n = etiquettes.length;
+  const pas = (W - g - 10) / n;
+  const y = (v) => H - b - (v / max) * (H - b - h);
+  const graduations = [0, max / 2, max].map(v => Math.round(v * 10) / 10);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" className="block">
+      {graduations.map((v, i) => (
+        <g key={i}>
+          <line x1={g} y1={y(v)} x2={W - 6} y2={y(v)} stroke={i === 0 ? "#E5E7EB" : "#F1F2F4"} />
+          <text x={g - 6} y={y(v) + 3} textAnchor="end" fontSize="10" fill="#9CA3AF">{v.toLocaleString("fr-FR")}</text>
+        </g>
+      ))}
+      {(barres || []).map((v, i) => (
+        <rect key={i} x={g + i * pas + pas * 0.18} y={y(v)} width={pas * 0.64} height={Math.max(0, H - b - y(v))} rx="3" fill="#008BA8">
+          <title>{`${etiquettes[i]} : ${v}`}</title>
+        </rect>
+      ))}
+      {(lignes || []).map((l, k) => {
+        const pts = l.valeurs.map((v, i) => v === null ? null : `${g + i * pas + pas / 2},${y(v)}`).filter(Boolean).join(" ");
+        return <polyline key={k} points={pts} fill="none" stroke={l.couleur} strokeWidth={l.epaisseur || 2} strokeDasharray={l.tirets || ""} />;
+      })}
+      {etiquettes.map((e, i) => (
+        (n <= 12 || i % 2 === 0) && <text key={i} x={g + i * pas + pas / 2} y={H - 6} textAnchor="middle" fontSize="10" fill="#9CA3AF">{e}</text>
+      ))}
+    </svg>
+  );
+}
+
+function RythmePartenaire({ p, data }) {
+  const x = rythmePartenaire(p, data.dossiers);
+  const reseau = rythmeReseau(data);
+  const Case = ({ titre, valeur, detail, compare, bon }) => (
+    <div className="fa-bg-offwhite rounded-xl p-3.5">
+      <div className="text-xs text-gray-400">{titre}</div>
+      <div className="font-display text-lg font-bold fa-navy">{valeur}</div>
+      {detail && <div className="text-[11px] text-gray-400">{detail}</div>}
+      {compare && <div className={`text-[11px] mt-0.5 ${bon ? "text-emerald-700" : "text-red-700"}`}>{bon ? "▲" : "▼"} {compare}</div>}
+    </div>
+  );
+  const t = libelleTendance(x.tendance);
+  return (
+    <div className="mt-4 bg-white border border-gray-200 rounded-2xl p-4">
+      <div className="font-display font-semibold fa-navy">Rythme</div>
+      <div className="text-xs text-gray-500 mb-3">Partenaire depuis le {fmtDate(x.entree)} · {ancienneteTexte(x.entree)} · {masqueNb(x.n)} dossier{x.n > 1 ? "s" : ""} déposé{x.n > 1 ? "s" : ""}, dont {masqueNb(x.gagnes)} gagné{x.gagnes > 1 ? "s" : ""}</div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-3">
+        <Case titre="Premier dossier" valeur={x.delaiPremier === null ? "pas encore" : `${x.delaiPremier} jour${x.delaiPremier > 1 ? "s" : ""}`}
+          detail={x.delaiPremier === null ? `entré il y a ${ancienneteTexte(x.entree)}` : "après son entrée"}
+          compare={x.delaiPremier !== null && reseau.delaiMedian !== null ? `médiane du réseau : ${Math.round(reseau.delaiMedian)} j` : null}
+          bon={x.delaiPremier !== null && reseau.delaiMedian !== null && x.delaiPremier <= reseau.delaiMedian} />
+        <Case titre="Rythme moyen" valeur={fmtRythme(x.rythme)} detail={`${x.n} en ${Math.max(1, Math.round(x.moisAnc))} mois`}
+          compare={reseau.rythmeMoyen !== null && x.n > 0 ? `moyenne du réseau : ${fmtRythme(reseau.rythmeMoyen)}` : null}
+          bon={reseau.rythmeMoyen !== null && x.rythme >= reseau.rythmeMoyen} />
+        <div className="fa-bg-offwhite rounded-xl p-3.5">
+          <div className="text-xs text-gray-400">Tendance 90 jours</div>
+          <div className="mt-1"><span className={`text-sm font-bold px-2 py-0.5 rounded-full ${t.ton}`}>{t.texte}</span></div>
+          <div className="text-[11px] text-gray-400 mt-1">{x.dern90} dossier{x.dern90 > 1 ? "s" : ""} contre {x.prec90} les 90 j d'avant</div>
+        </div>
+        <Case titre="Dernier dossier" valeur={x.dernier ? derniereConnexion(x.dernier).court : "—"}
+          detail={x.intervalle !== null ? `un dossier tous les ${x.intervalle} j en moyenne` : null} />
+      </div>
+      {x.n > 0 && (
+        <>
+          <GraphiqueRythme barres={x.parMois}
+            lignes={[{ valeurs: reseau.memeAge.slice(0, x.parMois.length), couleur: "#B45309", tirets: "5 4" }]}
+            etiquettes={x.parMois.map((_, i) => `M${i + 1}`)} />
+          <div className="flex flex-wrap gap-4 text-[11px] text-gray-500 mt-1">
+            <span><span className="inline-block w-3 h-[3px] align-middle mr-1.5" style={{ background: "#008BA8" }} />ses dossiers, par mois d'ancienneté</span>
+            <span><span className="inline-block w-3 h-[3px] align-middle mr-1.5" style={{ background: "#B45309" }} />moyenne des partenaires au même âge</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RythmeReseau({ data, commerciaux }) {
+  const [commercial, setCommercial] = useState("tous");
+  const [tout, setTout] = useState(false);
+  const R = rythmeReseau(data, commercial);
+  const pct = (v) => v === null ? "—" : `${Math.round(v * 100)} %`;
+  const LIMITE = 10;
+  const liste = tout ? R.classes : R.classes.slice(0, LIMITE);
+  const Case = ({ titre, valeur, detail }) => (
+    <div className="fa-bg-offwhite rounded-xl p-3.5">
+      <div className="text-xs text-gray-400">{titre}</div>
+      <div className="font-display text-xl font-bold fa-navy">{valeur}</div>
+      {detail && <div className="text-[11px] text-gray-400">{detail}</div>}
+    </div>
+  );
+  const moisTxt = (ts) => new Date(ts).toLocaleDateString("fr-FR", { month: "short", year: "numeric" });
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
+        <div>
+          <div className="font-display font-semibold fa-navy">Démarrage et rythme du réseau</div>
+          <p className="text-sm text-gray-500">Calculé depuis la date d'entrée de chaque partenaire · {masqueNb(R.nbMur)} partenaire{R.nbMur > 1 ? "s" : ""} ont au moins 1 mois d'ancienneté.</p>
+        </div>
+        <select value={commercial} onChange={e => setCommercial(e.target.value)}
+          className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500">
+          <option value="tous">Tous les commerciaux</option>
+          {(commerciaux || []).map(c => <option key={c} value={c}>{commercialLabel(c)}</option>)}
+        </select>
+      </div>
+      {R.nbMur === 0 ? (
+        <div className="text-sm text-gray-400 py-6">Pas encore assez de recul : il faut des partenaires entrés depuis au moins un mois.</div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 my-3">
+            <Case titre="Délai avant le 1er dossier" valeur={R.delaiMedian === null ? "—" : `${Math.round(R.delaiMedian)} jours`}
+              detail={R.delaiMoyen === null ? null : `médiane · moyenne ${Math.round(R.delaiMoyen)} j`} />
+            <Case titre="Actifs à 30 jours" valeur={pct(R.actifs30)} detail="ont déposé dans leur 1er mois" />
+            <Case titre="Actifs à 90 jours" valeur={pct(R.actifs90)} detail={R.actifs90 === null ? null : `${Math.round((1 - R.actifs90) * 100)} % n'ont rien déposé en 3 mois`} />
+            <Case titre="Rythme moyen" valeur={R.rythmeMoyen === null ? "—" : fmtRythme(R.rythmeMoyen)} detail="par partenaire actif" />
+          </div>
+          {R.courbeMoyenne.some(v => v !== null) && (
+            <>
+              <GraphiqueRythme hauteur={180}
+                lignes={[
+                  { valeurs: R.courbeMoyenne, couleur: "#008BA8", epaisseur: 2.5 },
+                  { valeurs: R.courbeQuart, couleur: "#059669", tirets: "5 4" },
+                ]}
+                etiquettes={Array.from({ length: 12 }, (_, i) => `${i + 1} mois`)} />
+              <div className="flex flex-wrap gap-4 text-[11px] text-gray-500 mt-1">
+                <span><span className="inline-block w-3 h-[3px] align-middle mr-1.5" style={{ background: "#008BA8" }} />dossiers cumulés en moyenne, selon l'ancienneté</span>
+                <span><span className="inline-block w-3 h-[3px] align-middle mr-1.5" style={{ background: "#059669" }} />le quart des meilleurs partenaires</span>
+              </div>
+              {(() => {
+                const a4 = R.courbeMoyenne[3], a12 = R.courbeMoyenne[11];
+                if (a4 === null) return null;
+                const f = (v) => (Math.round(v * 10) / 10).toLocaleString("fr-FR");
+                return <p className="text-xs text-gray-500 mt-2">Lecture : en moyenne, un partenaire a déposé {f(a4)} dossier{a4 >= 2 ? "s" : ""} après 4 mois{a12 !== null ? `, et ${f(a12)} après un an` : ""}.</p>;
+              })()}
+            </>
+          )}
+
+          <div className="mt-5">
+            <div className="text-sm font-semibold fa-navy mb-1">Classement par rythme</div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-400">
+                    <th className="font-medium py-1.5 text-left">Partenaire</th>
+                    <th className="font-medium py-1.5 text-right">Entrée</th>
+                    <th className="font-medium py-1.5 text-right">1er dossier</th>
+                    <th className="font-medium py-1.5 text-right">Déposés</th>
+                    <th className="font-medium py-1.5 text-right">Gagnés</th>
+                    <th className="font-medium py-1.5 text-right">Rythme</th>
+                    <th className="font-medium py-1.5 text-right">Tendance 90 j</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {liste.map(x => {
+                    const t = x.n === 0 ? { texte: "rien déposé", ton: "bg-red-50 text-red-700" } : libelleTendance(x.tendance);
+                    return (
+                      <tr key={x.p.id} className="border-t border-gray-100">
+                        <td className="py-1.5 font-semibold"><LienPartenaire p={x.p} className="fa-navy" /></td>
+                        <td className="py-1.5 text-right text-gray-500">{moisTxt(x.entree)}</td>
+                        <td className="py-1.5 text-right">{x.delaiPremier === null ? "—" : `${x.delaiPremier} j`}</td>
+                        <td className="py-1.5 text-right">{masqueNb(x.n)}</td>
+                        <td className="py-1.5 text-right">{masqueNb(x.gagnes)}</td>
+                        <td className="py-1.5 text-right font-semibold fa-navy">{fmtRythme(x.rythme)}</td>
+                        <td className="py-1.5 text-right"><span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${t.ton}`}>{t.texte}</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {R.classes.length > LIMITE && (
+              <button onClick={() => setTout(v => !v)} className="text-xs fa-teal-text hover:underline mt-2">
+                {tout ? "Réduire" : `Voir les ${R.classes.length - LIMITE} autres →`}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Qui, parmi les partenaires, utilise vraiment son espace : les plus récents
+// en tête, puis ceux qui ne se sont jamais connectés — ceux-là sont à relancer.
+function ConnexionsPartenaires({ partners }) {
+  const [tout, setTout] = useState(false);
+  const vivants = (partners || []).filter(p => !p.deleted && p.email);
+  if (vivants.length === 0) return null;
+  const connectes = vivants.filter(p => p.lastLoginAt).sort((a, b) => b.lastLoginAt - a.lastLoginAt);
+  const jamais = vivants.filter(p => !p.lastLoginAt);
+  const semaine = connectes.filter(p => Date.now() - p.lastLoginAt <= 7 * 86400000).length;
+  const LIMITE = 8;
+  const visibles = tout ? connectes : connectes.slice(0, LIMITE);
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-100">
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
+        <div className="text-sm font-semibold fa-navy">Partenaires</div>
+        <div className="text-xs text-gray-400">
+          {masqueNb(semaine)} connecté{semaine > 1 ? "s" : ""} cette semaine · {masqueNb(jamais.length)} jamais connecté{jamais.length > 1 ? "s" : ""}
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        {visibles.map(p => {
+          const c = derniereConnexion(p.lastLoginAt);
+          return (
+            <div key={p.id} className="flex items-center justify-between gap-2 text-sm">
+              <span className="flex items-center gap-2 min-w-0">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${c.pastille}`} />
+                <LienPartenaire p={p} className="fa-navy truncate" />
+              </span>
+              <span className={`text-xs shrink-0 ${c.teinte}`} title={c.long}>
+                {fmtDate(p.lastLoginAt)} à {new Date(p.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })} · {c.court}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {connectes.length > LIMITE && (
+        <button onClick={() => setTout(v => !v)} className="text-xs fa-teal-text hover:underline mt-2">
+          {tout ? "Réduire" : `Voir les ${connectes.length - LIMITE} autres →`}
+        </button>
+      )}
+      {jamais.length > 0 && (
+        <div className="mt-3 text-xs text-gray-500">
+          <span className="font-semibold text-gray-600">Jamais connectés :</span>{" "}
+          {jamais.slice(0, 12).map((p, i) => (
+            <span key={p.id}>{i > 0 && ", "}<LienPartenaire p={p} /></span>
+          ))}
+          {jamais.length > 12 && ` et ${jamais.length - 12} autres`}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
@@ -10074,6 +10496,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
       departement: p.departement || "",
       flatFee: p.flatFee != null ? String(p.flatFee) : "",
       parrainId: p.parrainId || "",
+      dateEntree: p.dateEntree || (p.createdAt ? isoDe(p.createdAt) : ""),
     });
   }
   useEffect(() => {
@@ -10758,7 +11181,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                       {p.deleted && !p._inconnu && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">supprimé{p.deletedAt ? ` le ${fmtDate(p.deletedAt)}` : ""}</span>}
                                       {!p.deleted && p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                                     </div>
-                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
+                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}
+                                      {!p.deleted && (() => { const c = derniereConnexion(p.lastLoginAt); return <span className={c.teinte} title={c.long}>· {c.jamais ? "jamais connecté" : `vu ${c.court}`}</span>; })()}</div>
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2.5">
@@ -11599,6 +12023,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             </option>
                           ))}
                         </select>
+                        <label className="flex items-center gap-2 text-sm text-gray-600 border border-gray-300 rounded-lg px-3 py-1.5 bg-white"
+                          title="Pour un partenaire qui travaillait déjà avec Frangola avant l'outil">
+                          Partenaire depuis le
+                          <input type="date" value={editForm.dateEntree || ""} onChange={e => setEditForm(f => ({ ...f, dateEntree: e.target.value }))}
+                            className="text-sm focus:outline-none" />
+                        </label>
                       </div>
                       <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
                         <input type="checkbox" checked={editForm.flatFee !== ""}
@@ -11653,7 +12083,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           )}
                         </div>
                         <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">
-                          {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · depuis le {fmtDate(p.createdAt)}
+                          {p.company || "—"} {p.ville && `· ${p.ville}`} {p.departement && `(dép. ${p.departement})`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · partenaire depuis le {fmtDate(dateEntreeDe(p))} <span className="text-gray-300">({ancienneteTexte(dateEntreeDe(p))})</span>
                           {filleulsOuverts.has(p.id) && filleulsDe(p.id).length > 0 && (() => {
                             const bilan = bilanParrainage(p.id);
                             return (
@@ -11714,7 +12144,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           {p.active === false ? "Réactiver" : "Désactiver"}
                         </button>
                         <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
-                          {p.email || "email manquant"} · {p.lastLoginAt ? `dernière connexion ${fmtDate(p.lastLoginAt)}` : "jamais connecté"}
+                          {p.email || "email manquant"} · {(() => {
+                            const c = derniereConnexion(p.lastLoginAt);
+                            return <span className={c.teinte} title={c.jamais ? "" : c.long}>{c.jamais ? "jamais connecté" : `dernière connexion ${fmtDate(p.lastLoginAt)} à ${new Date(p.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })} (${c.court})`}</span>;
+                          })()}
                         </span>
                         <BlocAcces cible={p} expediteur={viewerLabel} telephone={viewerTelephone} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
                         {data.settings?.contratType && (
@@ -11806,7 +12239,14 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Taux de transformation</div><div className="font-display text-xl font-bold fa-teal-text">{transformRateP}%</div></div>
                             <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Dossiers KO</div><div className="font-display text-xl font-bold text-red-500">{ko.length}</div></div>
                             <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">CA généré (payé)</div><div className="font-display text-xl font-bold fa-navy">{fmtEuro(totalCaP)}</div></div>
-                            <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Dernière connexion</div><div className="font-display text-sm font-bold fa-navy">{p.lastLoginAt ? fmtDate(p.lastLoginAt) : "Jamais connecté"}</div></div>
+                            <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Partenaire depuis le</div><div className="font-display text-sm font-bold fa-navy">{fmtDate(dateEntreeDe(p))}</div><div className="text-[11px] text-gray-400">{ancienneteTexte(dateEntreeDe(p))}</div></div>
+                            <div className="fa-bg-offwhite rounded-xl p-4"><div className="text-xs text-gray-400">Dernière connexion</div>{(() => {
+                              const c = derniereConnexion(p.lastLoginAt);
+                              return (<>
+                                <div className={`font-display text-sm font-bold ${c.jamais ? "fa-navy" : c.teinte}`}>{c.jamais ? "Jamais connecté" : `${fmtDate(p.lastLoginAt)} à ${new Date(p.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`}</div>
+                                {!c.jamais && <div className="text-[11px] text-gray-400">{c.court}{p.connexions ? ` · ${p.connexions} connexion${p.connexions > 1 ? "s" : ""}` : ""}</div>}
+                              </>);
+                            })()}</div>
                             {(() => {
                               // La valeur réelle d'un partenaire, ce n'est pas
                               // seulement l'honoraire : c'est la récurrence qu'il
@@ -11826,6 +12266,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             <div className="fa-bg-gold rounded-xl p-4"><div className="text-xs text-teal-900/70">Rétrocession perçue par ce partenaire</div><div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(totalCommP)}</div></div>
                           </div>
                         )}
+                        {viewingPartnerTab === "analytique" && <RythmePartenaire p={p} data={data} />}
 
                         {viewingPartnerTab === "dossiers" && (
                           <div className="space-y-2">
@@ -12228,6 +12669,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     </div>
                   ))}
                 </div>
+                <ConnexionsPartenaires partners={data.partners} />
               </div>
 
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
@@ -12698,6 +13140,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   </ResponsiveContainer>
                 </div>
               </div>
+              <RythmeReseau data={data} commerciaux={COMMERCIAUX} />
               </>)}
             </div>
           );
