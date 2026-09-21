@@ -1164,14 +1164,28 @@ const BRAND_STYLES = `
 .fa-bg-gold:hover{ background:var(--fa-gold-dark) !important; }
 .fa-bg-pink{ background:var(--fa-pink) !important; }
 
-/* Confort mobile : évite le zoom automatique d'iPhone sur les champs de saisie */
+/* Confort mobile : évite le zoom automatique d'iPhone sur les champs de saisie.
+   iOS zoome sur tout champ dont le texte fait moins de 16 px, et la page reste
+   zoomée ensuite. La règle doit l'emporter sur les classes de taille posées sur
+   chaque champ (text-sm, text-xs), d'où le !important — sans lui, elle était
+   silencieusement ignorée. */
 input, select, textarea{ font-size:16px; }
 @media (min-width: 640px){
   input, select, textarea{ font-size:14px; }
 }
+@media (max-width: 639px){
+  input:not([type=checkbox]):not([type=radio]), select, textarea{ font-size:16px !important; }
+}
 
 /* Confort mobile : cibles tactiles plus généreuses pour les petits boutons texte */
 .fa-tap{ padding-top:8px; padding-bottom:8px; min-height:36px; display:inline-flex; align-items:center; }
+@media (max-width: 639px){
+  .fa-tap{ min-height:44px; }
+  /* Boutons réduits à une icône (croix, corbeille, déconnexion) : 44 px, la
+     taille minimale recommandée pour un doigt. À 18 px on supprime une pièce
+     en voulant la consulter. */
+  button:has(> svg:only-child){ min-width:44px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; }
+}
 `;
 
 function SunburstLogo({ size = 34 }) {
@@ -1273,15 +1287,17 @@ function Stepper({ status }) {
         {koSteps.map((s, i) => {
           const isLast = i === koSteps.length - 1;
           return (
-            <div key={s} className="flex items-center flex-1 last:flex-none">
-              <div className="flex flex-col items-center gap-1 min-w-[64px]">
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2
+            <div key={s} className="flex items-center flex-1 last:flex-none min-w-0">
+              <div className="flex flex-col items-center gap-1 min-w-0 sm:min-w-[64px]">
+                <div className={`w-6 h-6 sm:w-7 sm:h-7 shrink-0 rounded-full flex items-center justify-center text-xs font-bold border-2
                   ${isLast ? "bg-red-600 border-red-600 text-white" : "bg-teal-700 border-teal-700 text-white"}`}>
                   {isLast ? <X size={14} /> : <Check size={14} />}
                 </div>
-                <span className={`text-[10px] text-center leading-tight ${isLast ? "text-red-700 font-semibold" : "fa-teal-text font-medium"}`}>{s}</span>
+                {/* L'en-tête dit déjà « Clôturé sans suite » : sur téléphone,
+                    les libellés d'étape n'apporteraient que de l'encombrement. */}
+                <span className={`hidden sm:block text-[10px] text-center leading-tight ${isLast ? "text-red-700 font-semibold" : "fa-teal-text font-medium"}`}>{s}</span>
               </div>
-              {!isLast && <div className="h-0.5 flex-1 mx-1 bg-teal-700" />}
+              {!isLast && <div className="h-0.5 flex-1 mx-0.5 sm:mx-1 min-w-[6px] bg-teal-700" />}
             </div>
           );
         })}
@@ -1300,21 +1316,28 @@ function Stepper({ status }) {
       <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden mb-3">
         <div className="h-full fa-bg-teal transition-all" style={{ width: `${progress}%` }} />
       </div>
+      {/* Sur téléphone, six libellés côte à côte ne tiennent pas : 64 px par
+          étape font 384 px, l'écran en offre 350 une fois les marges ôtées.
+          On garde les pastilles et on n'écrit que l'étape en cours. */}
       <div className="flex items-center w-full">
       {STATUS_STEPS.map((s, i) => (
-        <div key={s} className="flex items-center flex-1 last:flex-none">
-          <div className="flex flex-col items-center gap-1 min-w-[64px]">
-            <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2
+        <div key={s} className="flex items-center flex-1 last:flex-none min-w-0">
+          <div className="flex flex-col items-center gap-1 min-w-0 sm:min-w-[64px]">
+            <div className={`w-6 h-6 sm:w-7 sm:h-7 shrink-0 rounded-full flex items-center justify-center text-[11px] sm:text-xs font-bold border-2
+              ${i === idx ? "ring-2 ring-teal-200 sm:ring-0" : ""}
               ${i <= idx ? "bg-teal-700 border-teal-700 text-white" : "bg-white border-gray-300 text-gray-400"}`}>
               {i < idx ? <Check size={14} /> : i + 1}
             </div>
-            <span className={`text-[10px] text-center leading-tight ${i <= idx ? "fa-teal-text font-medium" : "text-gray-400"}`}>{s}</span>
+            <span className={`hidden sm:block text-[10px] text-center leading-tight ${i <= idx ? "fa-teal-text font-medium" : "text-gray-400"}`}>{s}</span>
           </div>
           {i < STATUS_STEPS.length - 1 && (
-            <div className={`h-0.5 flex-1 mx-1 ${i < idx ? "bg-teal-700" : "bg-gray-200"}`} />
+            <div className={`h-0.5 flex-1 mx-0.5 sm:mx-1 min-w-[6px] ${i < idx ? "bg-teal-700" : "bg-gray-200"}`} />
           )}
         </div>
       ))}
+      </div>
+      <div className="sm:hidden text-xs text-center mt-2 fa-teal-text font-medium">
+        Étape {Math.min(idx, STATUS_STEPS.length - 1) + 1} sur {STATUS_STEPS.length} · {STATUS_STEPS[Math.max(0, Math.min(idx, STATUS_STEPS.length - 1))]}
       </div>
     </div>
   );
@@ -1328,15 +1351,25 @@ function FileDrop({ label, file, onChange, required }) {
       </label>
       <div className={`w-full flex items-center gap-2 border-2 border-dashed rounded-xl px-4 py-3 text-sm transition
           ${file ? "border-teal-400 bg-teal-50 fa-teal-text" : "border-gray-300 hover:border-teal-400 text-gray-500"}`}>
-        <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+        <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer min-h-[28px] sm:min-h-0">
           {file ? <FileCheck2 size={18} className="text-teal-600 shrink-0" /> : <Upload size={18} className="shrink-0" />}
           <span className="truncate">{file ? file.name : "Choisir un fichier PDF"}</span>
           <input type="file" accept="application/pdf,image/*" className="hidden"
             onChange={(e) => onChange(e.target.files?.[0] || null)} />
         </label>
+        {/* Raccourci appareil photo, sur téléphone seulement : l'offre de prêt
+            est souvent sur papier à la sortie du rendez-vous. */}
+        {!file && (
+          <label className="sm:hidden shrink-0 cursor-pointer fa-bg-teal text-white rounded-lg w-11 h-11 flex items-center justify-center text-lg" title="Photographier le document">
+            📷
+            <input type="file" accept="image/*" capture="environment" className="hidden"
+              onChange={(e) => onChange(e.target.files?.[0] || null)} />
+          </label>
+        )}
         {file && (
-          <button type="button" onClick={() => onChange(null)} className="fa-tap text-teal-600 hover:text-red-600 shrink-0" title="Retirer le fichier">
-            <X size={16} />
+          <button type="button" onClick={() => onChange(null)}
+            className="fa-tap text-teal-600 hover:text-red-600 shrink-0 w-11 h-11 sm:w-auto sm:h-auto flex items-center justify-center" title="Retirer le fichier">
+            <X size={16} className="w-[18px] h-[18px] sm:w-4 sm:h-4" />
           </button>
         )}
       </div>
@@ -3649,8 +3682,10 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-6 py-8">
-        <div className="flex gap-2 mb-6 overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
+      {/* Marge basse sur téléphone : la barre d'onglets fixe ne doit jamais
+          recouvrir le dernier élément de la page. */}
+      <main className="max-w-4xl mx-auto px-4 sm:px-6 pt-6 sm:py-8 pb-28 sm:pb-8">
+        <div className="hidden sm:flex gap-2 mb-6 flex-wrap pb-1 -mx-1 px-1">
           <button onClick={() => setTab("encours")}
             className={`flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-full transition whitespace-nowrap shrink-0 ${tab === "encours" ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
             Dossiers en cours
@@ -3690,16 +3725,67 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
           </button>
         </div>
 
+        {(() => {
+          // Barre d'onglets du téléphone, fixée en bas comme dans une
+          // application : le pouce l'atteint sans effort, et les cinq entrées
+          // restent visibles en permanence. « En cours » et « Clôturés » y
+          // partagent une seule entrée — six icônes rendraient les libellés
+          // illisibles.
+          const ouverts = dossiers.filter(d => !["Souscrit", "Bordereau émis", "Payé", "KO"].includes(d.status));
+          const messageNonLu = dossiers.some(d => d.partnerMessage && !d.partnerMessageRead);
+          const aCorriger = (partner.factures || []).some(f => f.statut === "À corriger");
+          const entrees = [
+            { ids: ["encours", "clotures"], vers: "encours", label: "Dossiers", Icone: FileText, badge: ouverts.length, point: messageNonLu },
+            { ids: ["analytique"], vers: "analytique", label: "Production", Icone: BarChart3 },
+            { ids: ["facturation"], vers: "facturation", label: "Factures", Icone: Wallet, point: aCorriger },
+            { ids: ["contrat"], vers: "contrat", label: "Contrat", Icone: FileCheck2 },
+            { ids: ["parrainage"], vers: "parrainage", label: "Parrainage", Icone: Users },
+          ];
+          return (
+            <nav className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-gray-200 pb-[env(safe-area-inset-bottom)]">
+              <div className="grid grid-cols-5">
+                {entrees.map(e => {
+                  const ici = e.ids.includes(tab);
+                  return (
+                    <button key={e.vers} onClick={() => setTab(ici ? tab : e.vers)}
+                      className={`relative flex flex-col items-center justify-center gap-0.5 py-2 min-h-[56px] transition ${ici ? "fa-teal-text" : "text-gray-400"}`}>
+                      <span className="relative">
+                        <e.Icone size={21} strokeWidth={ici ? 2.4 : 1.8} />
+                        {e.badge > 0 && (
+                          <span className="absolute -top-1.5 -right-2.5 fa-bg-gold fa-navy text-[10px] font-bold rounded-full min-w-[17px] h-[17px] px-1 flex items-center justify-center">{e.badge}</span>
+                        )}
+                        {e.point && !e.badge && <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-red-500" />}
+                      </span>
+                      <span className={`text-[11px] ${ici ? "font-bold" : "font-medium"}`}>{e.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </nav>
+          );
+        })()}
+
         <BannieresChallenges challenges={challenges} partner={partner} dossiers={dossiers} />
 
         {(tab === "encours" || tab === "clotures") && (
         <>
-        <div className="flex items-center justify-between mb-6">
-          <h1 className="font-display text-xl font-semibold fa-navy">{tab === "encours" ? "Dossiers en cours" : "Dossiers clôturés"}</h1>
+        {/* Sur téléphone, le choix en cours / clôturés remplace le titre. */}
+        <div className="sm:hidden grid grid-cols-2 gap-1 p-1 bg-gray-100 rounded-xl mb-4">
+          {[["encours", "En cours", dossiers.filter(d => !["Souscrit", "Bordereau émis", "Payé", "KO"].includes(d.status)).length],
+            ["clotures", "Clôturés", dossiers.filter(d => ["Souscrit", "Bordereau émis", "Payé", "KO"].includes(d.status)).length]].map(([v, label, n]) => (
+            <button key={v} onClick={() => setTab(v)}
+              className={`text-sm font-semibold py-2.5 rounded-lg transition ${tab === v ? "bg-white fa-navy shadow-sm" : "text-gray-500"}`}>
+              {label} <span className="text-gray-400 font-normal">· {n}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 mb-6">
+          <h1 className="hidden sm:block font-display text-xl font-semibold fa-navy">{tab === "encours" ? "Dossiers en cours" : "Dossiers clôturés"}</h1>
           {tab === "encours" && (
             <button onClick={() => setShowForm(v => !v)}
-              className="flex items-center gap-1.5 fa-bg-gold fa-navy font-medium text-sm px-4 py-2 rounded-full transition">
-              <Plus size={16} /> Nouveau dossier
+              className="w-full sm:w-auto flex items-center justify-center gap-2 sm:gap-1.5 fa-bg-gold fa-navy font-semibold sm:font-medium text-base sm:text-sm px-4 py-3.5 sm:py-2 rounded-2xl sm:rounded-full transition">
+              <Plus size={16} className="w-[18px] h-[18px] sm:w-4 sm:h-4" /> Nouveau dossier
             </button>
           )}
         </div>
@@ -3720,7 +3806,7 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
             <div className="flex flex-wrap gap-2 mb-5">
               {puces.map(([val, lib]) => (
                 <button key={val} onClick={() => setFiltrePaiement(val)}
-                  className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition ${
+                  className={`flex items-center gap-1.5 text-sm sm:text-xs font-medium px-3.5 sm:px-3 py-2.5 sm:py-1.5 rounded-full transition ${
                     filtrePaiement === val ? "fa-bg-teal text-white" : "bg-white border border-gray-200 text-gray-600"}`}>
                   {lib}
                   <span className={`text-[10px] font-bold rounded-full px-1.5 ${filtrePaiement === val ? "bg-white/25" : "bg-gray-100 text-gray-500"}`}>
@@ -3952,8 +4038,15 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
                           placeholder="Nom de la pièce (ex. Avenant, Quittance…)"
                           className="border border-gray-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
                       )}
-                      <label className="text-sm border border-gray-300 rounded-lg px-3 py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center gap-2">
-                        {extraDocFile ? extraDocFile.name : "Choisir un fichier"}
+                      {/* Sur téléphone, deux portes d'entrée : l'appareil photo en
+                          un geste pour le document papier du rendez-vous, et le
+                          sélecteur de fichiers pour le PDF reçu par mail. */}
+                      <label className="sm:hidden w-full text-sm font-semibold fa-bg-teal text-white rounded-xl px-3 py-3 cursor-pointer flex items-center justify-center gap-2">
+                        📷 Photographier le document
+                        <input type="file" accept="image/*" capture="environment" className="hidden" onChange={e => setExtraDocFile(e.target.files?.[0] || null)} />
+                      </label>
+                      <label className="w-full sm:w-auto text-sm border border-gray-300 rounded-xl sm:rounded-lg px-3 py-3 sm:py-2 cursor-pointer bg-white hover:border-teal-400 transition flex items-center justify-center sm:justify-start gap-2 min-w-0">
+                        <span className="truncate">{extraDocFile ? extraDocFile.name : "Choisir un fichier"}</span>
                         <input type="file" accept="application/pdf,image/*" className="hidden" onChange={e => setExtraDocFile(e.target.files?.[0] || null)} />
                       </label>
                       {extraDocFile && (
@@ -3973,8 +4066,8 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
                   </div>
                 ) : (
                   <button onClick={() => setExtraDocOpenId(d.id)}
-                    className="mt-3 flex items-center gap-1.5 text-xs fa-teal-text hover:underline">
-                    <Upload size={13} /> Déposer un document
+                    className="mt-3 w-full sm:w-auto flex items-center justify-center sm:justify-start gap-1.5 text-sm sm:text-xs font-semibold sm:font-normal fa-teal-text border border-teal-200 sm:border-0 rounded-xl sm:rounded-none py-3 sm:py-0 hover:underline">
+                    <Upload size={13} className="w-[15px] h-[15px] sm:w-[13px] sm:h-[13px]" /> Déposer un document
                   </button>
                 )
               )}
