@@ -10,6 +10,9 @@ import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContai
 
 const STATUS_STEPS = ["Déposé", "En vérification", "Devis en cours", "Souscrit", "Bordereau émis", "Payé"];
 const ADMIN_STATUS_OPTIONS = ["Déposé", "En vérification", "Devis en cours", "Souscrit", "KO", "Bordereau émis", "Payé"];
+// En dessous de ce montant, un honoraire doit être justifié.
+const HONORAIRES_SEUIL_MOTIF = 300;
+const MOTIFS_HONORAIRES_REDUITS = ["Remise famille", "Offert pour le partenaire"];
 const KO_REASONS = ["Refus banque / assureur", "Client a annulé", "Concurrent moins cher", "Sans nouvelles du client", "Autre"];
 const PAYMENT_METHODS = ["Virement", "Carte cadeau"];
 const STATUS_COLORS = {
@@ -10475,7 +10478,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [messageDraft, setMessageDraft] = useState("");
   const [historyOpenId, setHistoryOpenId] = useState(null);
   const [financeOpenId, setFinanceOpenId] = useState(null);
-  const [financeDraft, setFinanceDraft] = useState({ caAmount: "", commissionAmount: "" });
+  const [financeDraft, setFinanceDraft] = useState({ caAmount: "", commissionAmount: "", geste: "", motif: "" });
   const STALE_HOURS = 24;
   const PRISE_EN_CHARGE_HOURS = 24;
   const DEVIS_HOURS = 72;
@@ -10680,13 +10683,25 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     await onUpdateDossierPartnerMessage(id, messageDraft);
     setMessageOpenId(null);
   }
+  // Le champ saisi est l'honoraire FACTURÉ. Le geste commercial s'en déduit, et
+  // c'est le net qui est rangé dans caAmount : toutes les statistiques lisent
+  // ce champ, elles comptent donc d'elles-mêmes le CA après geste. Le brut et
+  // le geste sont gardés à part (champs neufs) pour qu'on voie ce qui a été cédé.
   function openFinance(d) {
     setFinanceOpenId(d.id);
-    setFinanceDraft({ caAmount: d.caAmount ?? "", commissionAmount: d.commissionAmount ?? "" });
+    const geste = Number(d.gesteCommercial) || 0;
+    const brut = d.honorairesBruts != null ? d.honorairesBruts : (d.caAmount != null ? d.caAmount + geste : "");
+    setFinanceDraft({ caAmount: brut ?? "", commissionAmount: d.commissionAmount ?? "", geste: geste ? String(geste) : "", motif: d.motifHonorairesReduits || "" });
   }
   async function saveFinance(id) {
+    const brut = financeDraft.caAmount === "" ? null : Number(financeDraft.caAmount);
+    const geste = Math.max(0, Number(financeDraft.geste) || 0);
+    if (brut !== null && brut < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif) return;
     await onUpdateDossierClient(id, {
-      caAmount: financeDraft.caAmount === "" ? null : Number(financeDraft.caAmount),
+      caAmount: brut === null ? null : Math.max(0, Math.round((brut - geste) * 100) / 100),
+      honorairesBruts: brut,
+      gesteCommercial: geste || null,
+      motifHonorairesReduits: brut !== null && brut < HONORAIRES_SEUIL_MOTIF ? financeDraft.motif : null,
       commissionAmount: financeDraft.commissionAmount === "" ? null : Number(financeDraft.commissionAmount),
     });
     setFinanceOpenId(null);
@@ -11456,6 +11471,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           <button onClick={() => financeOpenId === d.id ? setFinanceOpenId(null) : openFinance(d)}
                                             className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
                                             💶 Rémunération {(d.caAmount || d.commissionAmount) && <span className="fa-bg-gold fa-navy rounded-full w-1.5 h-1.5" />}
+                                            {d.motifHonorairesReduits && <span className="text-[10px] font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-1.5 py-0.5 rounded-full">{d.motifHonorairesReduits}</span>}
+                                            {d.gesteCommercial > 0 && <span className="text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded-full">geste −{fmtEuro(d.gesteCommercial)}</span>}
                                           </button>
                                         )}
                                       </div>
@@ -11477,10 +11494,31 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         <div className="mt-2 bg-gray-50 rounded-lg p-3">
                                           <div className="grid sm:grid-cols-2 gap-3">
                                             <div>
-                                              <label className="block text-xs text-gray-500 mb-1">CA généré (€) — interne</label>
+                                              <label className="block text-xs text-gray-500 mb-1">Honoraires facturés (€) — interne</label>
                                               <input type="number" onFocus={selectionTotale} value={financeDraft.caAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, caAmount: e.target.value }))}
                                                 placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                              {financeDraft.caAmount !== "" && Number(financeDraft.caAmount) < HONORAIRES_SEUIL_MOTIF && (
+                                                <div className="mt-2">
+                                                  <label className={`block text-xs mb-1 ${financeDraft.motif ? "text-gray-500" : "text-red-700 font-semibold"}`}>
+                                                    Moins de {HONORAIRES_SEUIL_MOTIF} € : motif obligatoire
+                                                  </label>
+                                                  <select value={financeDraft.motif} onChange={e => setFinanceDraft(f => ({ ...f, motif: e.target.value }))}
+                                                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 ${financeDraft.motif ? "border-gray-300" : "border-red-300 bg-red-50"}`}>
+                                                    <option value="">Choisir le motif…</option>
+                                                    {MOTIFS_HONORAIRES_REDUITS.map(m => <option key={m} value={m}>{m}</option>)}
+                                                  </select>
+                                                </div>
+                                              )}
+                                            </div>
+                                            <div>
+                                              <label className="block text-xs text-gray-500 mb-1">Geste commercial (€)</label>
+                                              <input type="number" min="0" onFocus={selectionTotale} value={financeDraft.geste}
+                                                onChange={e => setFinanceDraft(f => ({ ...f, geste: e.target.value }))}
+                                                placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                              <div className="text-[11px] text-gray-400 mt-1">
+                                                Déduit du CA : CA généré retenu {fmtEuroPrecis(Math.max(0, (Number(financeDraft.caAmount) || 0) - (Number(financeDraft.geste) || 0)))}
+                                              </div>
                                             </div>
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between">
@@ -11491,7 +11529,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                                     className="fa-teal-text hover:underline font-normal normal-case">Forfait {p.flatFee}€</button>
                                                 ) : (
                                                   <button type="button"
-                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: f.caAmount ? (Number(f.caAmount) / 2).toString() : f.commissionAmount }))}
+                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: f.caAmount ? (Math.max(0, Number(f.caAmount) - (Number(f.geste) || 0)) / 2).toString() : f.commissionAmount }))}
                                                     className="fa-teal-text hover:underline font-normal normal-case">50% auto</button>
                                                 )}
                                               </label>
@@ -11501,13 +11539,18 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             </div>
                                           </div>
                                           {financeDraft.caAmount !== "" && financeDraft.commissionAmount !== "" && (() => {
-                                            const ca = Number(financeDraft.caAmount) || 0;
+                                            const brutSaisi = Number(financeDraft.caAmount) || 0;
+                                            const geste = Number(financeDraft.geste) || 0;
+                                            const ca = Math.max(0, brutSaisi - geste);
                                             const commission = Number(financeDraft.commissionAmount) || 0;
                                             const caReel = ca - commission;
                                             const mandataireCut = caReel / 2;
                                             const margeNette = caReel - mandataireCut;
                                             return (
                                               <div className="mt-3 pt-3 border-t border-gray-200 space-y-1 text-xs text-gray-600">
+                                                {geste > 0 && (
+                                                  <div className="flex justify-between"><span>CA généré après geste commercial ({fmtEuro(brutSaisi)} − {fmtEuro(geste)})</span><span className="font-semibold fa-navy">{fmtEuro(ca)}</span></div>
+                                                )}
                                                 <div className="flex justify-between"><span>CA réel Frangola (après apporteur)</span><span className="font-semibold fa-navy">{fmtEuro(caReel)}</span></div>
                                                 <div className="flex justify-between"><span>Part {p.commercial || "commercial"} (mandataire, 50%)</span><span className="font-semibold" style={{ color: COMMERCIAL_COLORS[p.commercial] }}>{fmtEuro(mandataireCut)}</span></div>
                                                 <div className="flex justify-between"><span>Marge nette finale Frangola</span><span className="font-bold text-emerald-700">{fmtEuro(margeNette)}</span></div>
@@ -11515,7 +11558,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             );
                                           })()}
                                           <div className="flex gap-2 mt-3">
-                                            <button onClick={() => saveFinance(d.id)} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
+                                            <button onClick={() => saveFinance(d.id)}
+                                              disabled={financeDraft.caAmount !== "" && Number(financeDraft.caAmount) < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif}
+                                              title={financeDraft.caAmount !== "" && Number(financeDraft.caAmount) < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif ? "Choisis d'abord le motif des honoraires réduits" : ""}
+                                              className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed">Enregistrer</button>
                                             <button onClick={() => setFinanceOpenId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Fermer</button>
                                           </div>
                                         </div>
