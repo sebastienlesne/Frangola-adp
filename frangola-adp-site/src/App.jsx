@@ -1663,7 +1663,26 @@ export default function App() {
     const passeLeSecondFacteur = (kind, compte) =>
       !!(compte?.totpEnabled && compte?.totpSecret && appareilReconnu(cleAppareil(kind, compte)));
 
-    if (emailConnecte && emailConnecte === (data.settings?.admin?.email || "").trim().toLowerCase()) {
+    const porte = lirePorte();
+    const estAdmin = !!emailConnecte && emailConnecte === (data.settings?.admin?.email || "").trim().toLowerCase();
+    const estMandataire = data.mandataires.some(x => !x.deleted && (x.email || "").trim().toLowerCase() === emailConnecte);
+    const fichePartenaire = data.partners.find(x => !x.deleted && (x.email || "").trim().toLowerCase() === emailConnecte);
+    // Espace partenaire : seul un compte partenaire y entre. Un compte
+    // d'administration ou de mandataire est renvoyé vers sa propre porte.
+    if (porte === "partenaire") {
+      if (!fichePartenaire) { deconnexion(estAdmin || estMandataire ? "portePartenaire" : "sansFiche"); return; }
+      if (fichePartenaire.active === false) { deconnexion("desactive"); return; }
+      setCurrentPartner(fichePartenaire); setView("partnerDash");
+      updatePartner(fichePartenaire.id, { lastLoginAt: Date.now(), connexions: (fichePartenaire.connexions || 0) + 1 });
+      return;
+    }
+    // Espace Frangola : fermé aux comptes partenaires.
+    if (porte === "frangola" && !estAdmin && !estMandataire) {
+      deconnexion(fichePartenaire ? "porteFrangola" : "sansFiche");
+      return;
+    }
+
+    if (estAdmin) {
       const adm = data.settings.admin;
       if (passeLeSecondFacteur("admin", adm)) {
         setCurrentAdmin(true); setView("adminDash");
@@ -1778,6 +1797,7 @@ export default function App() {
     setData(null);
     setView("landing");
     setLogoutReason(reason || null);
+    ecrirePorte(null);
     purgeAncienneSession();
     try { await supabase.auth.signOut(); } catch (e) { /* session déjà close */ }
   }
@@ -2881,6 +2901,16 @@ function Landing({ onSelect, logoutReason }) {
           Votre accès a été suspendu. Contactez Frangola.
         </div>
       )}
+      {logoutReason === "portePartenaire" && (
+        <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
+          Cette adresse est un compte Frangola, pas un compte partenaire. Connectez-vous par « Espace Frangola ».
+        </div>
+      )}
+      {logoutReason === "porteFrangola" && (
+        <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
+          Cette adresse est un compte partenaire. Connectez-vous par « Espace partenaire ».
+        </div>
+      )}
       {logoutReason === "sansFiche" && (
         <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
           Aucun espace n'est associé à cette adresse email. Contactez Frangola.
@@ -2988,6 +3018,13 @@ function PasswordField({ value, onChange, onKeyDown, placeholder, autoFocus, cla
 // passe. Le rôle n'est pas choisi ici — il se déduit de l'adresse email une
 // fois la personne authentifiée.
 // =============================================================================
+// Porte d'entrée choisie à l'accueil (« partenaire » ou « frangola »).
+// Chaque compte n'entre que par la sienne : une adresse d'administration
+// saisie dans l'espace partenaire est refusée, et inversement.
+const CLE_PORTE = "adp:porte";
+function lirePorte() { try { return localStorage.getItem(CLE_PORTE); } catch (e) { return null; } }
+function ecrirePorte(v) { try { if (v) localStorage.setItem(CLE_PORTE, v); else localStorage.removeItem(CLE_PORTE); } catch (e) { /* stockage indisponible */ } }
+
 function ConnexionFlow({ titre, variante, onBack }) {
   const [etape, setEtape] = useState("password"); // password | activation
   const [email, setEmail] = useState("");
@@ -3004,6 +3041,7 @@ function ConnexionFlow({ titre, variante, onBack }) {
     const mail = email.trim().toLowerCase();
     if (!mail || !password) { setError("Adresse email et mot de passe requis."); return; }
     setError(""); setBusy(true);
+    ecrirePorte(variante);
     try {
       const { error: err } = await supabase.auth.signInWithPassword({ email: mail, password });
       if (err) {
@@ -3025,6 +3063,7 @@ function ConnexionFlow({ titre, variante, onBack }) {
     if (nouveau.length < 8) { setError("8 caractères minimum pour le mot de passe."); return; }
     if (nouveau !== nouveau2) { setError("Les deux mots de passe ne correspondent pas."); return; }
     setError(""); setBusy(true);
+    ecrirePorte(variante);
     try {
       await appelerActivation({ email: mail, code: code.trim(), password: nouveau });
       const { error: err } = await supabase.auth.signInWithPassword({ email: mail, password: nouveau });
