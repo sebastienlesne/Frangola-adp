@@ -984,6 +984,22 @@ function genererJeuDemo(base) {
     }
   }
 
+  // ── Pot commun ────────────────────────────────────────────────────────────
+  // Deux anciens partenaires supprimés, pour que le Pot commun ait un exemple :
+  // l'un avec rétrocessions maintenues, l'autre arrêtées. Choisis parmi ceux
+  // qui ont peu de dossiers et aucun filleul, pour ne rien dérégler ailleurs.
+  {
+    const candidats = partners.filter(p => !p.parrainId && !partners.some(f => f.parrainId === p.id))
+      .map(p => ({ p, n: dossiers.filter(d => d.partnerId === p.id).length }))
+      .filter(x => x.n >= 3 && x.n <= 8)
+      .slice(0, 2);
+    candidats.forEach(({ p }, i) => {
+      p.deleted = true;
+      p.deletedAt = maintenant - (i === 0 ? 12 : 95) * JOUR;
+      p.retrocessionsArreteesLe = i === 1 ? p.deletedAt : null;
+    });
+  }
+
   // ── Journal d'activité ────────────────────────────────────────────────────
   const activityLog = [];
   const recents = [...dossiers].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 80);
@@ -1087,6 +1103,23 @@ function calendrierRetrocession(partner, dossiers) {
   mois.sort((a, b) => a.cle.localeCompare(b.cle));
   const sansDate = lignes.filter(l => !l.datePrevue).length;
   return { mois, sansDate };
+}
+
+// ─── Pot commun ─────────────────────────────────────────────────────────────
+// Un partenaire supprimé ne l'est jamais vraiment : ses clients restent
+// visibles et gardent sa paternité (d.partnerId n'est pas touché). Ils sont
+// simplement présentés dans un « Pot commun ». Un dossier dont le partenaire
+// est introuvable y tombe aussi, plutôt que de disparaître.
+function partenaireAuPotCommun(p) { return !p || !!p.deleted; }
+// Rétrocessions arrêtées à la suppression : plus rien de nouveau n'est dû, ce
+// qui a déjà été versé reste acquis.
+function retrocessionsArretees(p) { return !!(p && p.deleted && p.retrocessionsArreteesLe); }
+function retroRestantesPartenaire(p, dossiers) {
+  const siens = (dossiers || []).filter(d => d.partnerId === p.id);
+  const items = p.flatFee != null
+    ? forfaitsRetrocession(p, siens).map(f => ({ etat: f.etat, montant: f.montant }))
+    : calendrierRetrocession(p, siens).mois.map(m => ({ etat: m.etat, montant: m.montant + (m.bonus || 0) }));
+  return items.filter(i => i.etat !== "regle").reduce((t, i) => t + i.montant, 0);
 }
 
 function echeancesRetrocession(dossiers) {
@@ -1477,6 +1510,10 @@ export default function App() {
   const [currentMandataire, setCurrentMandataire] = useState(null);
   const [globalError, setGlobalError] = useState("");
   const [apercuPartnerId, setApercuPartnerId] = useState(null);
+  // Aperçu en lecture seule par défaut ; cadenas ouvert = saisie pour son compte.
+  const [apercuEdition, setApercuEdition] = useState(false);
+  const ouvrirApercu = (id) => { setApercuEdition(false); setApercuPartnerId(id); };
+  const ouvrirSaisie = (id) => { setApercuEdition(true); setApercuPartnerId(id); };
   const [busy, setBusy] = useState(false);
 
   const [loadError, setLoadError] = useState(false);
@@ -2158,23 +2195,32 @@ export default function App() {
     }));
   }
 
-  async function deletePartner(id) {
+  async function deletePartner(id, options = {}) {
+    const arreter = !!options.arreterRetrocessions;
     await mutateData(base => {
       const p = base.partners.find(p => p.id === id);
-      const partners = base.partners.map(p => p.id === id ? { ...p, deleted: true, deletedAt: Date.now() } : p);
-      return withLog({ ...base, partners }, `a supprimé le partenaire ${p?.name || ""}`);
+      const partners = base.partners.map(p => p.id === id
+        ? { ...p, deleted: true, deletedAt: Date.now(), retrocessionsArreteesLe: arreter ? Date.now() : null }
+        : p);
+      return withLog({ ...base, partners },
+        `a supprimé le partenaire ${p?.name || ""} — clients au pot commun, rétrocessions ${arreter ? "arrêtées" : "maintenues"}`);
     });
   }
 
   async function restorePartner(id) {
     await mutateData(base => {
       const p = base.partners.find(p => p.id === id);
-      const partners = base.partners.map(p => p.id === id ? { ...p, deleted: false, deletedAt: null } : p);
+      const partners = base.partners.map(p => p.id === id ? { ...p, deleted: false, deletedAt: null, retrocessionsArreteesLe: null } : p);
       return withLog({ ...base, partners }, `a restauré le partenaire ${p?.name || ""}`);
     });
   }
 
-  async function createDossier(clientFirstName, clientLastName, clientPhone, files, hasCoEmprunteur, coClientLastName, coClientFirstName, coClientPhone, clientInforme) {
+  async function createDossier(...args) {
+    return creerDossierPour(currentPartner.id, null, ...args);
+  }
+  // Frangola peut déposer un dossier à la place d'un partenaire qui ne joue pas
+  // le jeu de l'outil : le dossier est à son nom, et garde la trace de qui l'a saisi.
+  async function creerDossierPour(partnerId, saisiPar, clientFirstName, clientLastName, clientPhone, files, hasCoEmprunteur, coClientLastName, coClientFirstName, coClientPhone, clientInforme) {
     setBusy(true); setGlobalError("");
     try {
       const docs = {};
@@ -2188,7 +2234,8 @@ export default function App() {
         docs[key] = { name: file.name, key: fileKey, size: file.size };
       }
       const dossier = {
-        id: uid(), partnerId: currentPartner.id, clientFirstName, clientLastName, clientPhone, status: "Déposé",
+        id: uid(), partnerId, clientFirstName, clientLastName, clientPhone, status: "Déposé",
+        ...(saisiPar ? { saisiPar, saisiLe: Date.now() } : {}),
         clientInformeLe: clientInforme ? Date.now() : null,
         hasCoEmprunteur: !!hasCoEmprunteur,
         coClientLastName: hasCoEmprunteur ? coClientLastName : "",
@@ -2197,7 +2244,12 @@ export default function App() {
         docs, bordereau: null, createdAt: Date.now(), updatedAt: Date.now(),
         history: [{ status: "Déposé", at: Date.now() }], notes: "",
       };
-            await mutateData(base => ({ ...base, dossiers: [...base.dossiers, dossier] }));
+      await mutateData(base => {
+        const suivant = { ...base, dossiers: [...base.dossiers, dossier] };
+        if (!saisiPar) return suivant;
+        const p = base.partners.find(x => x.id === partnerId);
+        return withLog(suivant, `a déposé le dossier ${clientName(dossier)} pour le compte de ${p ? nomPartenaire(p) : "un partenaire"}`);
+      });
       return true;
     } finally { setBusy(false); }
   }
@@ -2497,37 +2549,52 @@ export default function App() {
       {apercuPartnerId && (() => {
         const cible = data.partners.find(p => p.id === apercuPartnerId);
         if (!cible) return null;
-        // Aperçu strictement consultatif : toute action d'écriture est neutralisée
-        // pour qu'un clic de curiosité n'écrive jamais au nom du partenaire.
-        const bloque = () => { setGlobalError("Aperçu en lecture seule — action désactivée."); return false; };
+        // Deux modes. Cadenas fermé : aperçu strictement consultatif, pour
+        // qu'un clic de curiosité n'écrive jamais au nom du partenaire.
+        // Cadenas ouvert : Frangola saisit pour lui (dossiers, documents,
+        // parrainages…) quand il n'utilise pas l'outil lui-même — sans quoi
+        // la production existe mais ses statistiques restent vides.
+        const bloque = () => { setGlobalError("Aperçu en lecture seule — ouvre le cadenas pour saisir à sa place."); return false; };
+        const saisisseur = currentMandataire ? (currentMandataire.firstName || currentMandataire.name) : "Frangola";
+        const ed = apercuEdition;
         return (
           <div className="fixed inset-0 z-50 bg-gray-50 overflow-y-auto">
-            <div className="sticky top-0 z-10 fa-bg-gold px-5 py-2.5 flex items-center justify-between flex-wrap gap-2">
-              <span className="text-sm fa-navy">
-                👁 Aperçu de l'espace de <strong>{nomPartenaire(cible)}</strong> — lecture seule
+            <div className={`sticky top-0 z-10 px-5 py-2.5 flex items-center justify-between flex-wrap gap-2 ${ed ? "bg-teal-700 text-white" : "fa-bg-gold fa-navy"}`}>
+              <span className="text-sm">
+                {ed
+                  ? <>🔓 Saisie pour le compte de <strong>{nomPartenaire(cible)}</strong> — ce que tu fais s'enregistre dans son espace</>
+                  : <>👁 Aperçu de l'espace de <strong>{nomPartenaire(cible)}</strong> — lecture seule</>}
               </span>
-              <button onClick={() => setApercuPartnerId(null)}
-                className="text-xs font-semibold fa-navy bg-white/70 hover:bg-white px-3 py-1.5 rounded-lg transition">
-                Quitter l'aperçu
-              </button>
+              <span className="flex items-center gap-2">
+                <button onClick={() => setApercuEdition(v => !v)}
+                  title={ed ? "Refermer le cadenas : repasser en lecture seule" : "Ouvrir le cadenas : saisir à sa place"}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition ${ed ? "bg-white/15 hover:bg-white/25 text-white" : "bg-white/70 hover:bg-white fa-navy"}`}>
+                  {ed ? "🔒 Repasser en lecture seule" : "🔓 Saisir à sa place"}
+                </button>
+                <button onClick={() => { setApercuPartnerId(null); setApercuEdition(false); }}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition ${ed ? "bg-white text-teal-800 hover:bg-teal-50" : "fa-navy bg-white/70 hover:bg-white"}`}>
+                  Quitter
+                </button>
+              </span>
             </div>
             <PartnerDashboard
+              key={cible.id + (ed ? "-ed" : "-ro")}
               partner={cible}
               dossiers={data.dossiers.filter(d => d.partnerId === cible.id)}
               challenges={challengesDe(data)}
-              onLogout={() => setApercuPartnerId(null)}
-              onCreateDossier={bloque}
-              onDeclarerParrainage={bloque}
-              onAddExtraDoc={bloque}
-              onUploadRib={bloque}
-              onUploadFacture={bloque}
-              onSetGoal={bloque}
+              onLogout={() => { setApercuPartnerId(null); setApercuEdition(false); }}
+              onCreateDossier={ed ? (...args) => creerDossierPour(cible.id, saisisseur, ...args) : bloque}
+              onDeclarerParrainage={ed ? declarerParrainage : bloque}
+              onAddExtraDoc={ed ? addExtraDoc : bloque}
+              onUploadRib={ed ? uploadPartnerRib : bloque}
+              onUploadFacture={ed ? uploadFacture : bloque}
+              onSetGoal={ed ? setPartnerGoal : bloque}
               onMarkMessageRead={() => {}}
-              onUpdateDossierClient={bloque}
-              onUploadDocToSlot={bloque}
-              onRemoveDoc={bloque}
-              onRemoveExtraDoc={bloque}
-              busy={false}
+              onUpdateDossierClient={ed ? updateDossierClient : bloque}
+              onUploadDocToSlot={ed ? adminUploadDoc : bloque}
+              onRemoveDoc={ed ? removeDoc : bloque}
+              onRemoveExtraDoc={ed ? removeExtraDoc : bloque}
+              busy={ed ? busy : false}
             />
           </div>
         );
@@ -2594,7 +2661,8 @@ export default function App() {
                     onSupprimerVersementParrainage={supprimerVersementParrainage}
           onVirementPartenaire={enregistrerVirementPartenaire}
           onAnnulerVirement={annulerVirementPartenaire}
-                    onApercuPartner={setApercuPartnerId}
+                    onApercuPartner={ouvrirApercu}
+                    onSaisiePartner={ouvrirSaisie}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -2652,7 +2720,8 @@ export default function App() {
                     onSupprimerVersementParrainage={supprimerVersementParrainage}
           onVirementPartenaire={enregistrerVirementPartenaire}
           onAnnulerVirement={annulerVirementPartenaire}
-                    onApercuPartner={setApercuPartnerId}
+                    onApercuPartner={ouvrirApercu}
+                    onSaisiePartner={ouvrirSaisie}
           onRestoreMandataire={restoreMandataire}
           onUploadReseauLogo={uploadReseauLogo}
           onRemoveReseauLogo={removeReseauLogo}
@@ -4103,7 +4172,7 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
                         <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
                       )}
                     </div>
-                    <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.clientPhone && ` · ${d.clientPhone}`}</div>
+                    <div className="text-xs text-gray-400">Déposé le {fmtDate(d.createdAt)}{d.saisiPar && " par Frangola"}{d.clientPhone && ` · ${d.clientPhone}`}</div>
                   </div>
                   <StatusBadge status={d.status} />
                   <PaiementBadge dossier={d} />
@@ -8533,7 +8602,9 @@ function Vision360({ data, vue = "tout" }) {
 
   // --- Engagements envers le réseau
   const retroAcquise = gagnes.reduce((s, d) => s + partEncaissee(d, d.commissionAmount || 0), 0);
-  const retroAVenir = gagnes.reduce((s, d) => s + partAVenir(d, d.commissionAmount || 0), 0);
+  // Un partenaire supprimé avec rétrocessions arrêtées ne coûte plus rien à venir.
+  const arretes = new Set(data.partners.filter(retrocessionsArretees).map(p => p.id));
+  const retroAVenir = gagnes.reduce((s, d) => s + (arretes.has(d.partnerId) ? 0 : partAVenir(d, d.commissionAmount || 0)), 0);
 
   const parrainDe = (partnerId) => {
     const p = data.partners.find(x => x.id === partnerId);
@@ -8543,9 +8614,10 @@ function Vision360({ data, vue = "tout" }) {
   const primeAVenir = gagnes.reduce((s, d) => s + (parrainDe(d.partnerId) ? partAVenir(d, d.caAmount || 0) * PARRAINAGE_TAUX : 0), 0);
 
   // --- Déjà sorti de la caisse
-  const facturesReglees = data.partners.filter(p => !p.deleted)
+  // Ce qui est sorti reste sorti, même si le partenaire a été supprimé depuis.
+  const facturesReglees = data.partners
     .reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Payée").reduce((s2, f) => s2 + (f.montant || 0), 0), 0);
-  const versementsParrains = data.partners.filter(p => !p.deleted)
+  const versementsParrains = data.partners
     .reduce((s, p) => s + (p.parrainageVerse || 0) + (p.parrainageVersements || []).reduce((s2, v) => s2 + (v.montant || 0), 0), 0);
   const dejaRegle = facturesReglees + versementsParrains;
 
@@ -8557,7 +8629,7 @@ function Vision360({ data, vue = "tout" }) {
   // Les virements portent une clé qui dit d'où ils viennent : « YYYY-MM » pour
   // une rétrocession mensuelle, « d:<id> » pour le forfait d'un dossier hors
   // immobilier. On s'appuie dessus plutôt que de recouper les montants.
-  const tousVersements = data.partners.filter(p => !p.deleted)
+  const tousVersements = data.partners
     .flatMap(p => (p.retrocessionVersements || []).map(v => ({ ...v, p })));
   const sortiRetro = tousVersements.filter(v => !String(v.cle ?? v.mois ?? "").startsWith("d:"))
     .reduce((s2, v) => s2 + (v.montant || 0), 0);
@@ -8592,7 +8664,7 @@ function Vision360({ data, vue = "tout" }) {
     const quand = v.dateVirement ? v.dateVirement.slice(0, 7) : (v.at ? moisCle(v.at) : null);
     if (quand) touche(quand).depense += (v.montant || 0);
   }
-  for (const p of data.partners.filter(x => !x.deleted)) {
+  for (const p of data.partners) {
     for (const v of (p.parrainageVersements || [])) {
       if (v.at) touche(moisCle(v.at)).depense += (v.montant || 0);
     }
@@ -8948,16 +9020,19 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
   const champ = useRef(null);
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
-  const nomDe = (p) => nomPartenaire(p);
+  const nomDe = (p) => nomPartenaire(p) + (p.deleted ? " (supprimé)" : "");
 
   // Deux mécaniques distinctes : les apporteurs immobiliers sont réglés mois
   // par mois au rythme des encaissements ; les hors immobilier reçoivent leur
   // forfait en une fois, dès qu'il est couvert.
   const lignes = [];
   const reglees = [];
-  for (const p of data.partners.filter(x => !x.deleted)) {
+  // Les partenaires supprimés restent payés, sauf si leurs rétrocessions ont
+  // été arrêtées : on ne garde alors que l'historique de ce qui a été réglé.
+  for (const p of data.partners) {
     const siens = data.dossiers.filter(d => d.partnerId === p.id);
     if (siens.length === 0) continue;
+    const arrete = retrocessionsArretees(p);
     const forfait = p.flatFee != null;
     const items = forfait
       ? forfaitsRetrocession(p, siens).map(f => ({
@@ -8969,6 +9044,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
           etat: m.etat, versement: m.versement, detail: null,
         }));
     for (const it of items) {
+      if (arrete && it.etat !== "regle") continue;
       if (it.etat === "a_regler") lignes.push({ p, m: it, forfait });
       else if (it.etat === "regle") reglees.push({ p, m: it, forfait });
     }
@@ -9160,17 +9236,19 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement, onMajVersement, o
   const totalAPayer = aPayer.reduce((s, x) => s + x.montant, 0);
 
   // --- Déjà payé, daté
+  // L'historique garde les paiements faits aux partenaires supprimés depuis.
+  const tous = data.partners;
   const historique = [
-    ...vivants.flatMap(p => (p.factures || []).filter(f => f.statut === "Payée")
+    ...tous.flatMap(p => (p.factures || []).filter(f => f.statut === "Payée")
       .map(f => ({ cle: "hf" + f.id, genre: "facture", partnerId: p.id, id: f.id, quand: f.traiteAt || f.at, qui: nomDe(p), montant: f.montant || 0,
                    objet: "Facture partenaire", couleur: "bg-violet-100 text-violet-800", note: f.nom || "" }))),
-    ...vivants.flatMap(p => (p.parrainageVersements || [])
+    ...tous.flatMap(p => (p.parrainageVersements || [])
       .map(v => ({ cle: "hv" + v.id, genre: "parrainage", partnerId: p.id, id: v.id, quand: v.at, qui: nomDe(p), montant: v.montant || 0,
                    objet: "Rétrocession parrainage", couleur: "bg-amber-100 text-amber-800", note: v.note || "", corrige: !!v.corrigeLe }))),
     // Virements de rétrocession et forfaits aux apporteurs : sans eux, un
     // virement saisi par erreur restait compté dans les dépenses sans être
     // visible nulle part — donc impossible à annuler.
-    ...vivants.flatMap(p => (p.retrocessionVersements || [])
+    ...tous.flatMap(p => (p.retrocessionVersements || [])
       .map(v => {
         const forfait = String(v.cle ?? v.mois ?? "").startsWith("d:");
         return { cle: "hr" + (v.id || v.cle || v.mois), genre: "virement", partnerId: p.id, id: v.id,
@@ -9491,13 +9569,14 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
   const actionsPartenaires = parrainagesEnAttente + facturesEnAttente;
-  const livePartnerIds = new Set(data.partners.filter(p => !p.deleted).map(p => p.id));
-  const liveDossiers = data.dossiers.filter(d => livePartnerIds.has(d.partnerId));
+  // Tous les dossiers restent « vivants », y compris ceux d'un partenaire
+  // supprimé : ses clients sont au Pot commun, pas effacés.
+  const liveDossiers = data.dossiers;
   // « stats » a été éclaté en plusieurs écrans : un navigateur qui avait gardé
   // l'ancienne valeur atterrirait sur une page vide.
   const [tab, setTabRaw] = useState(() => {
@@ -9800,9 +9879,11 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     });
   }
   const [viewingPartnerTab, setViewingPartnerTab] = useState("analytique");
+  const [arreterRetro, setArreterRetro] = useState(false);
   async function confirmDelete(id) {
-    await onDeletePartner(id);
+    await onDeletePartner(id, { arreterRetrocessions: arreterRetro });
     setConfirmDeleteId(null);
+    setArreterRetro(false);
   }
   function startEditDossier(d) {
     setEditingDossierId(d.id);
@@ -10294,33 +10375,54 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 if (!deptGroups[key]) deptGroups[key] = [];
                 deptGroups[key].push(p);
               });
+              // Pot commun : les partenaires supprimés qui ont des clients, et
+              // les dossiers dont le partenaire est introuvable. Toujours en tête.
+              const POT = "__pot__";
+              const idsConnus = new Set(data.partners.map(x => x.id));
+              const anciens = data.partners
+                .filter(x => x.deleted && (commercialFilter === "tous" || x.commercial === commercialFilter) && data.dossiers.some(d => d.partnerId === x.id))
+                .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+              if (commercialFilter === "tous" && data.dossiers.some(d => !idsConnus.has(d.partnerId))) {
+                anciens.push({ id: "__inconnu__", name: "Partenaire introuvable", firstName: "", deleted: true, _inconnu: true });
+              }
+              if (anciens.length > 0) deptGroups[POT] = anciens;
+              const dossiersDe = (x) => x._inconnu
+                ? data.dossiers.filter(d => !idsConnus.has(d.partnerId))
+                : data.dossiers.filter(d => d.partnerId === x.id);
               const deptKeys = Object.keys(deptGroups).sort((a, b) => {
+                if (a === POT) return -1;
+                if (b === POT) return 1;
                 if (a === "Non renseigné") return 1;
                 if (b === "Non renseigné") return -1;
                 return a.localeCompare(b, undefined, { numeric: true });
               });
               return deptKeys.map(deptKey => {
-                const partnersInDeptAll = [...deptGroups[deptKey]].sort((a, b) => (a.ville || "").localeCompare(b.ville || ""));
+                const estPot = deptKey === POT;
+                const partnersInDeptAll = estPot ? deptGroups[deptKey] : [...deptGroups[deptKey]].sort((a, b) => (a.ville || "").localeCompare(b.ville || ""));
                 const filterActive = !!searchTerm || dossierFilter !== "tous";
                 const partnersInDept = filterActive
-                  ? partnersInDeptAll.filter(p => data.dossiers.some(d => d.partnerId === p.id && matchesSearch(d)))
+                  ? partnersInDeptAll.filter(p => dossiersDe(p).some(d => matchesSearch(d)))
                   : partnersInDeptAll;
                 if (filterActive && partnersInDept.length === 0) return null;
-                const deptDossiers = data.dossiers.filter(d => partnersInDeptAll.some(p => p.id === d.partnerId));
+                const deptDossiers = partnersInDeptAll.flatMap(p => dossiersDe(p));
                 const deptNewCount = deptDossiers.filter(d => d.status === "Déposé").length;
                 const deptFolderKey = "dept:" + deptKey;
                 const isDeptCollapsed = filterActive ? false : estPlie(deptFolderKey);
                 return (
-                  <div key={deptFolderKey} className="rounded-2xl overflow-hidden border-2 border-teal-100 shadow-sm">
+                  <div key={deptFolderKey} className={`rounded-2xl overflow-hidden border-2 shadow-sm ${estPot ? "border-violet-200" : "border-teal-100"}`}>
                     <button onClick={() => toggleFolder(deptFolderKey)}
-                      className="w-full flex items-center justify-between px-5 py-4 fa-bg-pink hover:brightness-95 transition">
+                      className={`w-full flex items-center justify-between px-5 py-4 hover:brightness-95 transition ${estPot ? "bg-violet-50" : "fa-bg-pink"}`}>
                       <div className="flex items-center gap-3">
-                        {isDeptCollapsed ? <Folder className="fa-navy" size={22} /> : <FolderOpen className="fa-navy" size={22} />}
+                        {estPot ? <span className="text-xl leading-none">🗂️</span> : isDeptCollapsed ? <Folder className="fa-navy" size={22} /> : <FolderOpen className="fa-navy" size={22} />}
                         <div className="text-left">
-                          <div className="font-display font-bold fa-navy">
-                            {deptKey === "Non renseigné" ? "Département non renseigné" : `Département ${deptKey}`}
+                          <div className={`font-display font-bold ${estPot ? "text-violet-700" : "fa-navy"}`}>
+                            {estPot ? "Pot commun" : deptKey === "Non renseigné" ? "Département non renseigné" : `Département ${deptKey}`}
                           </div>
+                          {estPot ? (
+                            <div className="text-xs text-gray-500">{deptDossiers.length} client{deptDossiers.length !== 1 ? "s" : ""} d'anciens partenaires · {partnersInDeptAll.length} partenaire{partnersInDeptAll.length !== 1 ? "s" : ""} supprimé{partnersInDeptAll.length !== 1 ? "s" : ""}</div>
+                          ) : (
                           <div className="text-xs text-teal-900/70">{partnersInDeptAll.length} partenaire{partnersInDeptAll.length !== 1 ? "s" : ""} · {deptDossiers.length} dossier{deptDossiers.length !== 1 ? "s" : ""}</div>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center gap-2.5">
@@ -10332,7 +10434,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     {!isDeptCollapsed && (
                       <div className="fa-bg-offwhite p-2.5 sm:p-4 space-y-4">
                         {partnersInDept.map(p => {
-                          const partnerDossiersAll = data.dossiers.filter(d => d.partnerId === p.id).sort((a, b) => b.createdAt - a.createdAt);
+                          const partnerDossiersAll = dossiersDe(p).sort((a, b) => b.createdAt - a.createdAt);
                           const partnerDossiers = filterActive ? partnerDossiersAll.filter(matchesSearch) : partnerDossiersAll;
                           const newCount = partnerDossiersAll.filter(d => d.status === "Déposé").length;
                           const isCollapsed = filterActive ? false : estPlie(p.id);
@@ -10344,8 +10446,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                   {isCollapsed ? <Folder className="fa-teal-text" size={20} /> : <FolderOpen className="fa-teal-text" size={20} />}
                                   <div className="text-left">
                                     <div className="font-display font-semibold fa-navy flex items-center gap-2">
-                                      <span className="font-bold">{nomPartenaire(p)}</span>
-                                      {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
+                                      <span className={`font-bold ${p.deleted ? "line-through decoration-violet-300" : ""}`}>{nomPartenaire(p)}</span>
+                                      {p.deleted && !p._inconnu && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">supprimé{p.deletedAt ? ` le ${fmtDate(p.deletedAt)}` : ""}</span>}
+                                      {!p.deleted && p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                                     </div>
                                     <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}</div>
                                   </div>
@@ -10424,6 +10527,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             </div>
                                             <div className="text-xs text-gray-400">
                                               Déposé le {fmtDate(d.createdAt)}
+                                              {d.saisiPar && <> · <span className="text-teal-700" title="Dossier déposé depuis l'espace du partenaire, pour son compte">saisi par {d.saisiPar}</span></>}
                                               {d.clientPhone && <> · <a href={`tel:${d.clientPhone}`} className="fa-teal-text hover:underline">{d.clientPhone}</a></>}
                                               {d.clientInformeLe && (
                                                 <> · <span className="text-emerald-700" title="Le partenaire a déclaré que le client est informé de la transmission de ses pièces">
@@ -10431,6 +10535,13 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                                 </span></>
                                               )}
                                             </div>
+                                            {partenaireAuPotCommun(p) && (
+                                              <div className="text-xs text-violet-700 mt-0.5">
+                                                🤝 Apporté par <strong>{p._inconnu ? "un partenaire introuvable" : nomPartenaire(p)}</strong>
+                                                {" "}— partenaire supprimé{p.deletedAt ? ` le ${fmtDate(p.deletedAt)}` : ""} · paternité conservée
+                                                {retrocessionsArretees(p) && " · rétrocessions arrêtées"}
+                                              </div>
+                                            )}
                                           </div>
                                         )}
                                         <div className="flex items-center gap-2">
@@ -11277,6 +11388,11 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                         <button onClick={() => onApercuPartner(p.id)}
                           title="Voir son espace exactement comme lui le voit — en lecture seule"
                           className="fa-tap text-sm fa-teal-text hover:underline px-2">👁 Son espace</button>
+                        {onSaisiePartner && (
+                          <button onClick={() => onSaisiePartner(p.id)}
+                            title="Ouvrir son espace en saisie : déposer des dossiers et des documents à sa place"
+                            className="fa-tap text-sm fa-teal-text hover:underline px-1">🔓</button>
+                        )}
                         <button onClick={() => startEdit(p)} className="fa-tap text-sm fa-teal-text hover:underline px-2">Modifier</button>
                         <button onClick={() => toggleActive(p)}
                           className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${p.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
@@ -11297,14 +11413,46 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             </span>
                           )
                         )}
-                        {confirmDeleteId === p.id ? (
-                          <span className="flex items-center gap-1.5 text-xs">
-                            <span className="text-red-700">Confirmer ?</span>
-                            <button onClick={() => confirmDelete(p.id)} className="font-semibold text-red-700 hover:underline">Oui</button>
-                            <button onClick={() => setConfirmDeleteId(null)} className="text-gray-500 hover:underline">Non</button>
-                          </span>
-                        ) : (
-                          <button onClick={() => setConfirmDeleteId(p.id)} className="fa-tap text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
+                        {confirmDeleteId === p.id ? (() => {
+                          const nbClients = data.dossiers.filter(d => d.partnerId === p.id).length;
+                          const restant = retroRestantesPartenaire(p, data.dossiers);
+                          return (
+                            <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4"
+                              onClick={e => { if (e.target === e.currentTarget) { setConfirmDeleteId(null); setArreterRetro(false); } }}>
+                            <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-xl p-5 text-sm text-left">
+                              <div className="font-display font-semibold fa-navy mb-2">Supprimer {nomPartenaire(p)} ?</div>
+                              <ul className="space-y-1.5 text-gray-700 mb-3">
+                                <li>🔒 Son accès à l'espace partenaire est coupé immédiatement.</li>
+                                <li>🗂️ {nbClients > 0
+                                  ? <><strong>Ses {nbClients} client{nbClients > 1 ? "s restent visibles" : " reste visible"}</strong> dans le <strong>Pot commun</strong> de l'onglet Dossiers, avec la mention « apporté par {nomPartenaire(p)} ».</>
+                                  : <>Il n'a aucun client : rien ne passe au Pot commun.</>}</li>
+                                <li>📊 Leur chiffre d'affaires reste compté dans ton C.A. et tes statistiques.</li>
+                                <li>↩️ Tu peux le restaurer depuis la Corbeille : ses clients reviennent dans son dossier.</li>
+                              </ul>
+                              {restant > 0.5 && (
+                                <div className="border border-gray-200 rounded-lg p-3 mb-3">
+                                  <div className="font-semibold fa-navy mb-1.5">Il lui reste {fmtEuroPrecis(restant)} de rétrocessions pas encore versées.</div>
+                                  <label className="fa-tap flex items-start gap-2 py-1 cursor-pointer">
+                                    <input type="radio" name={"retro-" + p.id} checked={!arreterRetro} onChange={() => setArreterRetro(false)} className="mt-0.5" />
+                                    <span>Continuer à les verser<span className="block text-xs text-gray-500">Elles restent dans « À payer » au fil des encaissements.</span></span>
+                                  </label>
+                                  <label className="fa-tap flex items-start gap-2 py-1 cursor-pointer">
+                                    <input type="radio" name={"retro-" + p.id} checked={arreterRetro} onChange={() => setArreterRetro(true)} className="mt-0.5" />
+                                    <span>Arrêter les versements<span className="block text-xs text-gray-500">Plus rien ne lui est dû à partir d'aujourd'hui. Ce qui a déjà été versé ne bouge pas.</span></span>
+                                  </label>
+                                </div>
+                              )}
+                              <div className="flex gap-2 justify-end flex-wrap">
+                                <button onClick={() => { setConfirmDeleteId(null); setArreterRetro(false); }}
+                                  className="text-sm font-medium border border-gray-200 px-4 py-2 rounded-lg hover:border-gray-300">Annuler</button>
+                                <button onClick={() => confirmDelete(p.id)} disabled={busy}
+                                  className="text-sm font-semibold bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg disabled:opacity-50">Supprimer le partenaire</button>
+                              </div>
+                            </div>
+                            </div>
+                          );
+                        })() : (
+                          <button onClick={() => { setArreterRetro(false); setConfirmDeleteId(p.id); }} className="fa-tap text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
                         )}
                       </div>
                     </div>
@@ -11518,8 +11666,17 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     <div className="text-xs text-gray-400">
                       {p.company || "—"} {p.ville && `· ${p.ville}`} · supprimé le {p.deletedAt ? fmtDate(p.deletedAt) : "—"}
                     </div>
+                    {(() => {
+                      const nb = data.dossiers.filter(d => d.partnerId === p.id).length;
+                      return (
+                        <div className="text-xs text-violet-700 mt-0.5">
+                          {nb > 0 ? `${nb} client${nb > 1 ? "s" : ""} au Pot commun` : "aucun client"}
+                          {" · "}rétrocessions {p.retrocessionsArreteesLe ? `arrêtées le ${fmtDate(p.retrocessionsArreteesLe)}` : "maintenues"}
+                        </div>
+                      );
+                    })()}
                   </div>
-                  <button onClick={() => onRestorePartner(p.id)}
+                  <button onClick={() => onRestorePartner(p.id)} title="Le partenaire retrouve son accès et ses clients quittent le Pot commun"
                     className="flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-3 py-1.5 rounded-full transition">
                     <RotateCcw size={13} /> Restaurer
                   </button>
