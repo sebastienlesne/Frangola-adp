@@ -3220,16 +3220,9 @@ const SITE_URL = "https://frangola-adp.fr";
 // mandataire doit en plus configurer son application d'authentification.
 // =============================================================================
 function piedDeSignature(expediteur, telephone) {
-  const lignes = [
-    "À très vite,",
-    expediteur || "Sébastien",
-    "Frangola — Assurance de prêt",
-  ];
-  if ((telephone || "").trim()) lignes.push((telephone || "").trim());
-  lignes.push("");
-  lignes.push("FRANGOLA — Courtier en assurance · ORIAS n°26010830");
-  lignes.push("6 bis boulevard Berthelot, Bureau 3 — 34000 Montpellier");
-  return lignes;
+  // La signature complète (nom, téléphone, ORIAS, adresse) est déjà dans
+  // Gmail : le message s'arrête sur la formule de politesse.
+  return ["À très vite,"];
 }
 
 // Le presse-papier accepte deux versions d'un même contenu : le texte brut
