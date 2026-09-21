@@ -1857,6 +1857,10 @@ export default function App() {
         };
         partnerId = nouveau.id;
         partners = [...base.partners, nouveau];
+      } else if (statut === "valide" && decl && decl.partnerId) {
+        // Validation rétablie après une annulation : la fiche existe déjà, on
+        // la rattache de nouveau à son parrain plutôt que d'en créer une seconde.
+        partners = base.partners.map(p => p.id === decl.partnerId ? { ...p, parrainId: decl.parrainId || null } : p);
       }
 
       const etiquette = decl ? `${decl.prenom || ""} ${(decl.nom || "").toUpperCase()}`.trim() : "";
@@ -1869,6 +1873,40 @@ export default function App() {
       }, statut === "valide"
         ? `a validé le parrainage de ${etiquette} et créé sa fiche partenaire`
         : `a refusé le parrainage de ${etiquette}`);
+    });
+  }
+  // Retirer un filleul à son parrain après coup : la prime cesse d'être due
+  // sur la suite, ce qui a déjà été versé au parrain ne bouge pas.
+  async function retirerFilleul(filleulId) {
+    await mutateData(base => {
+      const f = base.partners.find(p => p.id === filleulId);
+      const parrain = f ? base.partners.find(p => p.id === f.parrainId) : null;
+      return withLog({
+        ...base,
+        partners: base.partners.map(p => p.id === filleulId
+          ? { ...p, parrainId: null, ancienParrainId: p.parrainId || null, parrainRetireLe: Date.now() }
+          : p),
+      }, `a retiré ${f ? nomPartenaire(f) : "un filleul"} des filleuls de ${parrain ? nomPartenaire(parrain) : "son parrain"}`);
+    });
+  }
+  // Annuler une décision sur une déclaration de parrainage : elle repasse
+  // « à valider ». Si une fiche avait été créée, elle est conservée mais
+  // détachée du parrain.
+  async function annulerTraitementParrainage(id) {
+    await mutateData(base => {
+      const decl = (base.parrainages || []).find(p => p.id === id);
+      if (!decl) return base;
+      const partners = decl.partnerId
+        ? base.partners.map(p => p.id === decl.partnerId && p.parrainId === decl.parrainId ? { ...p, parrainId: null } : p)
+        : base.partners;
+      const etiquette = `${decl.prenom || ""} ${(decl.nom || "").toUpperCase()}`.trim();
+      return withLog({
+        ...base,
+        partners,
+        parrainages: (base.parrainages || []).map(p => p.id === id
+          ? { ...p, statut: "en_attente", motif: "", traiteAt: null, annuleLe: Date.now() }
+          : p),
+      }, `a annulé la décision sur le parrainage de ${etiquette} (${decl.statut === "valide" ? "validation" : "refus"})`);
     });
   }
   // Challenge à destination des partenaires : un objectif, une récompense,
@@ -2655,6 +2693,8 @@ export default function App() {
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
+                    onRetirerFilleul={retirerFilleul}
+                    onAnnulerParrainage={annulerTraitementParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
                     onMajVersementParrainage={majVersementParrainage}
@@ -2714,6 +2754,8 @@ export default function App() {
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
+                    onRetirerFilleul={retirerFilleul}
+                    onAnnulerParrainage={annulerTraitementParrainage}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
                     onMajVersementParrainage={majVersementParrainage}
@@ -4990,7 +5032,8 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function RegistreParrainages({ data, onTraiter, onTraiterEnLot, busy }) {
+function RegistreParrainages({ data, onTraiter, onTraiterEnLot, onAnnuler, busy }) {
+  const [annulerId, setAnnulerId] = useState(null);
   const [refusId, setRefusId] = useState(null);
   const [motif, setMotif] = useState(MOTIFS_REFUS[0]);
   const [motifLibre, setMotifLibre] = useState("");
@@ -5165,6 +5208,20 @@ function RegistreParrainages({ data, onTraiter, onTraiterEnLot, busy }) {
                     Créer la fiche
                   </button>
                 )}
+                {onAnnuler && (annulerId === d.id ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-red-700">
+                      {d.statut === "valide" ? "Annuler la validation ? Le filleul sera détaché de son parrain." : "Annuler le refus ?"}
+                    </span>
+                    <button onClick={async () => { await onAnnuler(d.id); setAnnulerId(null); }} disabled={busy}
+                      className="fa-tap font-semibold text-red-700 hover:underline">Oui</button>
+                    <button onClick={() => setAnnulerId(null)} className="fa-tap text-gray-500 hover:underline">Non</button>
+                  </span>
+                ) : (
+                  <button onClick={() => setAnnulerId(d.id)}
+                    title="Revenir sur cette décision : la déclaration repasse « à valider »"
+                    className="fa-tap text-gray-400 hover:text-red-600">Annuler</button>
+                ))}
               </span>
             </div>
           ))}
@@ -9569,7 +9626,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -9871,6 +9928,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [viewingPartnerId, setViewingPartnerId] = useState(null);
   // Fiches dont la liste des filleuls est dépliée (clic sur la pastille dorée).
   const [filleulsOuverts, setFilleulsOuverts] = useState(new Set());
+  const [retirerFilleulId, setRetirerFilleulId] = useState(null);
   function toggleFilleuls(id) {
     setFilleulsOuverts(prev => {
       const next = new Set(prev);
@@ -11006,7 +11064,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
         {tab === "partenaires" && (
           <div>
-                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} busy={busy} />
+                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} onAnnuler={onAnnulerParrainage} busy={busy} />
 
             <ContratTypePanel contrat={data.settings?.contratType} partners={data.partners}
               onUpload={onUploadContratType} canEdit={isFullAdmin} busy={busy} />
@@ -11363,8 +11421,20 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           {f.company && <span className="text-gray-500 font-normal"> · {f.company}</span>}
                                           {f.active === false && <span className="text-gray-400 font-normal"> · inactif</span>}
                                         </span>
-                                        <span className="text-gray-500">
-                                          depuis le {fmtDate(f.createdAt)} · C.A. généré <strong className="fa-navy">{fmtEuroPrecis(ca)}</strong>
+                                        <span className="text-gray-500 flex items-center gap-2 flex-wrap">
+                                          <span>depuis le {fmtDate(f.createdAt)} · C.A. généré <strong className="fa-navy">{fmtEuroPrecis(ca)}</strong></span>
+                                          {onRetirerFilleul && (retirerFilleulId === f.id ? (
+                                            <span className="flex items-center gap-1.5">
+                                              <span className="text-red-700">Le retirer de ses filleuls ?</span>
+                                              <button onClick={async () => { await onRetirerFilleul(f.id); setRetirerFilleulId(null); }}
+                                                className="fa-tap font-semibold text-red-700 hover:underline">Oui</button>
+                                              <button onClick={() => setRetirerFilleulId(null)} className="fa-tap text-gray-500 hover:underline">Non</button>
+                                            </span>
+                                          ) : (
+                                            <button onClick={() => setRetirerFilleulId(f.id)}
+                                              title="Détacher ce filleul : la prime de parrainage cesse sur la suite, le déjà versé reste acquis"
+                                              className="fa-tap text-gray-400 hover:text-red-600">Retirer</button>
+                                          ))}
                                         </span>
                                       </div>
                                     );
@@ -11388,11 +11458,6 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                         <button onClick={() => onApercuPartner(p.id)}
                           title="Voir son espace exactement comme lui le voit — en lecture seule"
                           className="fa-tap text-sm fa-teal-text hover:underline px-2">👁 Son espace</button>
-                        {onSaisiePartner && (
-                          <button onClick={() => onSaisiePartner(p.id)}
-                            title="Ouvrir son espace en saisie : déposer des dossiers et des documents à sa place"
-                            className="fa-tap text-sm fa-teal-text hover:underline px-1">🔓</button>
-                        )}
                         <button onClick={() => startEdit(p)} className="fa-tap text-sm fa-teal-text hover:underline px-2">Modifier</button>
                         <button onClick={() => toggleActive(p)}
                           className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${p.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
