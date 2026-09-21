@@ -9167,6 +9167,19 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement, onMajVersement, o
     ...vivants.flatMap(p => (p.parrainageVersements || [])
       .map(v => ({ cle: "hv" + v.id, genre: "parrainage", partnerId: p.id, id: v.id, quand: v.at, qui: nomDe(p), montant: v.montant || 0,
                    objet: "Rétrocession parrainage", couleur: "bg-amber-100 text-amber-800", note: v.note || "", corrige: !!v.corrigeLe }))),
+    // Virements de rétrocession et forfaits aux apporteurs : sans eux, un
+    // virement saisi par erreur restait compté dans les dépenses sans être
+    // visible nulle part — donc impossible à annuler.
+    ...vivants.flatMap(p => (p.retrocessionVersements || [])
+      .map(v => {
+        const forfait = String(v.cle ?? v.mois ?? "").startsWith("d:");
+        return { cle: "hr" + (v.id || v.cle || v.mois), genre: "virement", partnerId: p.id, id: v.id,
+                 quand: v.dateVirement ? new Date(v.dateVirement + "T12:00:00").getTime() : v.at,
+                 qui: nomDe(p), montant: v.montant || 0,
+                 objet: forfait ? "Forfait apporteur" : "Rétrocession apporteur",
+                 couleur: forfait ? "bg-sky-100 text-sky-800" : "bg-teal-100 text-teal-800",
+                 note: [v.libelle, v.mode].filter(Boolean).join(" · ") };
+      })),
   ].sort((a, b) => (b.quand || 0) - (a.quand || 0));
 
   const totalVerse = historique.reduce((s, x) => s + x.montant, 0);
@@ -9176,7 +9189,7 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement, onMajVersement, o
     <div className="space-y-6">
       <div>
         <h1 className="font-display text-xl font-semibold fa-navy">Facturation</h1>
-        <p className="text-sm text-gray-500">Qui reste à payer, et qui a été payé — factures partenaires et rétrocessions de parrainage.</p>
+        <p className="text-sm text-gray-500">Qui reste à payer, et qui a été payé — rétrocessions, factures partenaires et primes de parrainage.</p>
       </div>
 
       <div className="grid sm:grid-cols-3 gap-4">
@@ -9286,10 +9299,11 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement, onMajVersement, o
                   <span className="ml-auto text-sm font-bold text-emerald-700">{fmtEuroPrecis(h.montant)}</span>
                   {aAnnuler === h.cle ? (
                     <span className="flex items-center gap-2 text-xs basis-full sm:basis-auto justify-end">
-                      <span className="text-red-700">{h.genre === "facture" ? "Remettre la facture « à régler » ?" : "Supprimer ce versement ?"}</span>
+                      <span className="text-red-700">{h.genre === "facture" ? "Remettre la facture « à régler » ?" : h.genre === "virement" ? "Annuler ce virement ? L'échéance redeviendra à payer." : "Supprimer ce versement ?"}</span>
                       <button disabled={busy}
                         onClick={async () => {
                           if (h.genre === "facture") await onSetStatut(h.partnerId, h.id, "Déposée");
+                          else if (h.genre === "virement") await onAnnulerVirement(h.partnerId, h.id);
                           else await onSupprimerVersement(h.partnerId, h.id);
                           setAAnnuler(null);
                         }}
@@ -9302,7 +9316,7 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement, onMajVersement, o
                         <button onClick={() => { setAAnnuler(null); setEdition({ cle: h.cle, montant: String(h.montant), date: new Date(h.quand).toISOString().slice(0, 10), note: h.note || "" }); }}
                           className="fa-tap fa-teal-text hover:underline">Corriger</button>
                       )}
-                      {(h.genre === "facture" ? onSetStatut : onSupprimerVersement) && (
+                      {(h.genre === "facture" ? onSetStatut : h.genre === "virement" ? (h.id && onAnnulerVirement) : onSupprimerVersement) && (
                         <button onClick={() => { setEdition(null); setAAnnuler(h.cle); }}
                           className="fa-tap text-gray-400 hover:text-red-600">Annuler</button>
                       )}
