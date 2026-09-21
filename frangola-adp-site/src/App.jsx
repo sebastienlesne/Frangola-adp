@@ -2071,6 +2071,33 @@ export default function App() {
     }));
   }
 
+  // Correction d'un versement de parrainage saisi par erreur : on modifie ou
+  // on supprime la ligne, et le journal garde la trace de l'opération.
+  async function majVersementParrainage(partnerId, versementId, champs) {
+    return await mutateData(base => {
+      const p = base.partners.find(x => x.id === partnerId);
+      const avant = (p?.parrainageVersements || []).find(v => v.id === versementId);
+      return withLog({
+        ...base,
+        partners: base.partners.map(x => x.id === partnerId
+          ? { ...x, parrainageVersements: (x.parrainageVersements || []).map(v => v.id === versementId ? { ...v, ...champs, corrigeLe: Date.now() } : v) }
+          : x),
+      }, `a corrigé un versement de parrainage (${avant ? fmtEuroPrecis(avant.montant || 0) : "?"} → ${fmtEuroPrecis(champs.montant ?? avant?.montant ?? 0)}) pour ${p ? nomPartenaire(p) : "un partenaire"}`);
+    });
+  }
+  async function supprimerVersementParrainage(partnerId, versementId) {
+    return await mutateData(base => {
+      const p = base.partners.find(x => x.id === partnerId);
+      const avant = (p?.parrainageVersements || []).find(v => v.id === versementId);
+      return withLog({
+        ...base,
+        partners: base.partners.map(x => x.id === partnerId
+          ? { ...x, parrainageVersements: (x.parrainageVersements || []).filter(v => v.id !== versementId) }
+          : x),
+      }, `a annulé un versement de parrainage de ${avant ? fmtEuroPrecis(avant.montant || 0) : "?"} pour ${p ? nomPartenaire(p) : "un partenaire"}`);
+    });
+  }
+
   async function setFactureStatut(partnerId, factureId, statut, motif) {
     await mutateData(base => ({
       ...base,
@@ -2563,6 +2590,8 @@ export default function App() {
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
+                    onMajVersementParrainage={majVersementParrainage}
+                    onSupprimerVersementParrainage={supprimerVersementParrainage}
           onVirementPartenaire={enregistrerVirementPartenaire}
           onAnnulerVirement={annulerVirementPartenaire}
                     onApercuPartner={setApercuPartnerId}
@@ -2619,6 +2648,8 @@ export default function App() {
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
                     onSetFactureStatut={setFactureStatut}
                     onAddVersementParrainage={addVersementParrainage}
+                    onMajVersementParrainage={majVersementParrainage}
+                    onSupprimerVersementParrainage={supprimerVersementParrainage}
           onVirementPartenaire={enregistrerVirementPartenaire}
           onAnnulerVirement={annulerVirementPartenaire}
                     onApercuPartner={setApercuPartnerId}
@@ -9069,8 +9100,11 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
   );
 }
 
-function FacturationAdmin({ data, onSetStatut, onAddVersement, onVirementPartenaire, onAnnulerVirement, busy }) {
+function FacturationAdmin({ data, onSetStatut, onAddVersement, onMajVersement, onSupprimerVersement, onVirementPartenaire, onAnnulerVirement, busy }) {
   const [toutHistorique, setToutHistorique] = useState(false);
+  // Ligne en cours de correction, et ligne dont l'annulation attend confirmation.
+  const [edition, setEdition] = useState(null);   // { cle, montant, date, note }
+  const [aAnnuler, setAAnnuler] = useState(null);
 
   const nomDe = (p) => p ? (nomPartenaire(p)) : "—";
   const vivants = data.partners.filter(p => !p.deleted);
@@ -9128,11 +9162,11 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement, onVirementPartena
   // --- Déjà payé, daté
   const historique = [
     ...vivants.flatMap(p => (p.factures || []).filter(f => f.statut === "Payée")
-      .map(f => ({ cle: "hf" + f.id, quand: f.traiteAt || f.at, qui: nomDe(p), montant: f.montant || 0,
+      .map(f => ({ cle: "hf" + f.id, genre: "facture", partnerId: p.id, id: f.id, quand: f.traiteAt || f.at, qui: nomDe(p), montant: f.montant || 0,
                    objet: "Facture partenaire", couleur: "bg-violet-100 text-violet-800", note: f.nom || "" }))),
     ...vivants.flatMap(p => (p.parrainageVersements || [])
-      .map(v => ({ cle: "hv" + v.id, quand: v.at, qui: nomDe(p), montant: v.montant || 0,
-                   objet: "Rétrocession parrainage", couleur: "bg-amber-100 text-amber-800", note: v.note || "" }))),
+      .map(v => ({ cle: "hv" + v.id, genre: "parrainage", partnerId: p.id, id: v.id, quand: v.at, qui: nomDe(p), montant: v.montant || 0,
+                   objet: "Rétrocession parrainage", couleur: "bg-amber-100 text-amber-800", note: v.note || "", corrige: !!v.corrigeLe }))),
   ].sort((a, b) => (b.quand || 0) - (a.quand || 0));
 
   const totalVerse = historique.reduce((s, x) => s + x.montant, 0);
@@ -9208,13 +9242,72 @@ function FacturationAdmin({ data, onSetStatut, onAddVersement, onVirementPartena
         ) : (
           <>
             <div className="space-y-1.5">
-              {visibles.map(h => (
+              {visibles.map(h => edition?.cle === h.cle ? (
+                <div key={h.cle} className="bg-teal-50 border border-teal-200 rounded-lg px-3 py-2.5 space-y-2">
+                  <div className="flex items-center gap-2 flex-wrap text-sm">
+                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${h.couleur}`}>{h.objet}</span>
+                    <span className="fa-navy font-medium">{h.qui}</span>
+                    <span className="text-xs text-gray-500">— correction</span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <label className="text-xs text-gray-600 flex items-center gap-1.5">Montant
+                      <input type="number" min="0" step="0.01" onFocus={selectionTotale} value={edition.montant}
+                        onChange={e => setEdition(x => ({ ...x, montant: e.target.value }))}
+                        className="w-24 text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" /> €
+                    </label>
+                    <label className="text-xs text-gray-600 flex items-center gap-1.5">Date
+                      <input type="date" value={edition.date} onChange={e => setEdition(x => ({ ...x, date: e.target.value }))}
+                        className="text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                    </label>
+                    <input value={edition.note} onChange={e => setEdition(x => ({ ...x, note: e.target.value }))} placeholder="Note (facultatif)"
+                      className="flex-1 min-w-[140px] text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <div className="flex gap-2">
+                    <button disabled={busy || !(Number(edition.montant) > 0)}
+                      onClick={async () => {
+                        await onMajVersement(h.partnerId, h.id, {
+                          montant: Math.round(Number(edition.montant) * 100) / 100,
+                          at: edition.date ? new Date(edition.date + "T12:00:00").getTime() : h.quand,
+                          note: edition.note.trim(),
+                        });
+                        setEdition(null);
+                      }}
+                      className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg disabled:opacity-50">Enregistrer la correction</button>
+                    <button onClick={() => setEdition(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                  </div>
+                </div>
+              ) : (
                 <div key={h.cle} className="flex items-center gap-2 flex-wrap fa-bg-offwhite rounded-lg px-3 py-2">
                   <span className="text-xs text-gray-500 w-24 shrink-0">{fmtDate(h.quand)}</span>
                   <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${h.couleur}`}>{h.objet}</span>
                   <span className="text-sm fa-navy font-medium">{h.qui}</span>
                   {h.note && <span className="text-xs text-gray-400">{h.note}</span>}
+                  {h.corrige && <span className="text-[10px] text-gray-400 italic">corrigé</span>}
                   <span className="ml-auto text-sm font-bold text-emerald-700">{fmtEuroPrecis(h.montant)}</span>
+                  {aAnnuler === h.cle ? (
+                    <span className="flex items-center gap-2 text-xs basis-full sm:basis-auto justify-end">
+                      <span className="text-red-700">{h.genre === "facture" ? "Remettre la facture « à régler » ?" : "Supprimer ce versement ?"}</span>
+                      <button disabled={busy}
+                        onClick={async () => {
+                          if (h.genre === "facture") await onSetStatut(h.partnerId, h.id, "Déposée");
+                          else await onSupprimerVersement(h.partnerId, h.id);
+                          setAAnnuler(null);
+                        }}
+                        className="fa-tap font-semibold text-red-700 hover:underline">Oui</button>
+                      <button onClick={() => setAAnnuler(null)} className="fa-tap text-gray-500 hover:underline">Non</button>
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-3 text-xs">
+                      {h.genre === "parrainage" && onMajVersement && (
+                        <button onClick={() => { setAAnnuler(null); setEdition({ cle: h.cle, montant: String(h.montant), date: new Date(h.quand).toISOString().slice(0, 10), note: h.note || "" }); }}
+                          className="fa-tap fa-teal-text hover:underline">Corriger</button>
+                      )}
+                      {(h.genre === "facture" ? onSetStatut : onSupprimerVersement) && (
+                        <button onClick={() => { setEdition(null); setAAnnuler(h.cle); }}
+                          className="fa-tap text-gray-400 hover:text-red-600">Annuler</button>
+                      )}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -9384,7 +9477,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -12125,7 +12218,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
         })()}
 
               {tab === "facturation" && (
-          <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage}
+          <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} onMajVersement={onMajVersementParrainage} onSupprimerVersement={onSupprimerVersementParrainage}
             onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} />
         )}
         {tab === "challenge" && (
