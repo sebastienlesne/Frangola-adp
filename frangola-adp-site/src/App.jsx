@@ -631,6 +631,96 @@ const DEMO_VILLES = [
 ];
 const DEMO_KO = ["Refus banque / assureur", "Client a annulé", "Concurrent moins cher", "Sans nouvelles du client", "Autre"];
 
+const DEMO_BANQUES = ["Crédit Agricole", "BNP Paribas", "Société Générale", "LCL", "Caisse d'Épargne", "Banque Populaire", "Crédit Mutuel", "La Banque Postale", "CIC"];
+const DEMO_PIECES = [
+  "Garanties ITT insuffisantes : fournir la notice complète",
+  "Questionnaire de santé signé manquant",
+  "Tableau d'amortissement à jour demandé",
+  "Délégation à reformuler au nom de la banque",
+  "Fiche standardisée d'information à fournir",
+];
+// Suivi back-office fictif. Il tire ses hasards d'un générateur à part : le
+// reste du jeu de démonstration (montants, partenaires) reste identique.
+function backOfficeDemo(d, maintenant, rang) {
+  const r = prngDemo(90210 + rang * 7919);
+  const rnd = (a, b) => a + Math.floor(r() * (b - a + 1));
+  const JOUR = 86400000;
+  const iso = (ts) => new Date(ts).toISOString().slice(0, 10);
+  const souscrit = d.updatedAt;
+  const effet = new Date(d.dateEffet + "T12:00:00").getTime();
+  const passe = effet <= maintenant;
+  const sansAncienne = r() < 0.12;
+  const bo = {
+    banque: DEMO_BANQUES[Math.floor(r() * DEMO_BANQUES.length)],
+    ancienneAssurance: sansAncienne ? "aucune" : (r() < 0.8 ? "groupe" : "deleguee"),
+    echanges: [],
+  };
+  if (!sansAncienne) {
+    bo.quiResilie = bo.ancienneAssurance === "groupe" ? "banque" : (r() < 0.7 ? "frangola" : "client");
+    bo.ancienneCotisation = rnd(22, 95);
+  }
+  // Le parcours tient dans le temps entre souscription et effet : on
+  // resserre les délais quand l'effet est proche.
+  const f = Math.max(0.25, Math.min(1, (effet - souscrit - 2 * JOUR) / (38 * JOUR)));
+  const pas = (a, b) => Math.round(rnd(a, b) * f * JOUR);
+  let n = 0;
+  const ajoute = (ts, type, texte = "") => {
+    if (ts > maintenant) return false;
+    bo.echanges.push({ id: `bo-${rang}-${n++}`, le: iso(ts), type, texte, at: ts });
+    return true;
+  };
+  // Un dossier sur quinze : la banque traîne au-delà du délai légal.
+  const lente = r() < 0.07;
+  // Sur les dossiers encore en cours, quelques situations à traiter, pour que
+  // chaque alerte ait son exemple : demande pas partie, pièces en attente,
+  // refus de la banque.
+  const scenario = passe ? "normal" : (() => {
+    const x = r();
+    return x < 0.06 ? "pas_parti" : x < 0.14 ? "pieces" : x < 0.17 ? "refus" : "normal";
+  })();
+  if (scenario === "pas_parti") return bo;
+  let t = souscrit + pas(0, 2);
+  if (!ajoute(t, "envoi")) return bo;
+  bo.demandeLe = iso(t);
+  if (scenario === "refus") {
+    t += pas(4, 9);
+    if (ajoute(t, "refus", "Garanties jugées non équivalentes")) { bo.reponse = "refusee"; bo.reponseLe = iso(t); }
+    return bo;
+  }
+  if (scenario === "pieces" || r() < 0.35) {
+    t += pas(4, 7);
+    if (!ajoute(t, "pieces", DEMO_PIECES[Math.floor(r() * DEMO_PIECES.length)])) return bo;
+    if (scenario === "pieces") return bo;
+    t += pas(1, 4);
+    if (!ajoute(t, "pieces_envoyees")) return bo;
+  }
+  t += lente ? rnd(17, 24) * JOUR : pas(4, 9);
+  if (!ajoute(t, "acceptation")) return bo;
+  bo.reponse = "acceptee"; bo.reponseLe = iso(t);
+  t += pas(1, 4);
+  if (!ajoute(t, "avenant")) return bo;
+  bo.avenantRecuLe = iso(t);
+  t += pas(1, 5);
+  if (t > maintenant) return bo;
+  bo.avenantSigneLe = iso(t);
+  if (sansAncienne) return bo;
+  // Les oublis de résiliation restent rares, mais existent : c'est le cas que
+  // le suivi doit rendre visible.
+  const oubli = r() < (passe ? 0.012 : 0.1);
+  if (bo.quiResilie !== "banque" || r() < 0.5) {
+    if (!ajoute(t, "resiliation_demandee")) return bo;
+    bo.resiliationDemandeeLe = iso(t);
+  }
+  if (oubli) return bo;
+  t += pas(3, 12);
+  if (!ajoute(t, "resiliation", "Confirmation écrite reçue")) return bo;
+  bo.resiliationConfirmeeLe = iso(t);
+  if (!bo.resiliationDemandeeLe) bo.resiliationDemandeeLe = iso(t);
+  const verifie = effet + rnd(20, 40) * JOUR;
+  if (verifie <= maintenant) bo.prelevementVerifieLe = iso(verifie);
+  return bo;
+}
+
 function prngDemo(graine) {
   let a = graine >>> 0;
   return function () {
@@ -833,6 +923,7 @@ function genererJeuDemo(base) {
           d.status = "Souscrit";
         }
         d.history.push({ status: d.status, at: d.updatedAt });
+        d.backOffice = backOfficeDemo(d, maintenant, dossiers.length);
       }
       dossiers.push(d);
     }
@@ -2252,6 +2343,20 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
+  // Pièce du suivi back-office (avenant, confirmation de résiliation…) :
+  // stockée comme les autres fichiers, mais rattachée au suivi et non aux
+  // documents du dossier, que le partenaire voit.
+  async function uploadPieceBackOffice(dossierId, file) {
+    if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo — compresse le PDF avant de le déposer.`); return null; }
+    setBusy(true);
+    try {
+      const b64 = await fileToBase64(file);
+      const fileKey = "adp:file:" + uid();
+      await ecrireFichier(fileKey, JSON.stringify({ name: file.name, mime: file.type, data: b64 }));
+      return { name: file.name, key: fileKey, size: file.size };
+    } finally { setBusy(false); }
+  }
+
   async function uploadBordereau(dossierId, file) {
     if (file.size > MAX_FILE_BYTES) { setGlobalError(`"${file.name}" dépasse 3,5 Mo.`); return; }
     setBusy(true);
@@ -2414,6 +2519,7 @@ export default function App() {
           onSetGoal={setPartnerGoal}
           onMarkMessageRead={markDossierMessageRead}
           onUpdateDossierClient={updateDossierClient}
+          onUploadPieceBackOffice={uploadPieceBackOffice}
           onUploadDocToSlot={adminUploadDoc}
           onRemoveDoc={removeDoc}
           onRemoveExtraDoc={removeExtraDoc}
@@ -2465,6 +2571,7 @@ export default function App() {
           onRemoveReseauLogo={removeReseauLogo}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
+          onUploadPieceBackOffice={uploadPieceBackOffice}
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
@@ -2520,6 +2627,7 @@ export default function App() {
           onRemoveReseauLogo={removeReseauLogo}
           onUpdateStatus={updateStatus}
           onUpdateDossierClient={updateDossierClient}
+          onUploadPieceBackOffice={uploadPieceBackOffice}
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
@@ -3986,6 +4094,7 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
                 </div>
               )}
               <Stepper status={d.status} />
+              <SuiviBanquePartenaire dossier={d} />
               <div className="flex flex-wrap gap-2 mt-4">
                 {Object.keys(DOC_LABELS).map(k => d.docs[k] && (
                   <span key={k} className="text-xs fa-bg-offwhite border border-gray-200 text-gray-600 px-2.5 py-1 rounded-full flex items-center gap-1">
@@ -5320,6 +5429,602 @@ function VersementsParrainage({ data, onAddVersement }) {
 // Le partenaire n'a pas connaissance de cette rémunération : elle n'est pas
 // rétrocédée et n'apparaît nulle part dans son espace.
 // =============================================================================
+// =============================================================================
+// SUIVI BACK-OFFICE — de la souscription à la date d'effet
+//
+// Entre la signature et la date d'effet, la banque doit accepter la
+// substitution, parfois après plusieurs allers-retours, puis l'ancienne
+// assurance doit être résiliée. Si ce dernier point est oublié, le client paie
+// deux assurances : c'est le risque que ce suivi surveille.
+//
+// Tout vit dans un champ neuf, d.backOffice : aucun champ existant n'est
+// touché. Le détail n'est visible que de Frangola ; le partenaire n'en voit
+// qu'un résumé en trois temps.
+// =============================================================================
+const DELAI_REPONSE_BANQUE_JO = 10;   // délai légal de réponse, en jours ouvrés
+const ALERTE_EFFET_JOURS = 15;        // on prévient quinze jours avant l'effet
+const ALERTE_DEMANDE_JOURS = 3;       // demande pas envoyée trois jours après la souscription
+const STATUTS_SUIVI_BANQUE = ["Souscrit", "Bordereau émis", "Payé"];
+
+const TYPES_ECHANGE_BANQUE = [
+  { id: "envoi", sens: "out", label: "Demande de substitution envoyée" },
+  { id: "pieces_envoyees", sens: "out", label: "Pièces renvoyées" },
+  { id: "relance", sens: "out", label: "Relance" },
+  { id: "resiliation_demandee", sens: "out", label: "Résiliation demandée" },
+  { id: "autre_out", sens: "out", label: "Autre envoi" },
+  { id: "pieces", sens: "in", label: "Pièces demandées" },
+  { id: "acceptation", sens: "in", label: "Substitution acceptée" },
+  { id: "refus", sens: "in", label: "Substitution refusée" },
+  { id: "avenant", sens: "in", label: "Avenant reçu" },
+  { id: "resiliation", sens: "in", label: "Résiliation confirmée" },
+  { id: "autre_in", sens: "in", label: "Autre réception" },
+];
+const typeEchange = (id) => TYPES_ECHANGE_BANQUE.find(t => t.id === id) || { id, sens: "out", label: id };
+
+const ANCIENNES_ASSURANCES = [
+  ["groupe", "Contrat groupe de la banque"],
+  ["deleguee", "Délégation (autre assureur)"],
+  ["aucune", "Aucune — nouveau prêt"],
+];
+const QUI_RESILIE = [["banque", "La banque"], ["frangola", "Frangola"], ["client", "Le client"]];
+
+function isoAujourdhui() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function tsJour(iso) { return new Date(iso + "T12:00:00").getTime(); }
+function joursCalendairesDepuis(iso, maintenant = Date.now()) {
+  const b = new Date(maintenant); b.setHours(12, 0, 0, 0);
+  return Math.round((b.getTime() - tsJour(iso)) / 86400000);
+}
+// Jours ouvrés écoulés depuis une date (week-ends exclus, jours fériés non).
+function joursOuvresDepuis(iso, maintenant = Date.now()) {
+  const d = new Date(iso + "T12:00:00");
+  const fin = new Date(maintenant); fin.setHours(12, 0, 0, 0);
+  let n = 0;
+  while (d < fin && n < 400) {
+    d.setDate(d.getDate() + 1);
+    const j = d.getDay();
+    if (j !== 0 && j !== 6) n++;
+  }
+  return n;
+}
+function fmtJourCourt(iso) {
+  return iso ? new Date(iso + "T12:00:00").toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) : "";
+}
+function fmtJourLong(iso) {
+  return iso ? new Date(iso + "T12:00:00").toLocaleDateString("fr-FR") : "";
+}
+
+function backOfficeDe(d) { return d?.backOffice || {}; }
+function echangesTries(bo) {
+  return [...(bo.echanges || [])].sort((a, b) => (a.le || "").localeCompare(b.le || "") || (a.at || 0) - (b.at || 0));
+}
+function suiviBanqueDemarre(d) {
+  const bo = backOfficeDe(d);
+  return !!(bo.demandeLe || bo.reponse || bo.avenantRecuLe || bo.resiliationDemandeeLe || bo.resiliationConfirmeeLe || (bo.echanges || []).length);
+}
+
+// Un dossier entre dans le suivi dès qu'il est souscrit. Les contrats déjà en
+// vigueur avant l'arrivée de cet outil, jamais suivis, n'y remontent pas : on
+// ne veut pas d'une avalanche d'alertes sur des dossiers réglés depuis longtemps.
+function suiviBanqueApplicable(d, maintenant = Date.now()) {
+  if (!d || !STATUTS_SUIVI_BANQUE.includes(d.status)) return false;
+  const bo = backOfficeDe(d);
+  if (bo.horsSuivi) return false;
+  if (suiviBanqueDemarre(d) || bo.banque) return true;
+  if (d.dateEffet && joursCalendairesDepuis(d.dateEffet, maintenant) > 0) return false;
+  return true;
+}
+
+function etapesBackOffice(d, maintenant = Date.now()) {
+  const bo = backOfficeDe(d);
+  const sansAncienne = bo.ancienneAssurance === "aucune";
+  const effetPasse = !!d.dateEffet && joursCalendairesDepuis(d.dateEffet, maintenant) >= 0;
+  const e1 = !!bo.demandeLe;
+  const e2 = bo.reponse === "acceptee";
+  const e3 = !!bo.avenantSigneLe;
+  const e4 = sansAncienne || !!bo.resiliationConfirmeeLe;
+  const e5 = e2 && e3 && e4 && effetPasse;
+  const nbPieces = (bo.echanges || []).filter(x => x.type === "pieces").length;
+  return [
+    { id: "demande", label: "Demande envoyée à la banque", fait: e1, date: bo.demandeLe },
+    { id: "reponse", label: bo.reponse === "refusee" ? "Refusée par la banque" : "Acceptée par la banque",
+      fait: e2, date: bo.reponseLe, bloque: bo.reponse === "refusee",
+      detail: nbPieces > 0 ? `${nbPieces} aller${nbPieces > 1 ? "s" : ""}-retour${nbPieces > 1 ? "s" : ""}` : null },
+    { id: "avenant", label: "Avenant reçu et signé", fait: e3, date: bo.avenantSigneLe,
+      detail: !e3 && bo.avenantRecuLe ? "reçu, à signer" : null },
+    { id: "resiliation", label: sansAncienne ? "Pas d'ancienne assurance" : "Ancienne assurance résiliée", fait: e4,
+      date: sansAncienne ? null : bo.resiliationConfirmeeLe,
+      detail: !e4 && bo.resiliationDemandeeLe ? "demandée, à confirmer" : null },
+    { id: "vigueur", label: "Nouveau contrat en vigueur", fait: e5, date: d.dateEffet,
+      detail: d.dateEffet ? (effetPasse ? null : `effet ${fmtJourCourt(d.dateEffet)}`) : "date d'effet à saisir" },
+  ];
+}
+function progressionBackOffice(d, maintenant = Date.now()) {
+  return etapesBackOffice(d, maintenant).filter(e => e.fait).length;
+}
+
+// La seule alerte à afficher pour un dossier : la plus grave.
+// tri : 0 = risque de double paiement … 4 = suivi à démarrer.
+function alerteBackOffice(d, maintenant = Date.now()) {
+  if (!suiviBanqueApplicable(d, maintenant)) return null;
+  const bo = backOfficeDe(d);
+  const et = etapesBackOffice(d, maintenant);
+  if (et[4].fait) return null;
+  const resilOk = et[3].fait;
+  const banque = bo.banque || "La banque";
+
+  if (d.dateEffet && !resilOk) {
+    const j = joursCalendairesDepuis(d.dateEffet, maintenant);
+    if (j >= 0) return {
+      niveau: "rouge", code: "double", tri: 0, depuis: tsJour(d.dateEffet),
+      titre: j === 0 ? "Effet aujourd'hui — ancienne assurance non résiliée" : `Effet passé depuis ${j} jour${j > 1 ? "s" : ""} — ancienne assurance non résiliée`,
+      detail: bo.resiliationDemandeeLe
+        ? "Résiliation demandée, jamais confirmée : le client paie peut-être en double."
+        : "Résiliation jamais demandée : le client paie peut-être en double.",
+    };
+  }
+  if (bo.reponse === "refusee") return {
+    niveau: "rouge", code: "refus", tri: 1, depuis: bo.reponseLe ? tsJour(bo.reponseLe) : (d.updatedAt || maintenant),
+    titre: "Substitution refusée par la banque",
+    detail: "Proposer une autre offre au client ou clôturer le dossier.",
+  };
+  const echanges = echangesTries(bo);
+  const dernier = echanges[echanges.length - 1];
+  if (!et[1].fait && dernier?.type === "pieces") return {
+    niveau: "orange", code: "pieces", tri: 3, depuis: tsJour(dernier.le),
+    titre: `Pièces demandées par la banque le ${fmtJourCourt(dernier.le)}`,
+    detail: dernier.texte ? `« ${dernier.texte} »` : "À renvoyer à la banque.",
+  };
+  if (bo.demandeLe && !bo.reponse) {
+    const derniereSortie = [...echanges].reverse().find(x => typeEchange(x.type).sens === "out")?.le || bo.demandeLe;
+    const jo = joursOuvresDepuis(derniereSortie, maintenant);
+    if (jo > DELAI_REPONSE_BANQUE_JO) return {
+      niveau: "orange", code: "muette", tri: 2, depuis: tsJour(derniereSortie),
+      titre: `${banque} sans réponse depuis ${jo} jours ouvrés`,
+      detail: `Délai légal de ${DELAI_REPONSE_BANQUE_JO} jours ouvrés dépassé : relance écrite possible.`,
+    };
+  }
+  if (d.dateEffet && !resilOk) {
+    const j = -joursCalendairesDepuis(d.dateEffet, maintenant);
+    if (j <= ALERTE_EFFET_JOURS) return {
+      niveau: "orange", code: "effet", tri: 2, depuis: tsJour(d.dateEffet),
+      titre: `Effet dans ${j} jour${j > 1 ? "s" : ""} — résiliation pas confirmée`,
+      detail: bo.resiliationDemandeeLe
+        ? `Demandée le ${fmtJourLong(bo.resiliationDemandeeLe)} : obtenir la confirmation écrite.`
+        : "Résiliation de l'ancien contrat pas encore demandée.",
+    };
+  }
+  if (!bo.demandeLe) {
+    const souscrit = dateGain(d);
+    if (souscrit && maintenant - souscrit > ALERTE_DEMANDE_JOURS * 86400000) return {
+      niveau: "orange", code: "demarrer", tri: 4, depuis: souscrit,
+      titre: "Demande pas encore envoyée à la banque",
+      detail: `Souscrit le ${fmtDate(souscrit)}.`,
+    };
+  }
+  return null;
+}
+
+// Un échange noté met à jour les jalons qu'il implique : noter « Substitution
+// acceptée » coche l'étape 2, sans double saisie.
+function appliquerEchangeBanque(bo, ech) {
+  const n = { ...bo, echanges: [...(bo.echanges || []), ech] };
+  if (ech.type === "envoi" && !n.demandeLe) n.demandeLe = ech.le;
+  if (ech.type === "acceptation") { n.reponse = "acceptee"; n.reponseLe = ech.le; }
+  if (ech.type === "refus") { n.reponse = "refusee"; n.reponseLe = ech.le; }
+  if (ech.type === "avenant" && !n.avenantRecuLe) n.avenantRecuLe = ech.le;
+  if (ech.type === "resiliation_demandee" && !n.resiliationDemandeeLe) n.resiliationDemandeeLe = ech.le;
+  if (ech.type === "resiliation") {
+    n.resiliationConfirmeeLe = ech.le;
+    if (!n.resiliationDemandeeLe) n.resiliationDemandeeLe = ech.le;
+  }
+  return n;
+}
+
+const TEINTES_ALERTE_BO = {
+  rouge: { tag: "bg-red-50 text-red-700 border border-red-200", barre: "bg-red-500", bandeau: "bg-red-50 border-red-200 text-red-800", point: "bg-red-500" },
+  orange: { tag: "bg-amber-50 text-amber-800 border border-amber-200", barre: "bg-amber-500", bandeau: "bg-amber-50 border-amber-200 text-amber-900", point: "bg-amber-500" },
+};
+const LIBELLE_COURT_ALERTE = {
+  double: "Double paiement ?", refus: "Refus banque", pieces: "Pièces demandées",
+  muette: "Banque muette", effet: "Effet proche", demarrer: "À démarrer",
+};
+
+function MiniJaugeBackOffice({ dossier, large = "w-20" }) {
+  const n = progressionBackOffice(dossier);
+  const a = alerteBackOffice(dossier);
+  const couleur = n === 5 ? "bg-emerald-500" : a ? TEINTES_ALERTE_BO[a.niveau].barre : "bg-teal-500";
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`${large} h-1.5 rounded-full bg-gray-100 overflow-hidden inline-block`}>
+        <span className={`block h-full rounded-full ${couleur}`} style={{ width: `${Math.max(n, 0.15) * 20}%` }} />
+      </span>
+      <span className="text-[11px] text-gray-500">{n}/5</span>
+    </span>
+  );
+}
+
+function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy }) {
+  const bo = backOfficeDe(dossier);
+  const alerte = alerteBackOffice(dossier);
+  const etapes = etapesBackOffice(dossier);
+  const n = etapes.filter(e => e.fait).length;
+  const demarre = suiviBanqueDemarre(dossier);
+  const applicable = suiviBanqueApplicable(dossier);
+  const [ouvert, setOuvert] = useState(false);
+  const [formOuvert, setFormOuvert] = useState(false);
+  const [form, setForm] = useState({ type: "envoi", le: isoAujourdhui(), texte: "" });
+  const [fichier, setFichier] = useState(null);
+  const inputConfirmation = useRef(null);
+  const inputPiece = useRef(null);
+
+  const maj = (champs) => onUpdate(dossier.id, { backOffice: { ...bo, ...champs } });
+  const sansAncienne = bo.ancienneAssurance === "aucune";
+
+  async function enregistrerEchange() {
+    let piece = null;
+    if (fichier && onUploadPiece) {
+      piece = await onUploadPiece(dossier.id, fichier);
+      if (!piece) return;
+    }
+    const ech = { id: uid(), le: form.le || isoAujourdhui(), type: form.type, texte: form.texte.trim(), at: Date.now() };
+    if (piece) ech.fichier = piece;
+    onUpdate(dossier.id, { backOffice: appliquerEchangeBanque(bo, ech) });
+    setForm({ type: "envoi", le: isoAujourdhui(), texte: "" });
+    setFichier(null);
+    setFormOuvert(false);
+  }
+  async function joindreConfirmation(file) {
+    const piece = onUploadPiece ? await onUploadPiece(dossier.id, file) : null;
+    if (!piece) return;
+    const ech = { id: uid(), le: isoAujourdhui(), type: "resiliation", texte: "Confirmation écrite jointe", at: Date.now(), fichier: piece };
+    onUpdate(dossier.id, { backOffice: appliquerEchangeBanque(bo, ech) });
+  }
+  function supprimerEchange(id) {
+    onUpdate(dossier.id, { backOffice: { ...bo, echanges: (bo.echanges || []).filter(x => x.id !== id) } });
+  }
+
+  // Jalon coché = date du jour, modifiable ensuite ; décoché = effacé.
+  const jalon = ({ champ, libelle, alerteRouge, valeur, onBasculer, onDate }) => {
+    const date = valeur !== undefined ? valeur : bo[champ];
+    const coche = !!date;
+    return (
+      <div className="flex items-center gap-2 py-1.5 border-t border-gray-100 first:border-t-0 text-xs">
+        <label className="fa-tap flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+          <input type="checkbox" checked={coche}
+            onChange={e => onBasculer ? onBasculer(e.target.checked) : maj({ [champ]: e.target.checked ? isoAujourdhui() : null })}
+            className={`rounded w-4 h-4 shrink-0 ${alerteRouge && !coche ? "border-red-400" : "border-gray-300"}`} />
+          <span className={alerteRouge && !coche ? "text-red-700 font-semibold" : coche ? "fa-navy" : "text-gray-600"}>{libelle}</span>
+        </label>
+        {coche && (
+          <input type="date" value={date}
+            onChange={e => e.target.value && (onDate ? onDate(e.target.value) : maj({ [champ]: e.target.value }))}
+            className="text-xs border border-gray-200 rounded-lg px-1.5 py-0.5 w-[118px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
+        )}
+      </div>
+    );
+  };
+
+  const teinte = alerte ? TEINTES_ALERTE_BO[alerte.niveau] : null;
+  const effetProche = dossier.dateEffet && -joursCalendairesDepuis(dossier.dateEffet) <= ALERTE_EFFET_JOURS;
+
+  return (
+    <div className="mt-2">
+      <button onClick={() => setOuvert(v => !v)}
+        className="fa-tap flex items-center gap-2 flex-wrap text-xs font-semibold fa-navy hover:fa-teal-text transition text-left">
+        <Landmark size={13} />
+        Suivi back-office
+        {bo.horsSuivi ? (
+          <span className="font-normal text-gray-400">— hors suivi</span>
+        ) : !demarre && !applicable ? (
+          <span className="font-normal text-gray-400">— non suivi (contrat antérieur)</span>
+        ) : (
+          <>
+            <MiniJaugeBackOffice dossier={dossier} />
+            {alerte ? (
+              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${teinte.tag}`}>{LIBELLE_COURT_ALERTE[alerte.code]}</span>
+            ) : n === 5 ? (
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">en vigueur</span>
+            ) : null}
+          </>
+        )}
+        <ChevronDown size={13} className={ouvert ? "rotate-180 transition" : "transition"} />
+      </button>
+
+      {ouvert && (
+        <div className="mt-2 bg-white border border-gray-200 rounded-xl p-3 sm:p-4">
+          <div className="text-[11px] text-gray-400 mb-3">🔒 Réservé à Frangola — le partenaire ne voit qu'un résumé : en attente de la banque, validé, en vigueur.</div>
+
+          {/* Jauge en cinq étapes */}
+          <div className="grid grid-cols-5 gap-0 mb-1">
+            {etapes.map((e, i) => {
+              const enAlerte = !e.fait && ((e.id === "resiliation" && alerte && ["double", "effet"].includes(alerte.code))
+                || (e.id === "reponse" && alerte && ["refus", "muette", "pieces"].includes(alerte.code))
+                || (e.id === "demande" && alerte?.code === "demarrer"));
+              const rouge = enAlerte && alerte.niveau === "rouge";
+              const rond = e.fait ? "bg-emerald-500 border-emerald-500 text-white"
+                : rouge ? "bg-red-50 border-red-500 text-red-600"
+                : enAlerte ? "bg-amber-50 border-amber-500 text-amber-700"
+                : "bg-white border-gray-200 text-gray-400";
+              return (
+                <div key={e.id} className="relative flex flex-col items-center text-center min-w-0">
+                  {i < etapes.length - 1 && (
+                    <span className={`absolute top-[13px] left-1/2 w-full h-[3px] ${e.fait ? "bg-emerald-500" : "bg-gray-200"}`} />
+                  )}
+                  <span className={`relative z-10 w-7 h-7 rounded-full border-2 flex items-center justify-center text-xs font-bold ${rond}`}>
+                    {e.fait ? <Check size={14} /> : enAlerte ? "!" : i + 1}
+                  </span>
+                  <span className={`hidden sm:block mt-1.5 px-0.5 text-[11px] font-semibold leading-tight ${rouge ? "text-red-700" : enAlerte ? "text-amber-800" : "fa-navy"}`}>{e.label}</span>
+                  <span className="hidden sm:block text-[10px] text-gray-400 leading-tight mt-0.5">
+                    {e.fait && e.date ? fmtJourCourt(e.date) : ""}{e.fait && e.date && e.detail ? " · " : ""}{e.detail || (!e.fait && enAlerte ? "à faire" : "")}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {(() => {
+            // Sur téléphone, cinq libellés côte à côte ne tiennent pas : on
+            // affiche seulement l'étape en cours, comme sur la frise du dossier.
+            const i = etapes.findIndex(e => !e.fait);
+            const e = i < 0 ? etapes[4] : etapes[i];
+            return (
+              <div className="sm:hidden text-center text-xs mt-2 fa-navy">
+                {i < 0 ? "Terminé · " : `Étape ${i + 1} sur 5 · `}<strong>{e.label}</strong>
+                {e.detail && <span className="text-gray-400"> · {e.detail}</span>}
+              </div>
+            );
+          })()}
+
+          {alerte && (
+            <div className={`mt-3 border rounded-lg px-3 py-2.5 text-xs ${teinte.bandeau}`}>
+              <div className="font-bold">{alerte.niveau === "rouge" ? "🔴" : "⚠️"} {alerte.titre}</div>
+              <div className="mt-0.5">{alerte.detail}</div>
+            </div>
+          )}
+
+          <div className="grid md:grid-cols-2 gap-3 mt-3">
+            {/* Échanges avec la banque */}
+            <div className="border border-gray-200 rounded-lg p-3">
+              <div className="text-xs font-bold fa-navy mb-2">Échanges avec la banque · {(bo.echanges || []).length}</div>
+              {(bo.echanges || []).length === 0 && !formOuvert && (
+                <div className="text-xs text-gray-400 mb-1">Aucun échange noté pour l'instant.</div>
+              )}
+              <div>
+                {echangesTries(bo).reverse().map(x => {
+                  const t = typeEchange(x.type);
+                  return (
+                    <div key={x.id} className="flex gap-2 py-1.5 border-t border-gray-100 first:border-t-0 text-xs group">
+                      <span className="text-gray-400 w-10 shrink-0">{fmtJourCourt(x.le)}</span>
+                      <span className={`font-bold w-3 shrink-0 ${t.sens === "out" ? "fa-teal-text" : "text-violet-600"}`} title={t.sens === "out" ? "Envoyé" : "Reçu"}>{t.sens === "out" ? "→" : "←"}</span>
+                      <span className="flex-1 min-w-0">
+                        <span className="fa-navy">{t.label}</span>
+                        {x.texte && <span className="block text-gray-500 break-words">{x.texte}</span>}
+                        {x.fichier && (
+                          <button onClick={() => previewStoredFile(x.fichier.key)} className="block fa-teal-text hover:underline truncate max-w-full text-left">
+                            📎 {x.fichier.name}
+                          </button>
+                        )}
+                      </span>
+                      <button onClick={() => supprimerEchange(x.id)} title="Supprimer cet échange"
+                        className="text-gray-300 hover:text-red-600 shrink-0 self-start"><X size={12} /></button>
+                    </div>
+                  );
+                })}
+              </div>
+              {formOuvert ? (
+                <div className="mt-2 bg-gray-50 border border-gray-200 rounded-lg p-2.5 space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
+                      className="text-xs border border-gray-300 rounded-lg px-2 py-1.5 flex-1 min-w-[180px] focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <optgroup label="→ Envoyé à la banque">
+                        {TYPES_ECHANGE_BANQUE.filter(t => t.sens === "out").map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                      </optgroup>
+                      <optgroup label="← Reçu de la banque">
+                        {TYPES_ECHANGE_BANQUE.filter(t => t.sens === "in").map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                      </optgroup>
+                    </select>
+                    <input type="date" value={form.le} onChange={e => setForm(f => ({ ...f, le: e.target.value }))}
+                      className="text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </div>
+                  <input value={form.texte} onChange={e => setForm(f => ({ ...f, texte: e.target.value }))}
+                    placeholder={form.type === "pieces" ? "Ce que la banque demande…" : "Précision (facultatif)"}
+                    className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button onClick={() => inputPiece.current?.click()} className="text-xs text-gray-600 hover:fa-teal-text flex items-center gap-1">
+                      <Upload size={12} /> {fichier ? <span className="truncate max-w-[160px]">{fichier.name}</span> : "Joindre une pièce"}
+                    </button>
+                    <input ref={inputPiece} type="file" accept="application/pdf,image/*" className="hidden"
+                      onChange={e => setFichier(e.target.files?.[0] || null)} />
+                    <span className="ml-auto flex gap-2">
+                      <button onClick={() => { setFormOuvert(false); setFichier(null); }} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                      <button onClick={enregistrerEchange} disabled={busy}
+                        className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg disabled:opacity-50">Enregistrer</button>
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <button onClick={() => setFormOuvert(true)}
+                  className="mt-2 fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg inline-flex items-center gap-1">
+                  <Plus size={13} /> Noter un échange
+                </button>
+              )}
+            </div>
+
+            {/* Jalons et anti-doublon */}
+            <div className="border border-gray-200 rounded-lg p-3">
+              <div className="text-xs font-bold fa-navy mb-2">Jalons et anti-doublon</div>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <label className="text-[11px] text-gray-500 col-span-2">Banque
+                  <input key={"b" + (bo.banque || "")} defaultValue={bo.banque || ""} placeholder="ex. Crédit Agricole"
+                    onBlur={e => e.target.value.trim() !== (bo.banque || "") && maj({ banque: e.target.value.trim() })}
+                    className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </label>
+                <label className="text-[11px] text-gray-500">Ancienne assurance
+                  <select value={bo.ancienneAssurance || ""} onChange={e => maj({ ancienneAssurance: e.target.value || null })}
+                    className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    <option value="">à préciser…</option>
+                    {ANCIENNES_ASSURANCES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                </label>
+                {!sansAncienne ? (
+                  <label className="text-[11px] text-gray-500">Qui résilie
+                    <select value={bo.quiResilie || ""} onChange={e => maj({ quiResilie: e.target.value || null })}
+                      className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      <option value="">à préciser…</option>
+                      {QUI_RESILIE.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                  </label>
+                ) : <span />}
+                {!sansAncienne && (
+                  <label className="text-[11px] text-gray-500 col-span-2">Ancienne cotisation (€ / mois)
+                    <input key={"c" + (bo.ancienneCotisation ?? "")} type="number" min="0" step="0.01" onFocus={selectionTotale}
+                      defaultValue={bo.ancienneCotisation ?? ""} placeholder="ce que le client paierait en double"
+                      onBlur={e => {
+                        const v = e.target.value === "" ? null : Number(e.target.value);
+                        if (v !== (bo.ancienneCotisation ?? null)) maj({ ancienneCotisation: v });
+                      }}
+                      className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </label>
+                )}
+              </div>
+              {jalon({ champ: "demandeLe", libelle: "Demande envoyée à la banque" })}
+              {jalon({ libelle: "Acceptée par la banque", valeur: bo.reponse === "acceptee" ? (bo.reponseLe || isoAujourdhui()) : null,
+                onBasculer: v => maj(v ? { reponse: "acceptee", reponseLe: isoAujourdhui() } : { reponse: null, reponseLe: null }),
+                onDate: v => maj({ reponseLe: v }) })}
+              {jalon({ champ: "avenantRecuLe", libelle: "Avenant reçu" })}
+              {jalon({ champ: "avenantSigneLe", libelle: "Avenant signé par le client" })}
+              {!sansAncienne && <>
+                {jalon({ champ: "resiliationDemandeeLe", libelle: "Résiliation demandée" })}
+                {jalon({ champ: "resiliationConfirmeeLe", libelle: "Résiliation confirmée par écrit", alerteRouge: effetProche })}
+                {jalon({ champ: "prelevementVerifieLe", libelle: "Plus de prélèvement de l'ancienne assurance (vérifié avec le client)" })}
+              </>}
+              {!sansAncienne && (
+                <>
+                  <button onClick={() => inputConfirmation.current?.click()} disabled={busy}
+                    className="mt-2 text-xs font-medium border border-gray-200 hover:border-teal-300 rounded-lg px-3 py-1.5 inline-flex items-center gap-1 disabled:opacity-50">
+                    📎 Joindre la confirmation de résiliation
+                  </button>
+                  <input ref={inputConfirmation} type="file" accept="application/pdf,image/*" className="hidden"
+                    onChange={e => e.target.files?.[0] && joindreConfirmation(e.target.files[0])} />
+                </>
+              )}
+              {bo.ancienneCotisation > 0 && alerte?.code === "double" && (
+                <div className="mt-2 text-[11px] text-red-700">
+                  Chaque mois de retard coûte {fmtEuroPrecis(bo.ancienneCotisation)} au client.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-3 text-[11px] text-gray-400">
+            {bo.horsSuivi ? (
+              <>Ce dossier est sorti du suivi. <button onClick={() => maj({ horsSuivi: false })} className="fa-teal-text hover:underline">Le remettre dans le suivi</button></>
+            ) : (
+              <>Pas de démarche bancaire pour ce dossier ? <button onClick={() => maj({ horsSuivi: true })} className="fa-teal-text hover:underline">Le sortir du suivi</button></>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Ce que voit le partenaire : trois temps, sans le détail des échanges ni
+// de la résiliation. N'apparaît qu'une fois la demande partie à la banque.
+function SuiviBanquePartenaire({ dossier }) {
+  const bo = backOfficeDe(dossier);
+  if (!STATUTS_SUIVI_BANQUE.includes(dossier.status) || bo.horsSuivi || !bo.demandeLe) return null;
+  const et = etapesBackOffice(dossier);
+  const valide = et[1].fait;
+  const vigueur = et[4].fait;
+  const refus = bo.reponse === "refusee";
+  const segments = [true, valide, vigueur];
+  const texte = vigueur
+    ? <>✓ Contrat en vigueur depuis le {fmtJourLong(dossier.dateEffet)}</>
+    : refus
+      ? <>La banque n'a pas validé la substitution · Frangola revient vers vous</>
+      : valide
+        ? <>✓ Validé par la banque · <strong className="fa-navy">mise en place en cours</strong>{dossier.dateEffet ? ` · effet le ${fmtJourLong(dossier.dateEffet)}` : ""}</>
+        : <>En attente de validation par la banque</>;
+  return (
+    <div className="mt-3">
+      <div className="flex gap-1.5">
+        {segments.map((ok, i) => {
+          const enCours = !ok && segments.slice(0, i).every(Boolean);
+          return <span key={i} className={`flex-1 h-1.5 rounded-full ${ok ? "bg-emerald-500" : enCours ? (refus ? "bg-red-300" : "fa-bg-gold") : "bg-gray-100"}`} />;
+        })}
+      </div>
+      <div className="text-xs text-gray-500 mt-1.5">{texte}</div>
+    </div>
+  );
+}
+
+// Bloc d'accueil : tout ce qui attend une action entre souscription et effet,
+// le risque de double paiement en tête.
+function BackOfficeARelancer({ dossiers, nomDuPartenaire, onOuvrir }) {
+  const [toutVoir, setToutVoir] = useState(false);
+  const maintenant = Date.now();
+  const suivis = dossiers.filter(d => suiviBanqueApplicable(d, maintenant) && !etapesBackOffice(d, maintenant)[4].fait);
+  if (suivis.length === 0) return null;
+  const alertes = suivis
+    .map(d => ({ d, a: alerteBackOffice(d, maintenant) }))
+    .filter(x => x.a)
+    .sort((x, y) => x.a.tri - y.a.tri || x.a.depuis - y.a.depuis);
+  const compte = (codes) => alertes.filter(x => codes.includes(x.a.code)).length;
+  const compteurs = [
+    ["rouge", compte(["double"]), n => `${n} risque${n > 1 ? "s" : ""} de double paiement`],
+    ["rouge", compte(["refus"]), n => `${n} refus banque`],
+    ["orange", compte(["muette"]), n => `${n} banque${n > 1 ? "s" : ""} sans réponse`],
+    ["orange", compte(["pieces"]), n => `${n} demande${n > 1 ? "s" : ""} de pièces`],
+    ["orange", compte(["effet"]), n => `${n} effet${n > 1 ? "s" : ""} proche${n > 1 ? "s" : ""}`],
+    ["orange", compte(["demarrer"]), n => `${n} à démarrer`],
+  ].filter(c => c[1] > 0);
+  const LIMITE = 5;
+  const visibles = toutVoir ? alertes : alertes.slice(0, LIMITE);
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-4">
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+        <div className="flex items-center gap-2 font-display font-semibold fa-navy">
+          <Landmark size={16} /> Back-office à relancer
+        </div>
+        <span className="text-xs text-gray-400">{masqueNb(suivis.length)} dossier{suivis.length > 1 ? "s" : ""} entre souscription et effet</span>
+      </div>
+      {alertes.length === 0 ? (
+        <div className="text-sm text-gray-400 py-2">✅ Aucun dossier bloqué côté banque.</div>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {compteurs.map(([niveau, nb, lib], i) => (
+              <span key={i} className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${TEINTES_ALERTE_BO[niveau].tag}`}>{lib(masqueNb(nb))}</span>
+            ))}
+          </div>
+          <div>
+            {visibles.map(({ d, a }) => (
+              <button key={d.id} onClick={() => onOuvrir(d)}
+                className="w-full text-left flex items-center gap-3 py-2.5 border-t border-gray-100 first:border-t-0 hover:bg-gray-50 rounded-lg px-1 transition">
+                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${TEINTES_ALERTE_BO[a.niveau].point}`} />
+                <span className="flex-1 min-w-0">
+                  <span className="block text-sm fa-navy"><strong>{clientName(d)}</strong> — {a.titre}</span>
+                  <span className="block text-xs text-gray-500 truncate">{a.detail} · {nomDuPartenaire(d.partnerId)}</span>
+                </span>
+                <MiniJaugeBackOffice dossier={d} large="w-12" />
+              </button>
+            ))}
+          </div>
+          {alertes.length > LIMITE && (
+            <button onClick={() => setToutVoir(v => !v)} className="text-xs fa-teal-text hover:underline mt-2 font-semibold">
+              {toutVoir ? "Réduire la liste" : `Voir les ${alertes.length - LIMITE} autres →`}
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
   const [ouvert, setOuvert] = useState(false);
   const mensuelle = recurrenceMensuelle(dossier);
@@ -8679,7 +9384,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onSetFactureStatut, onAddVersementParrainage, onApercuPartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -9383,6 +10088,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </div>
               )}
 
+              <BackOfficeARelancer dossiers={liveDossiers} nomDuPartenaire={nomPartenaireParId}
+                onOuvrir={d => { setDossierFilter("tous"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); setTab("dossiers"); }} />
+
               <button onClick={() => setTab("dossiers")} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">
                 Voir tous les dossiers →
               </button>
@@ -9426,6 +10134,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 ["Payé", "Payé", liveDossiers.filter(d => d.status === "Payé").length],
                 ["KO", "KO", liveDossiers.filter(d => d.status === "KO").length],
                 ["action", "Nécessite une action", liveDossiers.filter(d => actionReasons(d).length > 0).length],
+                ["backoffice", "Back-office à relancer", liveDossiers.filter(d => alerteBackOffice(d)).length],
               ].map(([val, label, count]) => (
                 <button key={val} onClick={() => { setDossierFilter(val); setDossierSearch(""); }}
                   className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition whitespace-nowrap shrink-0 ${dossierFilter === val ? "fa-bg-teal" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"}`}>
@@ -9468,6 +10177,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               const matchesFilter = (d) => {
                 if (dossierFilter === "tous") return true;
                 if (dossierFilter === "action") return actionReasons(d).length > 0;
+                if (dossierFilter === "backoffice") return !!alerteBackOffice(d);
                 return d.status === dossierFilter;
               };
               const matchesSearch = (d) => matchesFilter(d) && (!searchTerm || `${d.clientFirstName} ${d.clientLastName}`.toLowerCase().includes(searchTerm));
@@ -9719,6 +10429,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
                                       {["Souscrit", "Bordereau émis", "Payé"].includes(d.status) && (
                                         <>
+                                          <SuiviBackOffice dossier={d} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} />
                                           <EcheancierDossier dossier={d} onUpdate={onUpdateDossierClient} />
                                           <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} assureurs={listeAssureurs(data)} />
                                         </>
