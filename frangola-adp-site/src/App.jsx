@@ -271,10 +271,20 @@ function fileToDataURL(file) {
 // évite qu'un partenaire se retrouve avec un lien qui ne mène nulle part.
 const NavAdmin = createContext(null);
 
-function LienPartenaire({ p, className = "", children }) {
+function LienPartenaire({ p, className = "", children, dansUnBouton = false }) {
   const nav = useContext(NavAdmin);
   const texte = children ?? nomPartenaire(p);
   if (!nav || !p) return <>{texte}</>;
+  // Placé dans un en-tête déjà cliquable (un dossier qui se plie), le lien ne
+  // peut pas être un second bouton : on rend un span qui intercepte le clic.
+  if (dansUnBouton) return (
+    <span role="link" tabIndex={0} title="Ouvrir sa fiche"
+      onClick={(e) => { e.stopPropagation(); nav.ouvrirPartenaire(p); }}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); nav.ouvrirPartenaire(p); } }}
+      className={`cursor-pointer hover:fa-teal-text hover:underline decoration-dotted underline-offset-2 transition ${className}`}>
+      {texte}
+    </span>
+  );
   return (
     <button type="button" title="Ouvrir sa fiche"
       onClick={(e) => { e.stopPropagation(); nav.ouvrirPartenaire(p); }}
@@ -1977,6 +1987,26 @@ export default function App() {
       },
     }));
   }
+  // Nouvelle période de production. L'ancienne est archivée pour rester
+  // consultable dans « Périodes précédentes ».
+  async function setPeriodeProduction(periode) {
+    await mutateData(base => {
+      const ancienne = base.settings?.periodeProduction;
+      const archives = [...(base.settings?.periodesProduction || [])];
+      if (ancienne && ancienne.debut && ancienne.fin && !archives.some(x => x.debut === ancienne.debut && x.fin === ancienne.fin)
+          && !(ancienne.debut === periode.debut && ancienne.fin === periode.fin)) {
+        // Une période interrompue avant sa fin est archivée jusqu'à la veille.
+        const hier = new Date(); hier.setDate(hier.getDate() - 1);
+        const hierIso = `${hier.getFullYear()}-${String(hier.getMonth() + 1).padStart(2, "0")}-${String(hier.getDate()).padStart(2, "0")}`;
+        const fin = ancienne.fin > hierIso ? hierIso : ancienne.fin;
+        if (fin >= ancienne.debut) archives.push({ ...ancienne, fin, interrompueLe: ancienne.fin > hierIso ? Date.now() : undefined });
+      }
+      return withLog({
+        ...base,
+        settings: { ...base.settings, periodeProduction: periode, periodesProduction: archives.slice(-24) },
+      }, `a fixé une période de production du ${periode.debut} au ${periode.fin}`);
+    });
+  }
   async function resetMandataireTotp(id) {
     const m = data.mandataires.find(m => m.id === id);
     await mutateData(base => withLog({
@@ -2686,6 +2716,7 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
+                    onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
@@ -2747,6 +2778,7 @@ export default function App() {
           onDeleteMandataire={deleteMandataire}
                     onResetMandataireTotp={resetMandataireTotp}
                     onSetChallengeGoals={setChallengeGoals}
+                    onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
@@ -8011,33 +8043,99 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
   );
 }
 
-function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
-  const [edition, setEdition] = useState(false);
-  const [brouillon, setBrouillon] = useState({});
+// =============================================================================
+// PRODUCTION DE LA PÉRIODE
+//
+// Répond à une seule question : suis-je dans les temps, sur la durée que je me
+// suis fixée — 10 jours, un mois, trois, six, ou des dates sur mesure. Par
+// défaut, le mois civil en cours, comme avant.
+//
+// Les objectifs mensuels (settings.challenge) ne bougent pas : ils servent de
+// base. La période (settings.periodeProduction) en déduit ses propres
+// objectifs au prorata, corrigeables à la main. Les périodes remplacées ou
+// terminées sont archivées dans settings.periodesProduction.
+// =============================================================================
+const DUREES_PRODUCTION = [
+  { id: "10j", label: "10 jours" },
+  { id: "1m", label: "1 mois" },
+  { id: "3m", label: "3 mois" },
+  { id: "6m", label: "6 mois" },
+  { id: "perso", label: "Sur mesure" },
+];
+const CHAMPS_OBJECTIFS = [["partenaires", "Partenaires"], ["dossiers", "Dossiers"], ["ca", "Honoraires (€)"], ["recurrence", "Récurrence ajoutée (€/mois)"]];
 
-  const objectifs = data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
+function isoDe(t) {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function debutJour(iso) { const [y, m, j] = iso.split("-").map(Number); return new Date(y, m - 1, j).getTime(); }
+// Date de fin (incluse) d'une durée qui part de `debutIso`.
+function finPourDuree(duree, debutIso) {
+  const [y, m, j] = debutIso.split("-").map(Number);
+  if (duree === "10j") return isoDe(new Date(y, m - 1, j + 9));
+  const n = duree === "3m" ? 3 : duree === "6m" ? 6 : 1;
+  return isoDe(new Date(y, m - 1 + n, j - 1));
+}
+function debutParDefaut(duree) {
   const now = new Date();
-  const debut = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  const fin = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
-  const avancement = Math.min(1, Math.max(0, (Date.now() - debut) / (fin - debut)));
-  const joursRestants = Math.max(0, Math.ceil((fin - Date.now()) / 86400000));
+  return duree === "10j" || duree === "perso" ? isoDe(now) : isoDe(new Date(now.getFullYear(), now.getMonth(), 1));
+}
+// Nombre de « mois » que représente une période, pour le prorata des objectifs.
+function facteurPeriode(duree, debutIso, finIso) {
+  if (duree === "1m") return 1;
+  if (duree === "3m") return 3;
+  if (duree === "6m") return 6;
+  const jours = Math.round((debutJour(finIso) - debutJour(debutIso)) / 86400000) + 1;
+  return Math.max(1, jours) / 30.4375;
+}
+function objectifsProrata(mensuels, facteur) {
+  const r = {};
+  for (const [k] of CHAMPS_OBJECTIFS) {
+    const v = Number(mensuels?.[k]) || 0;
+    r[k] = k === "ca" ? Math.round(v * facteur / 50) * 50 : Math.round(v * facteur);
+  }
+  return r;
+}
+function libellePeriode(per) {
+  const lib = DUREES_PRODUCTION.find(x => x.id === per.duree)?.label || "";
+  const f = (iso) => new Date(debutJour(iso)).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
+  return `${f(per.debut)} → ${f(per.fin)}${lib && per.duree !== "perso" ? ` · ${lib}` : ""}`;
+}
+// Période en vigueur : celle enregistrée si elle n'est pas terminée, sinon le
+// mois civil en cours.
+function periodeCourante(data) {
+  const p = data.settings?.periodeProduction;
+  const auj = isoDe(Date.now());
+  if (p && p.debut && p.fin && p.fin >= auj) return { ...p, enregistree: true };
+  const now = new Date();
+  const debut = isoDe(new Date(now.getFullYear(), now.getMonth(), 1));
+  return { duree: "1m", debut, fin: finPourDuree("1m", debut), objectifs: null, enregistree: false };
+}
+function objectifsDePeriode(data, per) {
+  return per.objectifs || objectifsProrata(data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 }, facteurPeriode(per.duree, per.debut, per.fin));
+}
+function periodesTerminees(data) {
+  const auj = isoDe(Date.now());
+  const liste = [...(data.settings?.periodesProduction || [])];
+  const p = data.settings?.periodeProduction;
+  if (p && p.fin && p.fin < auj && !liste.some(x => x.debut === p.debut && x.fin === p.fin)) liste.push(p);
+  return liste.filter(x => x.fin < auj).sort((a, b) => b.debut.localeCompare(a.debut));
+}
 
+// Réalisé sur [debut, fin[ (horodatages), ventilé par commercial.
+function realiseProduction(data, commerciaux, debut, fin) {
   const commercialDuDossier = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
-
-  // --- Réalisé, ventilé par commercial
   const parCommercial = (extracteur) => {
     const m = new Map(commerciaux.map(c => [c, 0]));
     extracteur((c, v) => { if (m.has(c)) m.set(c, m.get(c) + v); });
     return commerciaux.map(c => ({ nom: c, valeur: m.get(c) || 0 })).filter(x => x.valeur > 0);
   };
-
   const partenaires = parCommercial(ajoute => {
     for (const p of data.partners) {
       if (p.deleted || p.createdAt < debut || p.createdAt >= fin) continue;
       ajoute(p.commercial, 1);
     }
   });
-
   const dossiers = parCommercial(ajoute => {
     for (const d of data.dossiers) {
       const t = dateGain(d);
@@ -8045,10 +8143,8 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
       ajoute(commercialDuDossier(d), 1);
     }
   });
-
-  // Récurrence AJOUTÉE ce mois : la commission mensuelle des contrats dont la
-  // date d'effet tombe dans le mois. C'est du revenu nouveau, qui continuera
-  // de tomber les mois suivants — à ne pas confondre avec le cumul encaissé.
+  // Récurrence AJOUTÉE : la commission mensuelle des contrats dont la date
+  // d'effet tombe dans la période — du revenu nouveau, pas le cumul encaissé.
   const recurrence = parCommercial(ajoute => {
     for (const d of data.dossiers) {
       if (!STATUTS_CONTRAT_VIVANT.includes(d.status) || !d.dateEffet) continue;
@@ -8057,8 +8153,6 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
       ajoute(commercialDuDossier(d), recurrenceMensuelle(d));
     }
   });
-  const recurrenceTotale = recurrenceMensuelleTotale(data.dossiers);
-
   const ca = parCommercial(ajoute => {
     for (const d of data.dossiers) {
       if (d.status === "KO") continue;
@@ -8071,14 +8165,53 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
       });
     }
   });
+  const total = (l) => l.reduce((s, x) => s + x.valeur, 0);
+  return { partenaires, dossiers, recurrence, ca,
+    totaux: { partenaires: total(partenaires), dossiers: total(dossiers), ca: total(ca), recurrence: total(recurrence) } };
+}
 
+function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit }) {
+  const [edition, setEdition] = useState(false);
+  const [brouillon, setBrouillon] = useState(null); // { duree, debut, fin, auto, objectifs }
+  const [voirHisto, setVoirHisto] = useState(false);
+
+  const mensuels = data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
+  const per = periodeCourante(data);
+  const objectifs = objectifsDePeriode(data, per);
+  const debut = debutJour(per.debut);
+  const fin = debutJour(per.fin) + 86400000;
+  const avancement = Math.min(1, Math.max(0, (Date.now() - debut) / (fin - debut)));
+  const joursRestants = Math.max(0, Math.ceil((fin - Date.now()) / 86400000));
+  const { partenaires, dossiers, recurrence, ca } = realiseProduction(data, commerciaux, debut, fin);
+  const recurrenceTotale = recurrenceMensuelleTotale(data.dossiers);
+  const terminees = periodesTerminees(data);
+  const auMois = per.duree === "1m" && !per.enregistree;
+
+  // Ouvre l'édition, éventuellement sur une durée choisie d'un clic.
+  function ouvrir(duree) {
+    const d = duree || per.duree;
+    const deb = duree && duree !== per.duree ? debutParDefaut(d) : per.debut;
+    const fi = duree && duree !== per.duree ? finPourDuree(d === "perso" ? "10j" : d, deb) : per.fin;
+    const auto = !per.objectifs || (duree && duree !== per.duree);
+    const b = { duree: d, debut: deb, fin: fi, auto, objectifs: auto ? objectifsProrata(mensuels, facteurPeriode(d, deb, fi)) : { ...per.objectifs } };
+    setBrouillon(b);
+    setEdition(true);
+  }
+  function maj(ch) {
+    setBrouillon(b => {
+      const n = { ...b, ...ch };
+      if (ch.duree && ch.duree !== "perso") { n.debut = ch.debut || debutParDefaut(ch.duree); n.fin = finPourDuree(ch.duree, n.debut); }
+      if (ch.debut && n.duree !== "perso") n.fin = finPourDuree(n.duree, ch.debut);
+      if (n.fin < n.debut) n.fin = n.debut;
+      if (n.auto) n.objectifs = objectifsProrata(mensuels, facteurPeriode(n.duree, n.debut, n.fin));
+      return n;
+    });
+  }
   function enregistrer() {
-    const champs = {};
-    for (const k of ["partenaires", "dossiers", "ca", "recurrence"]) {
-      const v = Number(brouillon[k]);
-      if (!isNaN(v) && v >= 0) champs[k] = v;
-    }
-    onSetGoals(champs);
+    const b = brouillon;
+    const objs = {};
+    for (const [k] of CHAMPS_OBJECTIFS) { const v = Number(b.objectifs[k]); objs[k] = !isNaN(v) && v >= 0 ? v : 0; }
+    onSetPeriode?.({ duree: b.duree, debut: b.debut, fin: b.fin, objectifs: b.auto ? null : objs, enregistreLe: Date.now() });
     setEdition(false);
   }
 
@@ -8086,7 +8219,7 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
     const realise = segments.reduce((s, x) => s + x.valeur, 0);
     const attendu = objectif * avancement;
     const ecart = realise - attendu;
-    const finDeMois = avancement > 0.02 ? realise / avancement : null;
+    const finPeriode = avancement > 0.02 ? realise / avancement : null;
     const ratio = objectif > 0 ? realise / objectif : 0;
     const enRetard = ecart < 0;
     const grosRetard = objectif > 0 && ecart < -objectif * 0.2;
@@ -8102,7 +8235,6 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
             <span className="text-gray-400"> / {f(objectif)}</span>
           </span>
         </div>
-
         <div className="relative h-4 bg-gray-100 rounded-full overflow-hidden">
           <div className="flex h-full">
             {segments.map(seg => (
@@ -8118,13 +8250,12 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
           <div className="absolute top-0 bottom-0 w-0.5 bg-gray-800/70"
             style={{ left: `${avancement * 100}%` }} title="Rythme attendu à date" />
         </div>
-
         <div className={`text-xs mt-1 ${couleurTexte}`}>
           {objectif <= 0 ? "Aucun objectif fixé." : enRetard
             ? `Il manque ${f(Math.abs(ecart))} pour être dans les temps.`
             : `${f(ecart)} d'avance sur le rythme.`}
-          {finDeMois !== null && objectif > 0 && (
-            <span className="text-gray-400"> · à ce rythme, fin de mois à {f(finDeMois)}</span>
+          {finPeriode !== null && objectif > 0 && (
+            <span className="text-gray-400"> · à ce rythme, fin de {auMois ? "mois" : "période"} à {f(finPeriode)}</span>
           )}
           {ratio >= 1 && <span className="text-emerald-700 font-semibold"> · objectif atteint</span>}
         </div>
@@ -8133,34 +8264,73 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
   };
 
   const euros = (n) => fmtEuro(n);
+  const dureeAffichee = edition ? brouillon.duree : per.duree;
+  const champDate = "text-sm border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500";
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
-      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
-        <div className="font-display font-semibold fa-navy">Production du mois</div>
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <div className="font-display font-semibold fa-navy">{auMois ? "Production du mois" : "Production de la période"}</div>
         <div className="flex items-center gap-3">
           <span className="text-xs text-gray-400">
-            {joursRestants} jour{joursRestants > 1 ? "s" : ""} restant{joursRestants > 1 ? "s" : ""} · {Math.round(avancement * 100)} % du mois écoulé
+            {joursRestants} jour{joursRestants > 1 ? "s" : ""} restant{joursRestants > 1 ? "s" : ""} · {Math.round(avancement * 100)} % {auMois ? "du mois" : "de la période"} écoulé{auMois ? "" : "e"}
           </span>
           {canEdit && !edition && (
-            <button onClick={() => { setBrouillon({ partenaires: objectifs.partenaires, dossiers: objectifs.dossiers, ca: objectifs.ca, recurrence: objectifs.recurrence ?? "" }); setEdition(true); }}
-              className="text-xs fa-teal-text hover:underline">Modifier les objectifs</button>
+            <button onClick={() => ouvrir()} className="text-xs fa-teal-text hover:underline">Modifier les objectifs</button>
           )}
         </div>
       </div>
 
+      {/* Durée : un clic sur une durée ouvre l'édition avec ses objectifs calculés. */}
+      <div className="flex items-center gap-2 flex-wrap bg-gray-50 rounded-xl px-3 py-2.5 mb-3">
+        <span className="text-xs font-semibold text-gray-500">Durée</span>
+        {DUREES_PRODUCTION.map(x => (
+          <button key={x.id} disabled={!canEdit}
+            onClick={() => edition ? maj({ duree: x.id }) : ouvrir(x.id)}
+            className={`fa-tap text-xs font-semibold px-3 py-1.5 rounded-full transition ${dureeAffichee === x.id ? "bg-slate-800 text-white" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"} disabled:cursor-default`}>
+            {x.label}
+          </button>
+        ))}
+        <span className="sm:ml-auto flex items-center flex-wrap gap-2 text-xs text-gray-500">
+          {edition ? (
+            <>
+              du <input type="date" value={brouillon.debut} onChange={e => e.target.value && maj({ debut: e.target.value })} className={champDate} />
+              au {brouillon.duree === "perso"
+                ? <input type="date" value={brouillon.fin} min={brouillon.debut} onChange={e => e.target.value && maj({ fin: e.target.value })} className={champDate} />
+                : <strong className="fa-navy text-sm">{new Date(debutJour(brouillon.fin)).toLocaleDateString("fr-FR")}</strong>}
+            </>
+          ) : (
+            <>du <strong className="fa-navy">{new Date(debut).toLocaleDateString("fr-FR")}</strong> au <strong className="fa-navy">{new Date(debutJour(per.fin)).toLocaleDateString("fr-FR")}</strong></>
+          )}
+        </span>
+      </div>
+
       {edition ? (
-        <div className="flex flex-wrap items-center gap-2 my-3">
-          {[["partenaires", "Partenaires"], ["dossiers", "Dossiers"], ["ca", "Honoraires (€)"], ["recurrence", "Récurrence ajoutée (€/mois)"]].map(([k, lib]) => (
-            <label key={k} className="text-xs text-gray-500 flex items-center gap-1.5">
-              {lib}
-              <input type="number" onFocus={selectionTotale} min="0" value={brouillon[k] ?? ""}
-                onChange={e => setBrouillon(b => ({ ...b, [k]: e.target.value }))}
-                className="w-24 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
-            </label>
-          ))}
-          <button onClick={enregistrer} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
-          <button onClick={() => setEdition(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+        <div className="mb-4">
+          <div className="flex flex-wrap items-end gap-2">
+            {CHAMPS_OBJECTIFS.map(([k, lib]) => (
+              <label key={k} className="text-xs text-gray-500">
+                <span className="block mb-1">{lib}</span>
+                <input type="number" onFocus={selectionTotale} min="0" value={brouillon.objectifs[k] ?? ""}
+                  onChange={e => setBrouillon(b => ({ ...b, auto: false, objectifs: { ...b.objectifs, [k]: e.target.value } }))}
+                  className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1.5 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                <span className="block text-[11px] text-gray-400 mt-0.5 text-center">
+                  {Number(mensuels[k] || 0).toLocaleString("fr-FR")} / mois{brouillon.duree === "1m" ? "" : ` × ${brouillon.duree === "3m" ? 3 : brouillon.duree === "6m" ? 6 : (facteurPeriode(brouillon.duree, brouillon.debut, brouillon.fin)).toLocaleString("fr-FR", { maximumFractionDigits: 2 })}`}
+                </span>
+              </label>
+            ))}
+            <span className="flex items-center gap-2 pb-5">
+              <button onClick={enregistrer} className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
+              <button onClick={() => setEdition(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+            </span>
+          </div>
+          <label className="fa-tap flex items-center gap-2 text-xs text-gray-600 mt-1 cursor-pointer">
+            <input type="checkbox" checked={brouillon.auto}
+              onChange={e => setBrouillon(b => ({ ...b, auto: e.target.checked, objectifs: e.target.checked ? objectifsProrata(mensuels, facteurPeriode(b.duree, b.debut, b.fin)) : b.objectifs }))}
+              className="rounded border-gray-300" />
+            Calculer les objectifs à partir de mes objectifs mensuels (tu peux toujours les modifier à la main)
+          </label>
+          <MensuelsEditables mensuels={mensuels} onSetGoals={onSetGoals} />
         </div>
       ) : (
         <p className="text-sm text-gray-500 mb-4">
@@ -8172,14 +8342,14 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
         <Jauge titre="Nouveaux partenaires" segments={partenaires} objectif={objectifs.partenaires || 0} />
         <Jauge titre="Dossiers gagnés" segments={dossiers} objectif={objectifs.dossiers || 0} />
         <Jauge titre="C.A. encaissé — honoraires" segments={ca} objectif={objectifs.ca || 0} format={euros} />
-        <div className="fa-recurrent"><Jauge titre="Récurrence ajoutée ce mois" segments={recurrence} objectif={objectifs.recurrence || 0} format={euros} /></div>
+        <div className="fa-recurrent"><Jauge titre={auMois ? "Récurrence ajoutée ce mois" : "Récurrence ajoutée sur la période"} segments={recurrence} objectif={objectifs.recurrence || 0} format={euros} /></div>
       </div>
 
-      <div className="text-xs text-gray-500 mt-3">
+      <div className="text-xs text-gray-500 mt-3 fa-recurrent">
         Revenu récurrent total du cabinet : <strong className="text-violet-700">{fmtEuroPrecis(recurrenceTotale)} par mois</strong>,
         soit {fmtEuro(recurrenceTotale * 12)} par an tant que les contrats vivent.
         <span className="block text-gray-400 mt-0.5">
-          La jauge ci-dessus ne compte que ce que le mois a créé de nouveau, pas le cumul.
+          La jauge ci-dessus ne compte que ce que la période a créé de nouveau, pas le cumul.
         </span>
       </div>
 
@@ -8193,15 +8363,97 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, canEdit }) {
               <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COMMERCIAL_COLORS[c] || "#999" }} />
               <span className="fa-navy font-medium">{commercialLabel(c)}</span>
               <span className="text-gray-400">
-                {pa} part. · {dos} doss. · {fmtEuro(mt)}
+                {masqueNb(pa)} part. · {masqueNb(dos)} doss. · {fmtEuro(mt)}
                 {(recurrence.find(x => x.nom === c)?.valeur || 0) > 0 && (
-                  <span className="text-violet-700"> · +{fmtEuroPrecis(recurrence.find(x => x.nom === c).valeur)}/mois</span>
+                  <span className="text-violet-700 fa-recurrent"> · +{fmtEuroPrecis(recurrence.find(x => x.nom === c).valeur)}/mois</span>
                 )}
               </span>
             </div>
           );
         })}
       </div>
+
+      {terminees.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-100">
+          <button onClick={() => setVoirHisto(v => !v)} className="fa-tap flex items-center gap-1.5 text-xs font-semibold fa-navy hover:fa-teal-text">
+            <ChevronDown size={13} className={voirHisto ? "rotate-180 transition" : "transition"} />
+            Périodes précédentes · {terminees.length}
+          </button>
+          {voirHisto && (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-400 text-left">
+                    <th className="font-medium py-1">Période</th>
+                    <th className="font-medium py-1 text-right">Partenaires</th>
+                    <th className="font-medium py-1 text-right">Dossiers</th>
+                    <th className="font-medium py-1 text-right">Honoraires</th>
+                    <th className="font-medium py-1 text-right fa-recurrent">Récurrence</th>
+                    <th className="py-1" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {terminees.map(t => {
+                    const o = objectifsDePeriode(data, t);
+                    const r = realiseProduction(data, commerciaux, debutJour(t.debut), debutJour(t.fin) + 86400000).totaux;
+                    const atteints = CHAMPS_OBJECTIFS.filter(([k]) => (o[k] || 0) > 0 && r[k] >= o[k]).length;
+                    const fixes = CHAMPS_OBJECTIFS.filter(([k]) => (o[k] || 0) > 0).length;
+                    return (
+                      <tr key={t.debut + t.fin} className="border-t border-gray-100">
+                        <td className="py-1.5 fa-navy">{libellePeriode(t)}</td>
+                        <td className="py-1.5 text-right">{masqueNb(r.partenaires)} / {masqueNb(o.partenaires)}</td>
+                        <td className="py-1.5 text-right">{masqueNb(r.dossiers)} / {masqueNb(o.dossiers)}</td>
+                        <td className="py-1.5 text-right">{fmtEuro(r.ca)} / {fmtEuro(o.ca)}</td>
+                        <td className="py-1.5 text-right fa-recurrent">{fmtEuro(r.recurrence)} / {fmtEuro(o.recurrence)}</td>
+                        <td className="py-1.5 text-right">
+                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${atteints === fixes && fixes > 0 ? "bg-emerald-50 text-emerald-700" : atteints > 0 ? "bg-amber-50 text-amber-800" : "bg-red-50 text-red-700"}`}>
+                            {atteints} / {fixes} atteint{atteints > 1 ? "s" : ""}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Les objectifs mensuels de référence, repliés sous l'édition de période :
+// on les change rarement, mais ils servent de base au prorata.
+function MensuelsEditables({ mensuels, onSetGoals }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [b, setB] = useState(null);
+  if (!onSetGoals) return null;
+  return (
+    <div className="mt-2">
+      {!ouvert ? (
+        <button onClick={() => { setB({ ...mensuels }); setOuvert(true); }} className="text-[11px] text-gray-400 hover:fa-teal-text">
+          Modifier mes objectifs mensuels de référence
+        </button>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg p-2">
+          <span className="text-[11px] text-gray-500">Objectifs mensuels :</span>
+          {CHAMPS_OBJECTIFS.map(([k, lib]) => (
+            <label key={k} className="text-[11px] text-gray-500 flex items-center gap-1">
+              {lib}
+              <input type="number" min="0" onFocus={selectionTotale} value={b[k] ?? ""}
+                onChange={e => setB(x => ({ ...x, [k]: e.target.value }))}
+                className="w-20 text-xs border border-gray-300 rounded-lg px-1.5 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            </label>
+          ))}
+          <button onClick={() => {
+              const champs = {};
+              for (const [k] of CHAMPS_OBJECTIFS) { const v = Number(b[k]); if (!isNaN(v) && v >= 0) champs[k] = v; }
+              onSetGoals(champs); setOuvert(false);
+            }} className="fa-bg-teal text-[11px] font-medium px-2.5 py-1 rounded-lg">Enregistrer</button>
+          <button onClick={() => setOuvert(false)} className="text-[11px] text-gray-500 px-1">Annuler</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -9626,7 +9878,7 @@ function SauvegardesPanel() {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -10504,7 +10756,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                   {isCollapsed ? <Folder className="fa-teal-text" size={20} /> : <FolderOpen className="fa-teal-text" size={20} />}
                                   <div className="text-left">
                                     <div className="font-display font-semibold fa-navy flex items-center gap-2">
-                                      <span className={`font-bold ${p.deleted ? "line-through decoration-violet-300" : ""}`}>{nomPartenaire(p)}</span>
+                                      {p.deleted
+                                        ? <span className="font-bold line-through decoration-violet-300">{nomPartenaire(p)}</span>
+                                        : <LienPartenaire p={p} dansUnBouton className="font-bold" />}
                                       {p.deleted && !p._inconnu && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">supprimé{p.deletedAt ? ` le ${fmtDate(p.deletedAt)}` : ""}</span>}
                                       {!p.deleted && p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                                     </div>
@@ -12462,7 +12716,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             {/* Les objectifs se modifient dans le tableau ci-dessous, pas ici :
                 un seul endroit pour une même valeur. */}
             <ProductionDuMois data={data} commerciaux={COMMERCIAUX}
-              onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
+              onSetGoals={onSetChallengeGoals} onSetPeriode={onSetPeriodeProduction} canEdit={isFullAdmin} />
             <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} />
             <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
               onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
