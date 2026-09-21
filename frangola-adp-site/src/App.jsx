@@ -8056,7 +8056,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
 // terminées sont archivées dans settings.periodesProduction.
 // =============================================================================
 const DUREES_PRODUCTION = [
-  { id: "10j", label: "10 jours" },
+  { id: "1s", label: "1 semaine" },
   { id: "1m", label: "1 mois" },
   { id: "3m", label: "3 mois" },
   { id: "6m", label: "6 mois" },
@@ -8072,13 +8072,16 @@ function debutJour(iso) { const [y, m, j] = iso.split("-").map(Number); return n
 // Date de fin (incluse) d'une durée qui part de `debutIso`.
 function finPourDuree(duree, debutIso) {
   const [y, m, j] = debutIso.split("-").map(Number);
-  if (duree === "10j") return isoDe(new Date(y, m - 1, j + 9));
+  if (duree === "1s") return isoDe(new Date(y, m - 1, j + 6));
+  if (duree === "10j") return isoDe(new Date(y, m - 1, j + 9)); // anciennes périodes enregistrées
   const n = duree === "3m" ? 3 : duree === "6m" ? 6 : 1;
   return isoDe(new Date(y, m - 1 + n, j - 1));
 }
 function debutParDefaut(duree) {
   const now = new Date();
-  return duree === "10j" || duree === "perso" ? isoDe(now) : isoDe(new Date(now.getFullYear(), now.getMonth(), 1));
+  // Une semaine part du lundi, un mois du 1er ; « sur mesure » d'aujourd'hui.
+  if (duree === "1s") return isoDe(new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7)));
+  return duree === "perso" ? isoDe(now) : isoDe(new Date(now.getFullYear(), now.getMonth(), 1));
 }
 // Nombre de « mois » que représente une période, pour le prorata des objectifs.
 function facteurPeriode(duree, debutIso, finIso) {
@@ -8097,7 +8100,7 @@ function objectifsProrata(mensuels, facteur) {
   return r;
 }
 function libellePeriode(per) {
-  const lib = DUREES_PRODUCTION.find(x => x.id === per.duree)?.label || "";
+  const lib = DUREES_PRODUCTION.find(x => x.id === per.duree)?.label || (per.duree === "10j" ? "10 jours" : "");
   const f = (iso) => new Date(debutJour(iso)).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
   return `${f(per.debut)} → ${f(per.fin)}${lib && per.duree !== "perso" ? ` · ${lib}` : ""}`;
 }
@@ -8191,7 +8194,7 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit
   function ouvrir(duree) {
     const d = duree || per.duree;
     const deb = duree && duree !== per.duree ? debutParDefaut(d) : per.debut;
-    const fi = duree && duree !== per.duree ? finPourDuree(d === "perso" ? "10j" : d, deb) : per.fin;
+    const fi = duree && duree !== per.duree ? finPourDuree(d === "perso" ? "1s" : d, deb) : per.fin;
     const auto = !per.objectifs || (duree && duree !== per.duree);
     const b = { duree: d, debut: deb, fin: fi, auto, objectifs: auto ? objectifsProrata(mensuels, facteurPeriode(d, deb, fi)) : { ...per.objectifs } };
     setBrouillon(b);
