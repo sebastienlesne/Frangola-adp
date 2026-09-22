@@ -10553,7 +10553,7 @@ function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
               <div key={d.id}>
                 <button onClick={() => setOuvertId(ouvert ? null : d.id)}
                   className="w-full text-left px-4 py-3 hover:bg-gray-50 transition grid grid-cols-2 sm:grid-cols-[1.3fr_1fr_1fr_110px_70px_2fr] gap-x-3 gap-y-1 items-center text-sm">
-                  <span className="font-bold fa-navy truncate"><LienClient d={d} dansUnBouton /></span>
+                  <span className="font-bold truncate"><LienClient d={d} dansUnBouton className="fa-teal-text underline decoration-dotted underline-offset-2" /></span>
                   <span className="text-gray-600 truncate text-xs sm:text-sm">{nomDe(d.partnerId)}</span>
                   <span className="text-gray-500 truncate text-xs sm:text-sm">{bo.banque || "banque ?"}</span>
                   <span><MiniJaugeBackOffice dossier={d} large="w-14" /></span>
@@ -10566,6 +10566,9 @@ function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
                 </button>
                 {ouvert && (
                   <div className="px-4 pb-4 -mt-1">
+                    <div className="flex justify-end mb-1">
+                      <LienClient d={d} className="text-xs font-semibold fa-teal-text">Ouvrir le dossier complet de {clientName(d)} →</LienClient>
+                    </div>
                     <SuiviBackOffice dossier={d} onUpdate={onUpdate} onUploadPiece={onUploadPiece} busy={busy} ouvertParDefaut />
                   </div>
                 )}
