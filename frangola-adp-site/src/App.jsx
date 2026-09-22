@@ -3606,7 +3606,7 @@ function AcceptationContrat({ partner, contrat, onAccepter, onLogout }) {
   );
 }
 
-function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "partenaire" }) {
+function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "partenaire", onMarquer }) {
   const [copie, setCopie] = useState(false);
   const [pret, setPret] = useState(null); // "email" | "whatsapp" | "echec"
   const [confirme, setConfirme] = useState(false);
@@ -3618,6 +3618,7 @@ function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "par
     const { corps } = messageInvitation(cible, expediteur, genre, telephone);
     const ok = await copierRiche(messageEnHtml(corps), corps);
     setPret(ok ? "ok" : "echec");
+    if (ok && onMarquer) onMarquer("bienvenueLe");
     setTimeout(() => setPret(null), 4000);
   }
   // Le code ne s'affiche que tant qu'il sert : première connexion en attente,
@@ -3655,6 +3656,7 @@ function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "par
             const { corps } = messageAppliMobile(cible);
             const ok = await copierRiche(messageEnHtml(corps), corps);
             setPret(ok ? "ok" : "echec");
+            if (ok && onMarquer) onMarquer("appliLe");
             setTimeout(() => setPret(null), 4000);
           }}
           title="Copie le message qui explique comment installer l'espace Frangola sur son téléphone (iPhone et Android)"
@@ -10285,6 +10287,188 @@ function RythmeReseau({ data, commerciaux }) {
   );
 }
 
+// =============================================================================
+// INTÉGRATION ET CONFORMITÉ D'UN PARTENAIRE — vue Frangola uniquement
+//
+// Deux listes distinctes :
+//  - l'intégration : les cinq envois qui font d'un contact un partenaire ;
+//  - la conformité : les pièces qui doivent être au dossier pour qu'on puisse
+//    le payer (contrat signé, RIB, annexe de parrainage s'il parraine).
+// Un partenaire déjà actif avant ce suivi est considéré comme intégré, mais sa
+// conformité est vérifiée comme pour tout le monde.
+// Tout est rangé dans un champ neuf, p.integration.
+// =============================================================================
+function annexeParrainageConcernee(p) {
+  const i = p?.integration || {};
+  if (i.annexeConcernee === true) return true;
+  if (i.annexeConcernee === false) return false;
+  // Par défaut : concerné dès qu'il a présenté quelqu'un.
+  const aDesFilleuls = (_colorDataRef?.partners || []).some(x => !x.deleted && x.parrainId === p.id);
+  const aDeclare = (_colorDataRef?.parrainages || []).some(x => x.parrainId === p.id);
+  return aDesFilleuls || aDeclare;
+}
+function integrePartenaireAvantSuivi(p) {
+  if (p?.integration) return false;
+  const aDesDossiers = (_colorDataRef?.dossiers || []).some(d => d.partnerId === p.id);
+  return !!p?.lastLoginAt && aDesDossiers;
+}
+function etapesIntegration(p) {
+  const i = p?.integration || {};
+  const concerne = annexeParrainageConcernee(p);
+  const dOffice = integrePartenaireAvantSuivi(p);
+  const accesLe = p?.codeEmisLe || (p?.code || p?.lastLoginAt ? p?.createdAt : null);
+  const etapes = [
+    { id: "acces", label: "Accès partenaire créés", date: accesLe, auto: true },
+    { id: "contratEnvoyeLe", label: "Contrat de partenariat envoyé", date: i.contratEnvoyeLe },
+    ...(concerne ? [{ id: "annexeEnvoyeeLe", label: "Annexe parrainage envoyée", date: i.annexeEnvoyeeLe, annexe: true }] : []),
+    { id: "bienvenueLe", label: "Mail de bienvenue (identifiant + code) envoyé", date: i.bienvenueLe, auto: true, copie: "accueil" },
+    { id: "appliLe", label: "Mail d'installation de l'appli sur smartphone envoyé", date: i.appliLe, auto: true, copie: "appli" },
+  ];
+  return etapes.map(e => ({ ...e, fait: !!e.date || dOffice }));
+}
+function piecesConformite(p) {
+  const contrats = contratsDe(p);
+  const pieces = [
+    { id: "contrat", label: "Contrat de partenariat signé",
+      ok: !!p?.contratAccepteLe || contrats.some(c => c.libelle === TYPES_CONTRAT[0]),
+      detail: p?.contratAccepteLe ? `accepté en ligne le ${fmtDate(p.contratAccepteLe)}` : (contrats.some(c => c.libelle === TYPES_CONTRAT[0]) ? "déposé dans sa fiche" : "à déposer dans « Contrat & RIB »") },
+    { id: "rib", label: "RIB pour le payer", ok: !!p?.ribFile,
+      detail: p?.ribFile ? `fourni le ${fmtDate(p.ribFile.uploadedAt)}` : "à fournir (il peut le déposer lui-même dans son espace)" },
+  ];
+  if (annexeParrainageConcernee(p)) {
+    const ok = contrats.some(c => c.libelle === TYPES_CONTRAT[1]);
+    pieces.push({ id: "annexe", label: "Annexe parrainage signée", ok, detail: ok ? "déposée dans sa fiche" : "à déposer dans « Contrat & RIB »" });
+  }
+  return pieces;
+}
+function bilanIntegration(p) {
+  const etapes = etapesIntegration(p);
+  const pieces = piecesConformite(p);
+  const faites = etapes.filter(e => e.fait).length;
+  const manquantes = pieces.filter(x => !x.ok);
+  return { etapes, pieces, faites, total: etapes.length, integre: faites === etapes.length, conforme: manquantes.length === 0, manquantes, dOffice: integrePartenaireAvantSuivi(p) };
+}
+
+function BadgeIntegration({ p }) {
+  const b = bilanIntegration(p);
+  if (!b.integre) return (
+    <span className="text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-full inline-flex items-center gap-1.5"
+      title="Intégration en cours — détail dans sa fiche (Voir)">
+      <span className="inline-flex gap-0.5">{b.etapes.map(e => <span key={e.id} className={`w-2 h-1.5 rounded-sm ${e.fait ? "bg-emerald-500" : "bg-gray-300"}`} />)}</span>
+      Intégration {b.faites}/{b.total}
+    </span>
+  );
+  if (!b.conforme) return (
+    <span className="text-xs font-semibold bg-red-50 text-red-700 border border-red-200 px-2 py-0.5 rounded-full"
+      title={b.manquantes.map(x => x.label).join(", ")}>
+      Dossier incomplet : {b.manquantes.map(x => x.id === "contrat" ? "contrat" : x.id === "rib" ? "RIB" : "annexe").join(", ")}
+    </span>
+  );
+  const fin = Math.max(0, ...b.etapes.map(e => e.date || 0));
+  if (!b.dOffice && fin && Date.now() - fin < 30 * 86400000) return (
+    <span className="text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">✓ Intégré</span>
+  );
+  return null;
+}
+
+function IntegrationPartenaire({ p, onUpdate, viewerLabel }) {
+  const b = bilanIntegration(p);
+  const [ouvert, setOuvert] = useState(!b.integre || !b.conforme);
+  const [pret, setPret] = useState(null);
+  const i = p.integration || {};
+  const marquer = (champ, valeur) => onUpdate(p.id, { integration: { ...i, [champ]: valeur } });
+  const concerne = annexeParrainageConcernee(p);
+
+  async function copier(type) {
+    const { corps } = type === "appli" ? messageAppliMobile(p) : messageInvitation(p, viewerLabel, "partenaire");
+    const ok = await copierRiche(messageEnHtml(corps), corps);
+    setPret(ok ? type : "echec");
+    setTimeout(() => setPret(null), 3500);
+    if (ok) marquer(type === "appli" ? "appliLe" : "bienvenueLe", Date.now());
+  }
+  const d = (t) => t ? new Date(t).toLocaleDateString("fr-FR") : "";
+
+  return (
+    <div className={`mb-4 rounded-xl border ${b.integre && b.conforme ? "border-emerald-200 bg-emerald-50/40" : "border-amber-200 bg-amber-50/40"}`}>
+      <button onClick={() => setOuvert(v => !v)} className="w-full flex items-center gap-2 flex-wrap px-4 py-3 text-left">
+        <span className="font-display font-semibold fa-navy text-sm">Intégration et dossier</span>
+        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${b.integre ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+          {b.integre ? (b.dOffice ? "intégré avant le suivi" : "intégration terminée") : `intégration ${b.faites}/${b.total}`}
+        </span>
+        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${b.conforme ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-700"}`}>
+          {b.conforme ? "dossier conforme" : `${b.manquantes.length} pièce${b.manquantes.length > 1 ? "s" : ""} manquante${b.manquantes.length > 1 ? "s" : ""}`}
+        </span>
+        <span className="text-[11px] text-gray-400">🔒 visible par Frangola uniquement</span>
+        <ChevronDown size={14} className={`ml-auto text-gray-400 transition ${ouvert ? "rotate-180" : ""}`} />
+      </button>
+      {ouvert && (
+        <div className="px-4 pb-4 grid md:grid-cols-2 gap-4">
+          <div>
+            <div className="text-xs font-bold fa-navy mb-1">Intégration</div>
+            <div className="h-1.5 rounded-full bg-gray-200 overflow-hidden mb-2">
+              <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${(b.faites / b.total) * 100}%` }} />
+            </div>
+            {b.etapes.map(e => (
+              <div key={e.id} className="flex items-start gap-2.5 py-2 border-t border-gray-200/70 first:border-t-0 text-sm">
+                <span className={`mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${e.fait ? "bg-emerald-500 border-emerald-500 text-white" : "border-gray-300 bg-white"}`}>
+                  {e.fait && <Check size={12} />}
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="fa-navy">{e.label}</span>
+                  <span className="block text-[11px] text-gray-500">
+                    {e.date ? `le ${d(e.date)}${e.copie ? " (message copié)" : ""}` : b.dOffice ? "partenaire déjà actif" : "à faire"}
+                    {e.annexe && !e.fait && <> · <button onClick={() => marquer("annexeConcernee", false)} className="underline hover:fa-teal-text">pas concerné</button></>}
+                  </span>
+                </span>
+                <span className="flex items-center gap-2 shrink-0">
+                  {e.copie && !e.fait && (
+                    <button onClick={() => copier(e.copie)}
+                      className="fa-tap text-xs font-semibold bg-white border border-gray-200 hover:border-teal-300 px-2.5 py-1 rounded-lg">
+                      {e.copie === "appli" ? "📱 Copier le message" : "✉ Copier le message"}
+                    </button>
+                  )}
+                  {e.id !== "acces" && (e.date ? (
+                    <button onClick={() => marquer(e.id, null)} className="fa-tap text-[11px] text-gray-400 hover:text-red-600">décocher</button>
+                  ) : e.fait ? null : (
+                    <button onClick={() => marquer(e.id, Date.now())}
+                      className="fa-tap text-xs font-semibold fa-teal-text hover:underline">{e.copie ? "marquer envoyé" : "Marquer comme envoyé"}</button>
+                  ))}
+                </span>
+              </div>
+            ))}
+            {!concerne && (
+              <div className="text-[11px] text-gray-400 mt-1">
+                Annexe parrainage : pas concernée.{" "}
+                <button onClick={() => marquer("annexeConcernee", true)} className="underline hover:fa-teal-text">Il parraine finalement</button>
+              </div>
+            )}
+            {pret && pret !== "echec" && <div className="text-xs text-emerald-700 mt-1">Message copié — colle-le dans Gmail ou WhatsApp.</div>}
+            {pret === "echec" && <div className="text-xs text-red-600 mt-1">Copie impossible — presse-papier bloqué par le navigateur.</div>}
+            <div className="text-[11px] text-gray-500 mt-2">
+              {p.lastLoginAt ? `1re connexion effectuée · dernière le ${d(p.lastLoginAt)}` : "Pas encore connecté à son espace."}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-bold fa-navy mb-1">Dossier conforme — pièces pour le payer</div>
+            {b.pieces.map(x => (
+              <div key={x.id} className="flex items-start gap-2.5 py-2 border-t border-gray-200/70 first:border-t-0 text-sm">
+                <span className={`mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${x.ok ? "bg-emerald-500 border-emerald-500 text-white" : "border-red-300 bg-white text-red-500"}`}>
+                  {x.ok ? <Check size={12} /> : <span className="text-[11px] font-bold">!</span>}
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className={x.ok ? "fa-navy" : "text-red-700 font-semibold"}>{x.label}</span>
+                  <span className="block text-[11px] text-gray-500">{x.detail}</span>
+                </span>
+              </div>
+            ))}
+            <div className="text-[11px] text-gray-400 mt-2">Ces pièces se déposent dans l'onglet « Contrat &amp; RIB » ci-dessous ; la case se coche d'elle-même.</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Qui, parmi les partenaires, utilise vraiment son espace : les plus récents
 // en tête, puis ceux qui ne se sont jamais connectés — ceux-là sont à relancer.
 function ConnexionsPartenaires({ partners }) {
@@ -10962,17 +11146,24 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               depuis: x.p.createdAt,
               aller: () => setTab("partenaires"),
             })),
-            ...(data.settings?.contratType
-              ? data.partners.filter(p => !p.deleted && p.email && !p.contratAccepteLe).map(p => ({
-                  cle: "c-" + p.id,
-                  categorie: "Contrat",
-                  couleur: "bg-red-100 text-red-800",
-                  titre: nomPartenaire(p),
-                  detail: "contrat de partenariat pas encore accepté",
-                  depuis: p.createdAt,
-                  aller: () => setTab("partenaires"),
-                }))
-              : []),
+            // Intégration inachevée ou pièces manquantes : une seule ligne par
+            // partenaire, qui dit exactement ce qui reste.
+            ...data.partners.filter(p => !p.deleted).map(p => ({ p, b: bilanIntegration(p) }))
+              .filter(x => !x.b.integre || !x.b.conforme)
+              .map(({ p, b }) => ({
+                cle: "int-" + p.id,
+                categorie: b.integre ? "Conformité" : "Intégration",
+                couleur: "bg-cyan-100 text-cyan-800",
+                titre: nomPartenaire(p),
+                detail: [
+                  !b.integre ? `${b.faites}/${b.total} — reste : ${b.etapes.filter(e => !e.fait).map(e => e.id === "contratEnvoyeLe" ? "contrat" : e.id === "annexeEnvoyeeLe" ? "annexe" : e.id === "bienvenueLe" ? "mail de bienvenue" : e.id === "appliLe" ? "mail appli" : "accès").join(", ")}` : null,
+                  !b.conforme ? `pièces manquantes : ${b.manquantes.map(x => x.id === "contrat" ? "contrat signé" : x.id === "rib" ? "RIB" : "annexe signée").join(", ")}` : null,
+                ].filter(Boolean).join(" · "),
+                depuis: dateEntreeDe(p) || p.createdAt,
+                aller: () => { navAdmin.ouvrirPartenaire(p); setViewingPartnerId(p.id); setViewingPartnerTab("analytique"); },
+              })),
+            // (Le contrat non signé est désormais signalé par la ligne
+            // « Conformité » ci-dessus, avec les autres pièces manquantes.)
             ...data.partners.filter(p => !p.deleted && !p.email).map(p => ({
               cle: "i-" + p.id,
               categorie: "Fiche",
@@ -12160,6 +12351,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                               🤝 Filleul de {nomParrain(p.parrainId)}
                             </span>
                           )}
+                          <BadgeIntegration p={p} />
                           {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                           {p.active !== false && daysSinceLastDossier(p) > INACTIVITY_DAYS && (
                             <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full">
@@ -12234,7 +12426,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             return <span className={c.teinte} title={c.jamais ? "" : c.long}>{c.jamais ? "jamais connecté" : `dernière connexion ${fmtDate(p.lastLoginAt)} à ${new Date(p.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })} (${c.court})`}</span>;
                           })()}
                         </span>
-                        <BlocAcces cible={p} expediteur={viewerLabel} telephone={viewerTelephone} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)} />
+                        <BlocAcces cible={p} expediteur={viewerLabel} telephone={viewerTelephone} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)}
+                          onMarquer={(champ) => onUpdatePartner(p.id, { integration: { ...(p.integration || {}), [champ]: Date.now() } })} />
                         {data.settings?.contratType && (
                           p.contratAccepteLe ? (
                             <span className="text-xs bg-emerald-50 border border-emerald-200 text-emerald-700 px-2.5 py-1 rounded-lg">
@@ -12301,6 +12494,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     const transformRateP = (pDossiers.length - ko.length) > 0 ? Math.round((paid.length / (pDossiers.length - ko.length)) * 100) : 0;
                     return (
                       <div className="mt-4 pt-4 border-t border-gray-100">
+                        <IntegrationPartenaire p={p} onUpdate={onUpdatePartner} viewerLabel={viewerLabel} />
                         <div className="flex gap-1.5 mb-4">
                           <button onClick={() => setViewingPartnerTab("analytique")}
                             className={`text-xs font-medium px-3 py-1.5 rounded-full transition ${viewingPartnerTab === "analytique" ? "fa-bg-teal" : "bg-gray-100 text-gray-600"}`}>
