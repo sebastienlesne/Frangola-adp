@@ -12919,6 +12919,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     );
   }
   const [fileToutVoir, setFileToutVoir] = useState(false);
+  const [tousReseaux, setTousReseaux] = useState(false);
   const [viewingPartnerId, setViewingPartnerId] = useState(null);
   // Fiches dont la liste des filleuls est dépliée (clic sur la pastille dorée).
   const [filleulsOuverts, setFilleulsOuverts] = useState(new Set());
@@ -15132,11 +15133,18 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           // déjà coûte moins cher que d'en défricher un nouveau.
           // Une seule ligne par enseigne : « Frangola » et « frangola » sont
           // le même réseau, et les compter deux fois fausse tout le tableau.
-          const topReseaux = groupesReseaux(data)
-            .map(g => ({ ...g, nom: g.cle === "__sans__" ? "Sans réseau" : g.nom }))
-            .filter(g => g.dossiers > 0 || g.partenaires > 0)
-            .sort((a, b) => b.dossiers - a.dossiers || b.partenaires - a.partenaires)
-            .slice(0, 6);
+          // Classés par chiffre d'affaires : c'est ce que rapporte une
+          // enseigne qui dit s'il faut y recruter, pas le nombre de dossiers.
+          // À égalité (les réseaux qui n'ont encore rien produit), le volume
+          // puis le nombre de partenaires départagent.
+          const tousGroupes = groupesReseaux(data).filter(g => g.dossiers > 0 || g.partenaires > 0);
+          // Les indépendants ne sont pas une enseigne : ils prendraient la
+          // première place sans qu'on puisse y recruter qui que ce soit. On
+          // les sort du classement et on les rappelle en dessous.
+          const sansReseau = tousGroupes.find(g => g.cle === "__sans__");
+          const reseauxClasses = tousGroupes.filter(g => g.cle !== "__sans__")
+            .sort((a, b) => b.ca - a.ca || b.dossiers - a.dossiers || b.partenaires - a.partenaires);
+          const topReseaux = tousReseaux ? reseauxClasses : reseauxClasses.slice(0, 10);
 
           const STATUS_BAR_COLORS = {
             "Déposé": "#F0C61A", "En vérification": "#0EA5E9", "Devis en cours": "#008BA8",
@@ -15465,9 +15473,16 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                         {reseauLogoFor(r.nom)
                           ? <img src={reseauLogoFor(r.nom).data} alt={r.nom} className="h-6 max-w-[70px] object-contain shrink-0" />
                           : <Building2 size={16} className="text-gray-300 shrink-0" />}
-                        <span className={`font-semibold ${r.nom === "Sans réseau" ? "text-gray-400" : "fa-navy"}`}>{r.nom}</span>
+                        <span className={`font-semibold ${r.nom === "Sans réseau" ? "text-gray-400" : "fa-navy"}`}>
+                          {r.nom}
+                          {r.variantes && r.variantes.length > 1 && (
+                            <span className="text-xs font-normal text-gray-400" title={`Écritures réunies : ${r.variantes.join(", ")}`}>
+                              {" "}({r.variantes.length} écritures)
+                            </span>
+                          )}
+                        </span>
                         <span className="text-xs text-gray-500">
-                          {r.partenaires} partenaire{r.partenaires > 1 ? "s" : ""} · {r.dossiers} dossier{r.dossiers > 1 ? "s" : ""}
+                          {masqueNb(r.partenaires)} partenaire{r.partenaires > 1 ? "s" : ""} · {masqueNb(r.dossiers)} dossier{r.dossiers > 1 ? "s" : ""}
                         </span>
                         <span className="ml-auto text-xs text-right">
                           <span className="fa-navy font-semibold">{fmtEuro(r.ca)}</span>
@@ -15477,8 +15492,27 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     ))}
                   </div>
                 )}
+                {sansReseau && (
+                  <div className="flex items-center gap-3 flex-wrap text-sm border border-dashed border-gray-200 rounded-lg px-3 py-2 mt-2">
+                    <Building2 size={16} className="text-gray-300 shrink-0" />
+                    <span className="font-semibold text-gray-400">Sans réseau</span>
+                    <span className="text-xs text-gray-400">
+                      {masqueNb(sansReseau.partenaires)} indépendant{sansReseau.partenaires > 1 ? "s" : ""} · {masqueNb(sansReseau.dossiers)} dossier{sansReseau.dossiers > 1 ? "s" : ""}
+                      {" "}— hors classement, il n'y a pas d'enseigne où recruter
+                    </span>
+                    <span className="ml-auto text-xs text-gray-500">{fmtEuro(sansReseau.ca)}</span>
+                  </div>
+                )}
+                {reseauxClasses.length > 10 && (
+                  <button onClick={() => setTousReseaux(v => !v)} className="text-xs fa-teal-text hover:underline mt-3">
+                    {tousReseaux
+                      ? "↑ Ne garder que les 10 premiers"
+                      : `Voir les ${reseauxClasses.length - 10} autres réseaux →`}
+                  </button>
+                )}
                 <p className="text-xs text-gray-400 mt-3">
-                  Les logos apparaissent dès que vous les déposez sur la fiche du réseau.
+                  Classement par chiffre d'affaires généré. Les logos apparaissent dès que vous les déposez
+                  sur la fiche du réseau.
                 </p>
               </div>
 
