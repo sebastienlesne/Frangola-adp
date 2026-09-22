@@ -159,6 +159,7 @@ const CATEGORIES_ADMIN = [
     id: "production", label: "Production", icone: "FileText",
     feuillets: [
       { id: "dossiers", label: "Dossiers" },
+      { id: "backoffice", label: "Back-office" },
       { id: "partenaires", label: "Partenaires" },
       { id: "analyses", label: "Analyses" },
       { id: "challenge", label: "Challenges" },
@@ -5960,14 +5961,14 @@ function MiniJaugeBackOffice({ dossier, large = "w-20" }) {
   );
 }
 
-function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy }) {
+function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefaut = false }) {
   const bo = backOfficeDe(dossier);
   const alerte = alerteBackOffice(dossier);
   const etapes = etapesBackOffice(dossier);
   const n = etapes.filter(e => e.fait).length;
   const demarre = suiviBanqueDemarre(dossier);
   const applicable = suiviBanqueApplicable(dossier);
-  const [ouvert, setOuvert] = useState(false);
+  const [ouvert, setOuvert] = useState(ouvertParDefaut);
   const [formOuvert, setFormOuvert] = useState(false);
   const [form, setForm] = useState({ type: "envoi", le: isoAujourdhui(), texte: "" });
   const [fichier, setFichier] = useState(null);
@@ -10469,6 +10470,194 @@ function IntegrationPartenaire({ p, onUpdate, viewerLabel }) {
   );
 }
 
+// Étape en cours d'un dossier dans le suivi : 1 à 5, ou 6 quand tout est fait.
+function etapeCouranteBO(d) {
+  const et = etapesBackOffice(d);
+  const i = et.findIndex(e => !e.fait);
+  return i < 0 ? 6 : i + 1;
+}
+
+// Onglet Production → Back-office : tous les dossiers entre souscription et
+// effet, filtrés par étape comme l'onglet Dossiers l'est par statut.
+function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
+  const [filtre, setFiltre] = useState("tous");
+  const [ouvertId, setOuvertId] = useState(null);
+  const [recherche, setRecherche] = useState("");
+  const maintenant = Date.now();
+  const nomDe = (id) => { const p = data.partners.find(x => x.id === id); return p ? nomPartenaire(p) : "—"; };
+
+  const suivis = data.dossiers.filter(d => suiviBanqueApplicable(d, maintenant))
+    .map(d => ({ d, etape: etapeCouranteBO(d), alerte: alerteBackOffice(d, maintenant) }));
+  // « En vigueur » : terminés dont l'effet date de moins de 60 jours — au-delà,
+  // ils n'ont plus rien à dire ici.
+  const enCours = suivis.filter(x => x.etape <= 5);
+  const recents = suivis.filter(x => x.etape === 6 && x.d.dateEffet && joursCalendairesDepuis(x.d.dateEffet, maintenant) <= 60);
+  const FILTRES = [
+    ["tous", "Tous", enCours],
+    ["1", "1 · Demande à envoyer", enCours.filter(x => x.etape === 1)],
+    ["2", "2 · En attente banque", enCours.filter(x => x.etape === 2)],
+    ["3", "3 · Avenant", enCours.filter(x => x.etape === 3)],
+    ["4", "4 · Résiliation à confirmer", enCours.filter(x => x.etape === 4)],
+    ["5", "5 · En vigueur", [...enCours.filter(x => x.etape === 5), ...recents]],
+    ["alerte", "⚠ En alerte", enCours.filter(x => x.alerte)],
+  ];
+  const q = recherche.trim().toLowerCase();
+  let lignes = (FILTRES.find(f => f[0] === filtre) || FILTRES[0])[2];
+  if (q) lignes = lignes.filter(x => `${x.d.clientFirstName} ${x.d.clientLastName} ${backOfficeDe(x.d).banque || ""}`.toLowerCase().includes(q));
+  lignes = [...lignes].sort((a, b) =>
+    (a.alerte ? a.alerte.tri : 9) - (b.alerte ? b.alerte.tri : 9)
+    || (a.d.dateEffet || "9999").localeCompare(b.d.dateEffet || "9999"));
+  const nbAlertes = enCours.filter(x => x.alerte).length;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="font-display text-xl font-semibold fa-navy">Back-office — de la souscription à la date d'effet</h1>
+        <p className="text-sm text-gray-500">{masqueNb(enCours.length)} dossier{enCours.length > 1 ? "s" : ""} en cours de mise en place · {masqueNb(nbAlertes)} en alerte. Un clic sur une ligne ouvre le suivi.</p>
+      </div>
+      <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
+        {FILTRES.map(([val, label, liste]) => {
+          const alerte = val !== "alerte" && val !== "tous" && liste.some(x => x.alerte);
+          return (
+            <button key={val} onClick={() => { setFiltre(val); setOuvertId(null); }}
+              className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition whitespace-nowrap shrink-0 ${filtre === val ? "fa-bg-teal" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"}`}>
+              {label}
+              <span className={`text-[10px] font-bold rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center ${filtre === val ? "bg-white/25" : "bg-gray-100 text-gray-500"}`}>{liste.length}</span>
+              {alerte && <span className="w-1.5 h-1.5 rounded-full bg-red-500" />}
+            </button>
+          );
+        })}
+      </div>
+      <input value={recherche} onChange={e => setRecherche(e.target.value)} placeholder="Rechercher un client ou une banque…"
+        className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+
+      {lignes.length === 0 ? (
+        <div className="text-center text-gray-400 text-sm py-12 border border-dashed border-gray-200 rounded-2xl">
+          {filtre === "alerte" ? "✅ Aucun dossier en alerte." : "Aucun dossier à cette étape."}
+        </div>
+      ) : (
+        <div className="bg-white border border-gray-200 rounded-2xl divide-y divide-gray-100">
+          {lignes.map(({ d, alerte }) => {
+            const bo = backOfficeDe(d);
+            const ouvert = ouvertId === d.id;
+            const t = alerte ? TEINTES_ALERTE_BO[alerte.niveau] : null;
+            return (
+              <div key={d.id}>
+                <button onClick={() => setOuvertId(ouvert ? null : d.id)}
+                  className="w-full text-left px-4 py-3 hover:bg-gray-50 transition grid grid-cols-2 sm:grid-cols-[1.3fr_1fr_1fr_110px_70px_2fr] gap-x-3 gap-y-1 items-center text-sm">
+                  <span className="font-bold fa-navy truncate">{clientName(d)}</span>
+                  <span className="text-gray-600 truncate text-xs sm:text-sm">{nomDe(d.partnerId)}</span>
+                  <span className="text-gray-500 truncate text-xs sm:text-sm">{bo.banque || "banque ?"}</span>
+                  <span><MiniJaugeBackOffice dossier={d} large="w-14" /></span>
+                  <span className="text-xs text-gray-500">{d.dateEffet ? fmtJourCourt(d.dateEffet) : "effet ?"}</span>
+                  <span className="col-span-2 sm:col-span-1 min-w-0">
+                    {alerte
+                      ? <span className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded-full ${t.tag}`}>{alerte.titre}</span>
+                      : <span className="text-xs text-gray-500">{(etapesBackOffice(d).find(e => !e.fait) || { label: "Terminé" }).label === "Terminé" ? "✓ En vigueur" : `En attente : ${etapesBackOffice(d).find(e => !e.fait).label.toLowerCase()}`}</span>}
+                  </span>
+                </button>
+                {ouvert && (
+                  <div className="px-4 pb-4 -mt-1">
+                    <SuiviBackOffice dossier={d} onUpdate={onUpdate} onUploadPiece={onUploadPiece} busy={busy} ouvertParDefaut />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Tableau d'intégration de l'Accueil : une ligne par partenaire à mettre en
+// ordre, les envois cliquables, les pièces en lecture.
+function TableauIntegration({ partners, onUpdatePartner, onOuvrir }) {
+  const [tout, setTout] = useState(false);
+  const LIMITE = 8;
+  const toutes = partners.filter(p => !p.deleted)
+    .map(p => ({ p, b: bilanIntegration(p) }))
+    .filter(x => !x.b.integre || !x.b.conforme)
+    .sort((a, b) => (dateEntreeDe(b.p) || 0) - (dateEntreeDe(a.p) || 0));
+  const lignes = tout ? toutes : toutes.slice(0, LIMITE);
+  if (toutes.length === 0) return <div className="text-sm text-gray-400 py-2">✅ Tous les partenaires sont intégrés et leur dossier est complet.</div>;
+  const COLS_ETAPES = [["acces", "Accès"], ["contratEnvoyeLe", "Contrat envoyé"], ["annexeEnvoyeeLe", "Annexe envoyée"], ["bienvenueLe", "Mail bienvenue"], ["appliLe", "Mail appli"]];
+  const COLS_PIECES = [["contrat", "Contrat signé"], ["rib", "RIB"], ["annexe", "Annexe signée"]];
+  const rond = "inline-flex w-5 h-5 rounded-full items-center justify-center text-[11px] font-bold";
+  const basculer = (p, champ, fait) => onUpdatePartner(p.id, { integration: { ...(p.integration || {}), [champ]: fait ? null : Date.now() } });
+  return (
+    <>
+      <div className="overflow-x-auto -mx-1 px-1">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-wide text-gray-400">
+              <th />
+              <th colSpan={5} className="font-semibold pb-0.5">Intégration</th>
+              <th colSpan={3} className="font-semibold pb-0.5 border-l-2 border-gray-200">Pièces au dossier</th>
+              <th />
+            </tr>
+            <tr className="text-[10.5px] text-gray-400 align-bottom">
+              <th className="text-left font-semibold py-1.5 pr-2">Partenaire</th>
+              {COLS_ETAPES.map(([k, l]) => <th key={k} className="font-semibold px-1 py-1.5 leading-tight">{l}</th>)}
+              {COLS_PIECES.map(([k, l], i) => <th key={k} className={`font-semibold px-1 py-1.5 leading-tight ${i === 0 ? "border-l-2 border-gray-200" : ""}`}>{l}</th>)}
+              <th className="font-semibold px-1 py-1.5">Reste</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lignes.map(({ p, b }) => {
+              const reste = b.etapes.filter(e => !e.fait).length + b.manquantes.length;
+              return (
+                <tr key={p.id} className="border-t border-gray-100">
+                  <td className="py-2 pr-2 text-left">
+                    <button onClick={() => onOuvrir(p)} className="font-bold fa-navy hover:fa-teal-text hover:underline text-left text-[13px] leading-tight">{nomPartenaire(p)}</button>
+                    <span className="block text-[11px] text-gray-400">{b.integre ? (b.dOffice ? "actif avant le suivi" : "intégré") : joursDepuis(dateEntreeDe(p))}</span>
+                  </td>
+                  {COLS_ETAPES.map(([k, l]) => {
+                    const e = b.etapes.find(x => x.id === k);
+                    if (!e) return <td key={k} className="text-center text-gray-300">—</td>;
+                    const cliquable = k !== "acces" && !b.dOffice;
+                    return (
+                      <td key={k} className="text-center px-1">
+                        <button disabled={!cliquable} onClick={() => basculer(p, k, !!e.date)}
+                          title={cliquable ? (e.date ? `Fait le ${fmtDate(e.date)} — cliquer pour décocher` : `Marquer « ${l} » comme fait`) : ""}
+                          className={`${rond} ${e.fait ? "bg-emerald-500 text-white" : "border-2 border-gray-300 hover:border-teal-500"} disabled:cursor-default`}>
+                          {e.fait ? "✓" : ""}
+                        </button>
+                      </td>
+                    );
+                  })}
+                  {COLS_PIECES.map(([k], i) => {
+                    const x = b.pieces.find(y => y.id === k);
+                    return (
+                      <td key={k} className={`text-center px-1 ${i === 0 ? "border-l-2 border-gray-200" : ""}`}>
+                        {!x ? <span className="text-gray-300">—</span>
+                          : <button onClick={() => onOuvrir(p)} title={x.detail}
+                              className={`${rond} ${x.ok ? "bg-emerald-500 text-white" : "border-2 border-red-300 bg-red-50 text-red-600"}`}>{x.ok ? "✓" : "!"}</button>}
+                      </td>
+                    );
+                  })}
+                  <td className="text-center px-1"><span title={`${reste} chose${reste > 1 ? "s" : ""} à faire`} className="inline-flex min-w-[22px] h-[22px] px-1.5 rounded-full items-center justify-center text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200">{reste}</span></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {toutes.length > LIMITE && (
+        <button onClick={() => setTout(v => !v)} className="text-xs fa-teal-text hover:underline mt-1">
+          {tout ? "Réduire" : `Voir les ${toutes.length - LIMITE} autres partenaires →`}
+        </button>
+      )}
+      <div className="flex flex-wrap gap-3 text-[11px] text-gray-500 mt-2 items-center">
+        <span className="inline-flex items-center gap-1"><span className={`${rond} bg-emerald-500 text-white`}>✓</span> fait</span>
+        <span className="inline-flex items-center gap-1"><span className={`${rond} border-2 border-gray-300`} /> envoi à faire (cliquer pour cocher)</span>
+        <span className="inline-flex items-center gap-1"><span className={`${rond} border-2 border-red-300 bg-red-50 text-red-600`}>!</span> pièce manquante</span>
+        <span className="inline-flex items-center gap-1"><span className="text-gray-300">—</span> pas concerné</span>
+      </div>
+    </>
+  );
+}
+
 // Qui, parmi les partenaires, utilise vraiment son espace : les plus récents
 // en tête, puis ceux qui ne se sont jamais connectés — ceux-là sont à relancer.
 function ConnexionsPartenaires({ partners }) {
@@ -10991,6 +11180,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           };
           const alerteFeuillet = {
             dossiers: newDeposits,
+            backoffice: liveDossiers.filter(d => alerteBackOffice(d)).length,
             partenaires: actionsPartenaires,
             facturation: nbFactures,
             corbeille: nbCorbeille,
@@ -11221,37 +11411,86 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </div>
               </div>
 
-              {fileAttente.length > 0 ? (
-                <div className="border border-red-200 bg-red-50 rounded-2xl p-4">
-                  <div className="flex items-center gap-2 font-display font-semibold text-red-800 mb-1">
-                    <AlertCircle size={16} /> {fileAttente.length} chose{fileAttente.length > 1 ? "s" : ""} à traiter
+              {(() => {
+                // Deux blocs : ce qui touche un client, ce qui touche un
+                // partenaire. Le tableau d'intégration remplace les lignes
+                // « Intégration / Conformité » de l'ancienne liste unique.
+                const itemsDossiers = fileAttente.filter(x => x.cle.startsWith("d-"));
+                const itemsParrainages = fileAttente.filter(x => x.cle.startsWith("p-"));
+                const itemsPaiements = fileAttente.filter(x => x.cle.startsWith("f-") || x.cle.startsWith("v-"));
+                const itemsFiches = fileAttente.filter(x => x.cle.startsWith("i-"));
+                const alertesBO = liveDossiers.map(d => ({ d, a: alerteBackOffice(d) })).filter(x => x.a)
+                  .sort((x, y) => x.a.tri - y.a.tri || x.a.depuis - y.a.depuis);
+                const nbPartenaires = data.partners.filter(p => !p.deleted).map(bilanIntegration).filter(b => !b.integre || !b.conforme).length;
+                const Groupe = ({ titre, children }) => (
+                  <div className="mt-3 first:mt-0">
+                    <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">{titre}</div>
+                    {children}
                   </div>
-                  <div className="text-xs text-red-700/70 mb-3">La plus ancienne en premier.</div>
-                  <div className="space-y-1.5">
-                    {fileAttente.slice(0, fileToutVoir ? fileAttente.length : 8).map(item => (
-                      <button key={item.cle} onClick={item.aller}
-                        className="w-full text-left text-sm bg-white hover:bg-red-100/50 border border-red-100 rounded-lg px-3 py-2 transition flex items-center gap-2 flex-wrap">
-                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${item.couleur}`}>{item.categorie}</span>
-                        <span className="fa-navy font-bold">{item.titre}</span>
-                        <span className="text-red-700 text-xs">{item.detail}</span>
-                        <span className="ml-auto text-xs text-gray-400 shrink-0">{joursDepuis(item.depuis)}</span>
-                      </button>
-                    ))}
-                  </div>
-                  {fileAttente.length > 8 && (
-                    <button onClick={() => setFileToutVoir(v => !v)} className="text-xs fa-teal-text hover:underline mt-3">
-                      {fileToutVoir ? "Réduire la liste" : `Voir les ${fileAttente.length - 8} autres →`}
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="text-center text-gray-400 text-sm py-8 border border-dashed border-gray-200 rounded-2xl">
-                  ✅ Rien ne nécessite d'action pour l'instant.
-                </div>
-              )}
+                );
+                const Ligne = ({ item }) => (
+                  <button onClick={item.aller}
+                    className="w-full text-left text-sm bg-white hover:bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 mb-1.5 transition flex items-center gap-2.5">
+                    <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
+                    <span className="flex-1 min-w-0">
+                      <span className="block fa-navy font-bold truncate">{item.titre}</span>
+                      <span className="block text-red-700 text-xs">{item.detail}</span>
+                    </span>
+                    <span className="text-[11px] text-gray-400 shrink-0">{joursDepuis(item.depuis)}</span>
+                  </button>
+                );
+                const Vide = ({ children }) => <div className="text-sm text-gray-400 py-1">{children}</div>;
+                const ouvrirPartenaire = (p) => { navAdmin.ouvrirPartenaire(p); setViewingPartnerId(p.id); setViewingPartnerTab("analytique"); };
+                return (
+                  <div className="grid lg:grid-cols-[1fr_1.4fr] gap-4 items-start">
+                    <div className="bg-white border border-gray-200 rounded-2xl p-4 min-w-0">
+                      <div className="flex items-center gap-2 font-display font-semibold fa-navy">
+                        📁 Dossiers à traiter
+                        <span className={`text-xs font-bold rounded-full min-w-[22px] h-[22px] px-1.5 flex items-center justify-center ${itemsDossiers.length + alertesBO.length ? "bg-red-50 text-red-700" : "bg-gray-100 text-gray-500"}`}>{masqueNb(itemsDossiers.length + alertesBO.length)}</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mb-3">Ce qui attend une action sur un client. Le plus ancien en premier.</p>
+                      <Groupe titre="À vérifier / en retard">
+                        {itemsDossiers.length === 0 ? <Vide>✅ Rien en attente.</Vide> : (<>
+                          {itemsDossiers.slice(0, fileToutVoir ? itemsDossiers.length : 6).map(item => <Ligne key={item.cle} item={item} />)}
+                          {itemsDossiers.length > 6 && (
+                            <button onClick={() => setFileToutVoir(v => !v)} className="text-xs fa-teal-text hover:underline">
+                              {fileToutVoir ? "Réduire" : `Voir les ${itemsDossiers.length - 6} autres →`}
+                            </button>
+                          )}
+                        </>)}
+                      </Groupe>
+                      <Groupe titre="Back-office banque">
+                        {alertesBO.length === 0 ? <Vide>✅ Aucun dossier bloqué côté banque.</Vide> : (<>
+                          {alertesBO.slice(0, 3).map(({ d, a }) => (
+                            <Ligne key={d.id} item={{ cle: d.id, titre: clientName(d), detail: a.titre, depuis: a.depuis, aller: () => setTab("backoffice") }} />
+                          ))}
+                          <button onClick={() => setTab("backoffice")} className="text-xs fa-teal-text hover:underline">
+                            Ouvrir l'onglet Back-office{alertesBO.length > 3 ? ` (${alertesBO.length} en alerte)` : ""} →
+                          </button>
+                        </>)}
+                      </Groupe>
+                    </div>
 
-              <BackOfficeARelancer dossiers={liveDossiers} nomDuPartenaire={nomPartenaireParId}
-                onOuvrir={d => { setDossierFilter("tous"); setDossierSearch(`${d.clientFirstName} ${d.clientLastName}`); setTab("dossiers"); }} />
+                    <div className="bg-white border border-gray-200 rounded-2xl p-4 min-w-0">
+                      <div className="flex items-center gap-2 font-display font-semibold fa-navy">
+                        🤝 Partenaires à mettre en ordre
+                        <span className={`text-xs font-bold rounded-full min-w-[22px] h-[22px] px-1.5 flex items-center justify-center ${nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length ? "bg-cyan-50 text-cyan-800" : "bg-gray-100 text-gray-500"}`}>{masqueNb(nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length)}</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mb-3">Intégration et pièces au dossier. Un clic sur un nom ouvre sa fiche.</p>
+                      <TableauIntegration partners={data.partners} onUpdatePartner={onUpdatePartner} onOuvrir={ouvrirPartenaire} />
+                      {itemsFiches.length > 0 && (
+                        <Groupe titre="Fiches à compléter">{itemsFiches.map(item => <Ligne key={item.cle} item={item} />)}</Groupe>
+                      )}
+                      <Groupe titre="Parrainages à valider">
+                        {itemsParrainages.length === 0 ? <Vide>Aucune déclaration en attente.</Vide> : itemsParrainages.map(item => <Ligne key={item.cle} item={item} />)}
+                      </Groupe>
+                      <Groupe titre="À payer aux partenaires">
+                        {itemsPaiements.length === 0 ? <Vide>Aucune facture ni rétrocession de parrainage en attente.</Vide> : itemsPaiements.map(item => <Ligne key={item.cle} item={item} />)}
+                      </Groupe>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <button onClick={() => setTab("dossiers")} className="fa-bg-teal text-sm font-medium px-5 py-2.5 rounded-lg transition">
                 Voir tous les dossiers →
@@ -11259,6 +11498,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             </div>
           );
         })()}
+
+        {tab === "backoffice" && (
+          <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} />
+        )}
 
         {tab === "dossiers" && (
           <div className="space-y-4">
