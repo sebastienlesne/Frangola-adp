@@ -7146,31 +7146,6 @@ function souscritsSurPeriode(dossiers, partnerId, debut, fin) {
 // celui qu'on veut, et les autres restent invisibles des partenaires. Le champ
 // historique `challengePartenaires` (un seul challenge) est conservé et relu en
 // tête de liste, pour ne pas perdre celui qui tourne peut-être déjà.
-// Opérations préfabriquées : le gros du travail, c'est de se décider, pas de
-// remplir le formulaire. On propose donc des coups tout montés — titre, durée,
-// bonus — que l'on retouche avant de publier. Rien n'est publié tout seul :
-// un challenge naît toujours en brouillon.
-const MODELES_OPERATION = [
-  { id: "bf", titre: "BLACK FRIDAY", type: "boost", bonusMode: "pourcent", bonusValeur: 10, jours: 4,
-    aide: "4 jours, +10 % de commission" },
-  { id: "we", titre: "WEEK-END DE FOLIE", type: "boost", bonusMode: "pourcent", bonusValeur: 15, jours: 3,
-    aide: "3 jours, +15 % de commission" },
-  { id: "3j", titre: "3 JOURS DE FOU", type: "boost", bonusMode: "pourcent", bonusValeur: 20, jours: 3,
-    aide: "3 jours, +20 % de commission" },
-  { id: "mois", titre: "OBJECTIF DU MOIS", type: "objectif", objectif: 5, jours: 30,
-    aide: "30 jours, 5 dossiers à décrocher" },
-];
-// Le prochain vendredi (ou aujourd'hui si on y est) : un coup de trois jours
-// se lance un vendredi, pas un mardi.
-function prochainVendredi(depuis = new Date()) {
-  const d = new Date(depuis.getFullYear(), depuis.getMonth(), depuis.getDate());
-  d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7));
-  return d;
-}
-function isoJour(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
 const ID_CHALLENGE_INITIAL = "challenge-initial";
 function challengesDe(data) {
   const ancien = data?.settings?.challengePartenaires;
@@ -8795,7 +8770,60 @@ function CoutChallenges({ data }) {
 // garde la part du mandataire, un mandataire la prend. C'est du simple au
 // double, et l'arbitrage n'est pas le même.
 // =============================================================================
-const RYTHMES_PROJECTION = [1, 1.5, 2, 3];
+// Repères de cadence, quand le réseau est trop jeune pour en fournir de
+// mesurés. Ce sont des chiffres d'école, et ils sont annoncés comme tels.
+const RYTHMES_PAR_DEFAUT = [1, 1.5, 2, 3];
+// En dessous, une distribution ne veut rien dire : cinq producteurs, c'est le
+// minimum pour qu'une médiane et un quartile aient un sens.
+const MIN_PRODUCTEURS_RYTHME = 5;
+
+// La cadence réelle du réseau, en dossiers gagnés par mois. On ne retient que
+// les partenaires qui PRODUISENT : inclure ceux qui n'ont jamais rien envoyé
+// écraserait la médiane à zéro et la table ne dirait plus rien. On écarte
+// aussi les arrivants de moins de deux mois, dont le taux est un artefact —
+// un dossier la première semaine ne fait pas une cadence de quatre par mois.
+function rythmesReseau(data, maintenant = Date.now()) {
+  const parPartenaire = new Map();
+  for (const d of (data?.dossiers || [])) {
+    if (!STATUTS_CONTRAT_VIVANT.includes(d.status)) continue;
+    parPartenaire.set(d.partnerId, (parPartenaire.get(d.partnerId) || 0) + 1);
+  }
+  const taux = [];
+  for (const p of (data?.partners || [])) {
+    if (p.deleted) continue;
+    const entree = dateEntreeDe(p);
+    if (!entree) continue;
+    const mois = (maintenant - entree) / MOIS_MS;
+    if (mois < 2) continue;
+    const gagnes = parPartenaire.get(p.id) || 0;
+    if (gagnes === 0) continue;
+    taux.push(gagnes / mois);
+  }
+  if (taux.length < MIN_PRODUCTEURS_RYTHME) {
+    return {
+      mesure: false, nbProducteurs: taux.length,
+      rythmes: RYTHMES_PAR_DEFAUT.map(v => ({ valeur: v, libelle: `${String(v).replace(".", ",")} / mois` })),
+    };
+  }
+  taux.sort((a, b) => a - b);
+  const quantile = (q) => taux[Math.min(taux.length - 1, Math.round(q * (taux.length - 1)))];
+  const fmt = (v) => `${v.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} / mois`;
+  const points = [
+    { valeur: quantile(0.25), libelle: fmt(quantile(0.25)), note: "quart le plus lent" },
+    { valeur: quantile(0.50), libelle: fmt(quantile(0.50)), note: "médiane" },
+    { valeur: quantile(0.75), libelle: fmt(quantile(0.75)), note: "meilleur quart" },
+    { valeur: taux[taux.length - 1], libelle: fmt(taux[taux.length - 1]), note: "meilleur partenaire" },
+  ];
+  // Deux repères identiques n'apprennent rien : on les fond en un seul.
+  const uniques = [];
+  for (const x of points) {
+    if (x.valeur <= 0) continue;
+    const jumeau = uniques.find(y => Math.abs(y.valeur - x.valeur) < 0.05);
+    if (jumeau) jumeau.note = `${jumeau.note} et ${x.note}`;
+    else uniques.push({ ...x });
+  }
+  return { mesure: true, nbProducteurs: taux.length, rythmes: uniques };
+}
 function projectionChallenge(data, objectif, cout) {
   const obj = Math.max(1, Number(objectif) || 1);
   const prix = Math.max(0, Number(cout) || 0);
@@ -8818,13 +8846,19 @@ function projectionChallenge(data, objectif, cout) {
   };
   return {
     objectif: obj, cout: prix, taux, caMoyen,
+    nbVivants: vivants.length, seuilMoyenne: SEUIL_RECUL_CHALLENGE,
     plancher: CA_MINIMUM_REFERENCE,
     seul: ligne(CA_MINIMUM_REFERENCE, false),
     mandataire: ligne(CA_MINIMUM_REFERENCE, true),
     moyenSeul: caMoyen ? ligne(caMoyen, false) : null,
     moyenMandataire: caMoyen ? ligne(caMoyen, true) : null,
-    // Temps nécessaire selon le rythme du partenaire, en mois.
-    rythmes: RYTHMES_PROJECTION.map(r => ({ rythme: r, mois: obj / r })),
+    // Temps nécessaire selon la cadence, mesurée sur le réseau quand il y a
+    // de quoi la mesurer.
+    ...(() => {
+      const ref = rythmesReseau(data);
+      return { mesureRythme: ref.mesure, nbProducteurs: ref.nbProducteurs,
+        rythmes: ref.rythmes.map(r => ({ ...r, rythme: r.valeur, mois: obj / r.valeur })) };
+    })(),
   };
 }
 // « 4 mois », « 3 mois et demi », « 18 jours » — on ne sert jamais 3,67 mois.
@@ -8841,10 +8875,24 @@ function dureeLisible(mois) {
 function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
   const pr = projectionChallenge(data, objectif, cout);
   const duree = Number(dureeMois) > 0 ? Number(dureeMois) : null;
-  const Rang = ({ t, v, fort }) => (
-    <div className={`flex items-baseline justify-between gap-3 ${fort ? "font-bold" : ""}`}>
+  // Deux questions différentes, deux bases de calcul. Le plancher répond à
+  // « est-ce que je peux perdre » — c'est le test de sécurité, et c'est le
+  // défaut. Le panier moyen répond à « qu'est-ce que je vais gagner ».
+  const [base, setBase] = useState("plancher");
+  const moyenneDispo = pr.caMoyen !== null;
+  const surMoyenne = base === "moyenne" && moyenneDispo;
+  const colSeul = surMoyenne ? pr.moyenSeul : pr.seul;
+  const colMand = surMoyenne ? pr.moyenMandataire : pr.mandataire;
+  const perdant = pr.cout > 0 && colMand.gain < 0;
+  // Le test de sécurité ne disparaît jamais : même en regardant la moyenne,
+  // on est prévenu si le plancher est perdant.
+  const plancherPerdant = pr.cout > 0 && pr.mandataire.gain < 0;
+  // Un chiffre qui part dans le rouge doit se voir sans être lu : c'est tout
+  // l'objet du test de sécurité.
+  const Rang = ({ t, v, fort, rouge }) => (
+    <div className={`flex items-baseline justify-between gap-3 ${fort ? "font-bold" : ""} ${rouge ? "text-red-700" : ""}`}>
       <span className="min-w-0">{t}</span>
-      <span className="whitespace-nowrap tabular-nums">{v}</span>
+      <span className={`whitespace-nowrap tabular-nums ${rouge ? "font-bold" : ""}`}>{v}</span>
     </div>
   );
 
@@ -8854,24 +8902,52 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
       <Rang t="Honoraires du dossier" v={fmtEuro(l.ca)} />
       <Rang t={`− rétrocession apporteur (${Math.round(pr.taux * 100)} %)`} v={`−${fmtEuro(l.retro)}`} />
       <Rang t="− part mandataire" v={l.mand > 0 ? `−${fmtEuro(l.mand)}` : "0 €"} />
-      <div className="border-t border-emerald-200 mt-1 pt-1">
+      <div className={`border-t mt-1 pt-1 ${perdant ? "border-red-200" : "border-emerald-200"}`}>
         <Rang t="Net Frangola / dossier" v={fmtEuro(l.net)} fort />
       </div>
       {pr.cout > 0 && (
+        // Une récompense qui ne serait couverte qu'au-delà de l'objectif n'est
+        // jamais couverte : l'opération se termine avant.
         <Rang t={`Les ${fmtEuro(pr.cout)} sont récoltés au`}
-          v={l.couvertAu ? `${l.couvertAu}${l.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné` : "—"} />
+          v={l.couvertAu ? `${l.couvertAu}${l.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné` : "—"}
+          rouge={!l.couvertAu || l.couvertAu > pr.objectif} />
       )}
-      <Rang t={`Sur les ${pr.objectif} dossiers`} v={`${l.gain >= 0 ? "+" : ""}${fmtEuro(l.gain)}`} />
+      <Rang t={`Sur les ${pr.objectif} dossiers`} v={`${l.gain >= 0 ? "+" : ""}${fmtEuro(l.gain)}`}
+        rouge={l.gain < 0} />
     </div>
   );
   return (
-    <div className="mt-2 text-xs rounded-xl px-3 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-900">
-      <div className="font-bold uppercase tracking-wide text-[10px] mb-2 opacity-80">
-        {titre || `Projection — au plancher de ${fmtEuro(pr.plancher)} d'honoraires`}
+    <div className={`mt-2 text-xs rounded-xl px-3 py-2.5 border ${perdant
+      ? "bg-red-50 border-red-200 text-red-900"
+      : "bg-emerald-50 border-emerald-200 text-emerald-900"}`}>
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
+        <div className="font-bold uppercase tracking-wide text-[10px] opacity-80">
+          {perdant ? "⚠ " : ""}
+          {titre || "Projection"}
+          {" — "}{surMoyenne ? `à votre panier moyen de ${fmtEuro(pr.caMoyen)}` : `au plancher de ${fmtEuro(pr.plancher)} d'honoraires`}
+        </div>
+        <div className="flex gap-1 shrink-0">
+          {[["plancher", `Plancher ${fmtEuro(pr.plancher)}`, true],
+            ["moyenne", moyenneDispo ? `Panier moyen ${fmtEuro(pr.caMoyen)}` : "Panier moyen", moyenneDispo]].map(([v, lib, dispo]) => (
+            <button key={v} onClick={() => dispo && setBase(v)} disabled={!dispo}
+              title={dispo ? undefined : `Disponible à partir de ${pr.seuilMoyenne} dossiers gagnés avec un montant — vous en avez ${pr.nbVivants}.`}
+              className={`text-[10.5px] font-bold px-2 py-1 rounded-full border transition disabled:opacity-40 disabled:cursor-default
+                ${base === v && dispo ? "bg-slate-800 text-white border-transparent" : "bg-white/70 border-current/20 text-current hover:border-current/50"}`}>
+              {lib}
+            </button>
+          ))}
+        </div>
       </div>
+      {!moyenneDispo && pr.cout > 0 && (
+        <p className="text-[11px] opacity-70 mb-2">
+          Panier moyen indisponible : <strong>{pr.nbVivants} dossier{pr.nbVivants > 1 ? "s" : ""} gagné{pr.nbVivants > 1 ? "s" : ""}</strong> avec
+          un montant d'honoraires, il en faut {pr.seuilMoyenne}. En dessous, une moyenne ne veut rien dire — un seul
+          gros dossier la ferait doubler.
+        </p>
+      )}
       <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
-        <Col l={pr.seul} label="Dossier que vous suivez vous-même" />
-        <Col l={pr.mandataire} label="Dossier suivi par un mandataire" />
+        <Col l={colSeul} label="Dossier que vous suivez vous-même" />
+        <Col l={colMand} label="Dossier suivi par un mandataire" />
       </div>
 
       {pr.cout > 0 && (
@@ -8882,24 +8958,36 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
                 les suivants sont du bénéfice net, <strong>la perte est impossible</strong>.</>
             : <span className="text-amber-900">Attention : à cet objectif, la récompense coûte plus cher qu'elle ne rapporte. Il faut viser
                 au moins <strong>{pr.mandataire.couvertAu || "—"} dossiers</strong> pour rentrer dans vos frais.</span>}
-          {pr.caMoyen && pr.moyenMandataire && (
-            <> À votre panier moyen réel de <strong>{fmtEuro(pr.caMoyen)}</strong>, le net passe à {fmtEuro(pr.moyenMandataire.net)} par
-              dossier et la récompense est couverte dès le <strong>{pr.moyenMandataire.couvertAu}{pr.moyenMandataire.couvertAu > 1 ? "ᵉ" : "ᵉʳ"}</strong>.</>
-          )}
+          {surMoyenne
+            ? (plancherPerdant
+                ? <span className="text-red-700"> Au plancher de {fmtEuro(pr.plancher)} elle est perdante : la moyenne
+                    la sauve, mais chaque dossier au minimum vous coûtera de l'argent.</span>
+                : <> Au plancher de {fmtEuro(pr.plancher)}, elle reste gagnante — le test de sécurité passe.</>)
+            : (pr.caMoyen && pr.moyenMandataire
+                ? <> À votre panier moyen réel de <strong>{fmtEuro(pr.caMoyen)}</strong>, le net passe à {fmtEuro(pr.moyenMandataire.net)} par
+                    dossier et la récompense est couverte dès le <strong>{pr.moyenMandataire.couvertAu}{pr.moyenMandataire.couvertAu > 1 ? "ᵉ" : "ᵉʳ"}</strong>.</>
+                : null)}
           {" "}La commission récurrente s'ajoute par-dessus — elle n'est jamais rétrocédée à l'apporteur.
         </p>
       )}
 
-      <div className="mt-2.5 pt-2 border-t border-emerald-200">
+      <div className={`mt-2.5 pt-2 border-t ${perdant ? "border-red-200" : "border-emerald-200"}`}>
         <div className="font-bold uppercase tracking-wide text-[10px] mb-1 opacity-80">
           Temps nécessaire pour {pr.objectif} dossier{pr.objectif > 1 ? "s" : ""} gagné{pr.objectif > 1 ? "s" : ""}
+          <span className="font-normal normal-case tracking-normal opacity-70">
+            {pr.mesureRythme
+              ? ` — cadences mesurées sur vos ${pr.nbProducteurs} partenaires qui produisent`
+              : ` — cadences d'école : ${pr.nbProducteurs} partenaire${pr.nbProducteurs > 1 ? "s" : ""} qui produit${pr.nbProducteurs > 1 ? "sent" : ""}, il en faut ${MIN_PRODUCTEURS_RYTHME} pour les mesurer chez vous`}
+          </span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-          {pr.rythmes.map(({ rythme, mois }) => {
+          {pr.rythmes.map(({ rythme, mois, libelle, note }) => {
             const tenable = duree === null || mois <= duree + 0.001;
             return (
-              <div key={rythme} className={`rounded-lg px-2 py-1.5 border ${tenable ? "bg-white/70 border-emerald-200" : "bg-red-50 border-red-200"}`}>
-                <div className="opacity-70 text-[10px]">{String(rythme).replace(".", ",")} dossier{rythme > 1 ? "s" : ""} / mois</div>
+              <div key={`${rythme}-${note || ""}`} className={`rounded-lg px-2 py-1.5 border ${tenable ? (perdant ? "bg-white/70 border-red-200" : "bg-white/70 border-emerald-200") : "bg-red-50 border-red-300"}`}>
+                <div className="opacity-70 text-[10px]">
+                  {libelle}{note ? <span className="opacity-70"> · {note}</span> : null}
+                </div>
                 <div className={`font-bold ${tenable ? "" : "text-red-700"}`}>{dureeLisible(mois)}</div>
               </div>
             );
@@ -8913,9 +9001,10 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
                 if (tenables.length === 0) return <span className="text-red-700">Aucun rythme réaliste ne tient dans {dureeLisible(duree)} : l'objectif est hors de portée, baissez-le ou allongez le délai.</span>;
                 // Le rythme le plus LENT qui tient : c'est le minimum à
                 // demander, pas le plus rapide.
-                const mini = tenables[0].rythme;
-                return <>Dans {dureeLisible(duree)}, il faut tenir <strong>{String(mini).replace(".", ",")} dossier{mini > 1 ? "s" : ""} par mois</strong>.
-                  {tenables.length === pr.rythmes.length ? " Tous les rythmes y arrivent." : ` Les rythmes plus lents n'y arrivent pas.`}</>;
+                const mini = tenables[0];
+                return <>Dans {dureeLisible(duree)}, il faut tenir <strong>{mini.libelle}</strong>
+                  {mini.note ? <> — le niveau de votre {mini.note}</> : null}.
+                  {tenables.length === pr.rythmes.length ? " Toutes vos cadences y arrivent." : " Les cadences plus lentes n'y arrivent pas."}</>;
               })()}
         </p>
       </div>
@@ -9233,7 +9322,7 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
         objectif={b ? (b.paliers[b.paliers.length - 1]?.objectif || 1) : dernier.objectif}
         cout={b ? b.paliers.reduce((sum, x) => sum + (Number(x.coutRecompense) || 0), 0) : coutTotal}
         dureeMois={b ? b.delaiMois : r.delaiMois}
-        titre={`Projection sur le parcours complet — ${paliers.length} palier${paliers.length > 1 ? "s" : ""}, au plancher de ${fmtEuro(CA_MINIMUM_REFERENCE)} d'honoraires`} />
+        titre={`Projection sur le parcours complet — ${paliers.length} palier${paliers.length > 1 ? "s" : ""}`} />
 
       {/* --------------------------------------------------------- la liste */}
       <input value={rech} onChange={e => setRech(e.target.value)}
@@ -9294,23 +9383,6 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
   const defautDebut = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
   const defautFin = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
 
-  // Ouvre le formulaire prérempli d'après un modèle. Tout reste modifiable :
-  // c'est un point de départ, pas une décision.
-  function ouvrirModele(m) {
-    const debut = m.jours <= 4 ? prochainVendredi() : new Date();
-    const fin = new Date(debut); fin.setDate(fin.getDate() + m.jours - 1);
-    setB({
-      titre: m.titre,
-      type: m.type === "boost" ? TYPE_BOOST : TYPE_OBJECTIF,
-      objectif: m.objectif ?? 3, recompense: "", coutRecompense: "",
-      cible: "tous", participants: {},
-      bonusMode: m.bonusMode || "pourcent", bonusValeur: m.bonusValeur ?? 10,
-      cumulBienvenue: m.type === "boost",
-      debut: isoJour(debut), fin: isoJour(fin),
-    });
-    setRechPart("");
-    setEdition("nouveau");
-  }
   function ouvrirNouveau() {
     setB({
       titre: `Challenge ${now.toLocaleDateString("fr-FR", { month: "long" })}`,
@@ -9646,7 +9718,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
           return <ProjectionChallenge data={data} objectif={Math.max(1, Math.round(objMoyen))}
             cout={b.coutRecompense} dureeMois={dureeMois}
             titre={cible === "selection"
-              ? `Projection par partenaire — objectif moyen de ${Math.max(1, Math.round(objMoyen))} dossiers, au plancher de ${fmtEuro(CA_MINIMUM_REFERENCE)}`
+              ? `Projection par partenaire — objectif moyen de ${Math.max(1, Math.round(objMoyen))} dossiers`
               : undefined} />;
         })()}
 
@@ -9695,19 +9767,6 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
         l'espace des partenaires qu'une fois <strong className="fa-navy">publié</strong>, et seulement
         pendant sa période.
       </p>
-
-      {canEdit && edition === null && (
-        <div className="flex flex-wrap items-center gap-1.5 mb-3">
-          <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mr-1">Coups tout montés</span>
-          {MODELES_OPERATION.map(m => (
-            <button key={m.id} onClick={() => ouvrirModele(m)} title={m.aide}
-              className="fa-tap text-[11.5px] font-semibold px-2.5 py-1.5 rounded-full border border-gray-200 bg-white hover:border-teal-300 transition">
-              {m.titre}
-              <span className="font-normal text-gray-400"> · {m.aide}</span>
-            </button>
-          ))}
-        </div>
-      )}
 
       {edition === "nouveau" && formulaire()}
 
