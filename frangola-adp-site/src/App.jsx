@@ -160,7 +160,6 @@ const CATEGORIES_ADMIN = [
     feuillets: [
       { id: "dossiers", label: "Dossiers" },
       { id: "backoffice", label: "Back-office" },
-      { id: "partenaires", label: "Partenaires" },
       { id: "analyses", label: "Analyses" },
       { id: "challenge", label: "Challenges" },
     ],
@@ -177,7 +176,9 @@ const CATEGORIES_ADMIN = [
   {
     id: "logistique", label: "Logistique", icone: "Landmark",
     feuillets: [
+      { id: "partenaires", label: "Partenaires" },
       { id: "mandataires", label: "Mandataires", fullAdmin: true },
+      { id: "assureurs", label: "Assureurs", fullAdmin: true },
       { id: "journal", label: "Journal" },
       { id: "corbeille", label: "Corbeille" },
     ],
@@ -206,6 +207,38 @@ function lireOrdreOnglets() {
 function ecrireOrdreOnglets(ids) {
   try { localStorage.setItem("adp:ordreOnglets", JSON.stringify(ids)); } catch (e) { /* ignore */ }
 }
+// Disposition des sous-onglets : quelle famille contient quel écran, et dans
+// quel ordre. Réglable par l'administrateur, mémorisée sur l'ordinateur comme
+// l'ordre des familles. Un écran ajouté après coup retombe dans sa famille
+// d'origine ; un écran disparu ne laisse pas de trou.
+function lireDisposition() {
+  try {
+    const brut = JSON.parse(localStorage.getItem("adp:dispositionOnglets") || "null");
+    return brut && typeof brut === "object" ? brut : null;
+  } catch (e) { return null; }
+}
+function ecrireDisposition(d) {
+  try { if (d) localStorage.setItem("adp:dispositionOnglets", JSON.stringify(d)); else localStorage.removeItem("adp:dispositionOnglets"); } catch (e) { /* ignore */ }
+}
+function categoriesEffectives(disposition) {
+  if (!disposition) return CATEGORIES_ADMIN;
+  const tous = Object.fromEntries(CATEGORIES_ADMIN.flatMap(c => c.feuillets.map(f => [f.id, { f, famille: c.id }])));
+  const places = new Set();
+  const cats = CATEGORIES_ADMIN.map(c => {
+    const ids = (disposition[c.id] || []).filter(id => tous[id] && !places.has(id));
+    ids.forEach(id => places.add(id));
+    return { ...c, feuillets: ids.map(id => tous[id].f) };
+  });
+  // Les écrans non placés retournent dans leur famille d'origine.
+  for (const [id, { f, famille }] of Object.entries(tous)) {
+    if (!places.has(id)) cats.find(c => c.id === famille).feuillets.push(f);
+  }
+  return cats;
+}
+function dispositionDe(cats) {
+  return Object.fromEntries(cats.map(c => [c.id, c.feuillets.map(f => f.id)]));
+}
+
 function genCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -7353,7 +7386,7 @@ function FicheAdmin({ admin, onUpdate }) {
   const champ = "text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500";
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3 flex-wrap">
           <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full"
@@ -7361,7 +7394,9 @@ function FicheAdmin({ admin, onUpdate }) {
             {admin?.firstName || "Sébastien"}
           </span>
           <div>
-            <div className="font-display font-semibold fa-navy">Ma fiche</div>
+            <div className="font-display font-semibold fa-navy flex items-center gap-2">
+              {admin?.firstName || "Sébastien"} <span className="text-[11px] font-semibold bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">vous · administrateur</span>
+            </div>
             <div className="text-xs text-gray-400">
               {admin?.email}
               {admin?.telephone && <> · {admin.telephone}</>}
@@ -10786,7 +10821,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     return CATEGORIES_ADMIN.some(c => c.feuillets.some(f => f.id === cible)) ? cible : "accueil";
   });
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:adminTab", t); };
-  useEffect(() => { if (tab === "mandataires" && !isFullAdmin) setTab("accueil"); }, []);
+  useEffect(() => { if ((tab === "mandataires" || tab === "assureurs") && !isFullAdmin) setTab("accueil"); }, []);
   // Sauts de navigation offerts à tout l'espace admin via NavAdmin : un clic
   // sur un nom, où qu'il apparaisse, ouvre la fiche correspondante. On passe
   // par la recherche déjà en place, qui déplie au passage le bon groupe.
@@ -10809,6 +10844,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   // Ordre personnalisé des onglets et mode discret : deux réglages de confort,
   // propres à cet ordinateur, qui n'ont pas à voyager dans les données.
   const [ordreOnglets, setOrdreOnglets] = useState(lireOrdreOnglets);
+  const [disposition, setDisposition] = useState(lireDisposition);
   const [reorganiser, setReorganiser] = useState(false);
   // initModeDiscret positionne le drapeau global AVANT le premier rendu :
   // au rechargement d'une page en pleine visio, aucun chiffre n'apparaît.
@@ -11218,11 +11254,30 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           // Navigation à deux étages : quatre familles en haut, les écrans de
           // la famille active juste en dessous. L'onglet du quotidien reste à
           // un clic — Production s'ouvre sur Dossiers, C.A. sur le temps réel.
-          const catalogue = Object.fromEntries(CATEGORIES_ADMIN.map(c => [c.id, c]));
+          const cats = categoriesEffectives(disposition);
+          const catalogue = Object.fromEntries(cats.map(c => [c.id, c]));
           const familles = ordreOnglets
             .map(id => catalogue[id])
             .filter(c => c && feuilletsVisibles(c, isFullAdmin).length > 0);
-          const active = categorieDe(tab);
+          const active = cats.find(c => c.feuillets.some(f => f.id === tab)) || cats[0];
+          const enregistrerDisposition = (nouvelles) => { const d = dispositionDe(nouvelles); setDisposition(d); ecrireDisposition(d); };
+          const deplacerFeuillet = (id, versFamille) => {
+            const f = cats.flatMap(c => c.feuillets).find(x => x.id === id);
+            enregistrerDisposition(cats.map(c => {
+              const sans = c.feuillets.filter(x => x.id !== id);
+              return c.id === versFamille ? { ...c, feuillets: [...sans, f] } : { ...c, feuillets: sans };
+            }));
+          };
+          const decalerFeuillet = (familleId, id, sens) => {
+            enregistrerDisposition(cats.map(c => {
+              if (c.id !== familleId) return c;
+              const l = [...c.feuillets];
+              const i = l.findIndex(x => x.id === id), j = i + sens;
+              if (i < 0 || j < 0 || j >= l.length) return c;
+              [l[i], l[j]] = [l[j], l[i]];
+              return { ...c, feuillets: l };
+            }));
+          };
           const feuillets = feuilletsVisibles(active, isFullAdmin);
 
           const puce = "text-xs font-bold rounded-full min-w-[19px] h-[19px] px-1.5 flex items-center justify-center";
@@ -11231,11 +11286,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           const nbFactures = data.partners.filter(p => !p.deleted)
             .reduce((s2, p) => s2 + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
           const nbCorbeille = data.partners.filter(p => p.deleted).length;
-          const alertes = {
-            production: newDeposits + actionsPartenaires,
-            ca: nbFactures,
-            logistique: 0,
-          };
+          // (calculé plus bas, une fois les compteurs d'écran connus)
+          let alertes = {};
           const alerteFeuillet = {
             dossiers: newDeposits,
             backoffice: liveDossiers.filter(d => alerteBackOffice(d)).length,
@@ -11243,6 +11295,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             facturation: nbFactures,
             corbeille: nbCorbeille,
           };
+          // Pastille d'une famille = somme des alertes de ses écrans, où
+          // qu'ils aient été rangés. La corbeille n'est qu'informative.
+          alertes = Object.fromEntries(cats.map(c => [c.id,
+            c.feuillets.filter(f => f.id !== "corbeille").reduce((t, f) => t + (alerteFeuillet[f.id] || 0), 0)]));
 
           const deplacer = (id, sens) => {
             const rang = familles.findIndex(c => c.id === id);
@@ -11309,7 +11365,38 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
               {/* Les écrans de la famille active. Masqués quand il n'y en a
                   qu'un : afficher « Pilotage » tout seul n'apprend rien. */}
-              {feuillets.length > 1 && (
+              {reorganiser && (
+                // Plan complet : chaque famille et ses écrans. Les flèches
+                // rangent un écran dans sa famille, la liste le change de famille.
+                <div className="mt-4 grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {ordreOnglets.map(id => catalogue[id]).filter(Boolean).map(c => {
+                    const vis = feuilletsVisibles(c, isFullAdmin);
+                    return (
+                      <div key={c.id} className="bg-white border border-teal-200 rounded-xl p-3">
+                        <div className="text-xs font-bold fa-navy mb-2">{c.label}</div>
+                        {vis.length === 0 && <div className="text-[11px] text-gray-400">Aucun écran — la famille est masquée.</div>}
+                        <div className="space-y-1.5">
+                          {vis.map((f, i) => (
+                            <div key={f.id} className="flex items-center gap-1 bg-gray-50 rounded-lg px-2 py-1.5 text-xs">
+                              <button onClick={() => decalerFeuillet(c.id, f.id, -1)} disabled={i === 0} title="Monter"
+                                className="text-gray-400 hover:fa-teal-text disabled:opacity-20 px-0.5">‹</button>
+                              <button onClick={() => decalerFeuillet(c.id, f.id, 1)} disabled={i === vis.length - 1} title="Descendre"
+                                className="text-gray-400 hover:fa-teal-text disabled:opacity-20 px-0.5">›</button>
+                              <span className="flex-1 fa-navy font-medium truncate">{f.label}</span>
+                              <select value={c.id} onChange={e => deplacerFeuillet(f.id, e.target.value)} title="Changer de famille"
+                                className="text-[11px] border border-gray-200 rounded px-1 py-0.5 bg-white max-w-[92px]">
+                                {cats.map(x => <option key={x.id} value={x.id}>{x.label}</option>)}
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!reorganiser && feuillets.length > 1 && (
                 <div className="flex gap-2 flex-wrap mt-4">
                   {feuillets.map(f => {
                     const n = alerteFeuillet[f.id] || 0;
@@ -11328,8 +11415,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
               {reorganiser && (
                 <div className="mt-3 flex items-center gap-3 flex-wrap text-xs bg-teal-50 border border-teal-200 rounded-xl px-3 py-2">
-                  <span className="fa-teal-text">Range tes familles avec les flèches ‹ › — l'ordre est mémorisé sur cet ordinateur.</span>
-                  <button onClick={() => { setOrdreOnglets([...ORDRE_ONGLETS_DEFAUT]); ecrireOrdreOnglets(ORDRE_ONGLETS_DEFAUT); }}
+                  <span className="fa-teal-text">Range tes familles avec les flèches ‹ › en haut, et chaque écran dans la famille de ton choix ci-dessus — mémorisé sur cet ordinateur.</span>
+                  <button onClick={() => { setOrdreOnglets([...ORDRE_ONGLETS_DEFAUT]); ecrireOrdreOnglets(ORDRE_ONGLETS_DEFAUT); setDisposition(null); ecrireDisposition(null); }}
                     className="underline fa-teal-text">Remettre l'ordre d'origine</button>
                   <button onClick={() => setReorganiser(false)}
                     className="ml-auto fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg">Terminé</button>
@@ -13748,12 +13835,19 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
           </div>
         )}
+        {tab === "assureurs" && isFullAdmin && (
+          <div className="space-y-6">
+            <div>
+              <h2 className="font-display text-lg font-semibold fa-navy">Assureurs</h2>
+              <p className="text-sm text-gray-500">Les compagnies partenaires, leurs logos et leurs couleurs — et ce que chacune pèse dans ta production.</p>
+            </div>
+            <AssureursPanel data={data} onSet={onSetAssureurs} canEdit={isFullAdmin} busy={busy} />
+            <ProductionParAssureur data={data} dossiers={data.dossiers} />
+          </div>
+        )}
+
         {tab === "mandataires" && isFullAdmin && (
           <div>
-            <FicheAdmin admin={data.settings.admin} onUpdate={onUpdateAdmin} />
-
-            <AssureursPanel data={data} onSet={onSetAssureurs} canEdit={isFullAdmin} busy={busy} />
-
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Mandataires</h2>
               <button onClick={() => setShowAddMandataireForm(v => !v)}
@@ -13812,7 +13906,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             )}
 
             <div className="space-y-3">
-              {data.mandataires.filter(m => !m.deleted).length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun mandataire pour l'instant — Sébastien reste le commercial par défaut.</div>}
+              {/* Sébastien est aussi mandataire : sa fiche ouvre la liste. */}
+              <FicheAdmin admin={data.settings.admin} onUpdate={onUpdateAdmin} />
+              {data.mandataires.filter(m => !m.deleted).length === 0 && <div className="text-center text-gray-400 text-sm py-6">Aucun autre mandataire pour l'instant.</div>}
               {data.mandataires.filter(m => !m.deleted).map(m => (
                 <div key={m.id} className={`bg-white border rounded-xl px-5 py-4 ${m.active === false ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
                   {editingMandataireId === m.id ? (
