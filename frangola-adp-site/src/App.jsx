@@ -220,6 +220,17 @@ function lireDisposition() {
 function ecrireDisposition(d) {
   try { if (d) localStorage.setItem("adp:dispositionOnglets", JSON.stringify(d)); else localStorage.removeItem("adp:dispositionOnglets"); } catch (e) { /* ignore */ }
 }
+// Disposition des blocs (tableaux) dans les écrans, même principe.
+function lireDispositionBlocs() {
+  try {
+    const brut = JSON.parse(localStorage.getItem("adp:dispositionBlocs") || "null");
+    return brut && typeof brut === "object" ? brut : null;
+  } catch (e) { return null; }
+}
+function ecrireDispositionBlocs(d) {
+  try { if (d) localStorage.setItem("adp:dispositionBlocs", JSON.stringify(d)); else localStorage.removeItem("adp:dispositionBlocs"); } catch (e) { /* ignore */ }
+}
+
 function categoriesEffectives(disposition) {
   if (!disposition) return CATEGORIES_ADMIN;
   const tous = Object.fromEntries(CATEGORIES_ADMIN.flatMap(c => c.feuillets.map(f => [f.id, { f, famille: c.id }])));
@@ -10751,6 +10762,48 @@ function TableauIntegration({ partners, onUpdatePartner, onOuvrir }) {
   );
 }
 
+function BlocConnexions({ data }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="font-display font-semibold fa-navy mb-3">Dernières connexions</div>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS["Sébastien"] }}>Sébastien</span>
+          <span className="text-gray-500 text-xs">{data.settings.admin.lastLoginAt ? `${fmtDate(data.settings.admin.lastLoginAt)} à ${new Date(data.settings.admin.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
+        </div>
+        {data.mandataires.map(m => (
+          <div key={m.id} className="flex items-center justify-between text-sm">
+            <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{commercialLabel(m.name)}</span>
+            <span className="text-gray-500 text-xs">{m.lastLoginAt ? `${fmtDate(m.lastLoginAt)} à ${new Date(m.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
+          </div>
+        ))}
+      </div>
+      <ConnexionsPartenaires partners={data.partners} />
+    </div>
+  );
+}
+function BlocJournal({ data }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="font-display font-semibold fa-navy mb-3">Journal d'activité</div>
+      {(!data.activityLog || data.activityLog.length === 0) ? (
+        <div className="text-sm text-gray-400">Aucune action enregistrée pour l'instant.</div>
+      ) : (
+        <div className="space-y-2 max-h-80 overflow-y-auto">
+          {data.activityLog.slice(0, 30).map(entry => (
+            <div key={entry.id} className="flex items-start justify-between gap-2 text-sm">
+              <span className="text-gray-600">
+                <strong className="fa-navy" style={{ color: COMMERCIAL_COLORS[entry.actor] }}>{entry.actor}</strong> {entry.message}
+              </span>
+              <span className="text-gray-400 text-xs whitespace-nowrap">{fmtDate(entry.at)} {new Date(entry.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Qui, parmi les partenaires, utilise vraiment son espace : les plus récents
 // en tête, puis ceux qui ne se sont jamais connectés — ceux-là sont à relancer.
 function ConnexionsPartenaires({ partners }) {
@@ -10845,7 +10898,89 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   // propres à cet ordinateur, qui n'ont pas à voyager dans les données.
   const [ordreOnglets, setOrdreOnglets] = useState(lireOrdreOnglets);
   const [disposition, setDisposition] = useState(lireDisposition);
+  const [dispositionBlocs, setDispositionBlocs] = useState(lireDispositionBlocs);
+
   const [reorganiser, setReorganiser] = useState(false);
+  // ─── Blocs déplaçables ────────────────────────────────────────────────
+  // Chaque tableau autonome peut être rangé dans l'écran de son choix
+  // (bouton ⇆). Les écrans dont le contenu est propre à la page — la liste
+  // des dossiers, celle des partenaires — restent fixes ; les blocs qu'on y
+  // ajoute s'affichent en dessous.
+  const BLOCS_ADMIN = [
+    { id: "tresorerie", label: "C.A. en temps réel", defaut: "tresorerie", rendu: () => <Vision360 data={data} vue="tresorerie" /> },
+    { id: "recurrence", label: "Récurrence assureur", defaut: "recurrence", rendu: () => <Vision360 data={data} vue="recurrence" /> },
+    { id: "projectionCA", label: "Projection du C.A.", defaut: "projections", rendu: () => <ProjectionCA data={data} /> },
+    { id: "objectifsCA", label: "Objectifs de C.A.", defaut: "projections", rendu: () => <ObjectifsCA data={data} /> },
+    { id: "coutChallenges", label: "Coût des challenges", defaut: "projections", rendu: () => <CoutChallenges data={data} /> },
+    { id: "production", label: "Production de la période", defaut: "challenge", rendu: () => <ProductionDuMois data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} onSetPeriode={onSetPeriodeProduction} canEdit={isFullAdmin} /> },
+    { id: "challengesPartenaires", label: "Challenges partenaires", defaut: "challenge", rendu: () => <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} /> },
+    { id: "challengeBoard", label: "Tableau des objectifs", defaut: "challenge", rendu: () => <ChallengeBoard data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} /> },
+    { id: "facturation", label: "Facturation et versements", defaut: "facturation", rendu: () => <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} onMajVersement={onMajVersementParrainage} onSupprimerVersement={onSupprimerVersementParrainage} onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} /> },
+    { id: "compagnies", label: "Compagnies partenaires", defaut: "assureurs", fullAdmin: true, rendu: () => <AssureursPanel data={data} onSet={onSetAssureurs} canEdit={isFullAdmin} busy={busy} /> },
+    { id: "productionAssureur", label: "Production par assureur", defaut: "assureurs", fullAdmin: true, rendu: () => <ProductionParAssureur data={data} dossiers={data.dossiers} /> },
+    { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
+    { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} /> },
+    { id: "connexions", label: "Dernières connexions", defaut: "journal", rendu: () => <BlocConnexions data={data} /> },
+    { id: "journal", label: "Journal d'activité", defaut: "journal", rendu: () => <BlocJournal data={data} /> },
+  ];
+  const blocsVisibles = BLOCS_ADMIN.filter(b => !b.fullAdmin || isFullAdmin);
+  // Écran → liste ordonnée de blocs, d'après la disposition enregistrée.
+  const blocsParEcran = (() => {
+    const connus = Object.fromEntries(blocsVisibles.map(b => [b.id, b]));
+    const places = new Set();
+    const res = {};
+    for (const [ecran, ids] of Object.entries(dispositionBlocs || {})) {
+      res[ecran] = (ids || []).filter(id => connus[id] && !places.has(id)).map(id => { places.add(id); return connus[id]; });
+    }
+    for (const b of blocsVisibles) if (!places.has(b.id)) (res[b.defaut] = res[b.defaut] || []).push(b);
+    return res;
+  })();
+  const enregistrerBlocs = (res) => {
+    const d = Object.fromEntries(Object.entries(res).map(([k, l]) => [k, l.map(b => b.id)]));
+    setDispositionBlocs(d); ecrireDispositionBlocs(d);
+  };
+  const deplacerBloc = (id, vers) => {
+    const res = Object.fromEntries(Object.entries(blocsParEcran).map(([k, l]) => [k, l.filter(b => b.id !== id)]));
+    const b = blocsVisibles.find(x => x.id === id);
+    res[vers] = [...(res[vers] || []), b];
+    enregistrerBlocs(res);
+  };
+  const decalerBloc = (ecran, id, sens) => {
+    const l = [...(blocsParEcran[ecran] || [])];
+    const i = l.findIndex(b => b.id === id), j = i + sens;
+    if (i < 0 || j < 0 || j >= l.length) return;
+    [l[i], l[j]] = [l[j], l[i]];
+    enregistrerBlocs({ ...blocsParEcran, [ecran]: l });
+  };
+  function rendreBlocs(ecran) {
+    const liste = blocsParEcran[ecran] || [];
+    if (liste.length === 0) return null;
+    const cats = categoriesEffectives(disposition);
+    const ecrans = cats.flatMap(c => feuilletsVisibles(c, isFullAdmin).map(f => ({ id: f.id, label: `${c.label} · ${f.label}` })));
+    return (
+      <div className="space-y-6 mt-6">
+        {liste.map((b, i) => (
+          <div key={b.id}>
+            {reorganiser && (
+              <div className="flex items-center gap-2 flex-wrap bg-teal-50 border border-teal-200 rounded-t-xl px-3 py-2 text-xs -mb-1">
+                <span className="font-bold fa-navy">⠿ {b.label}</span>
+                <button onClick={() => decalerBloc(ecran, b.id, -1)} disabled={i === 0} className="fa-teal-text disabled:opacity-30 px-1" title="Monter">▲</button>
+                <button onClick={() => decalerBloc(ecran, b.id, 1)} disabled={i === liste.length - 1} className="fa-teal-text disabled:opacity-30 px-1" title="Descendre">▼</button>
+                <label className="ml-auto flex items-center gap-1.5 text-gray-600">Déplacer vers
+                  <select value={ecran} onChange={e => deplacerBloc(b.id, e.target.value)}
+                    className="text-xs border border-gray-300 rounded-lg px-1.5 py-1 bg-white">
+                    {ecrans.map(x => <option key={x.id} value={x.id}>{x.label}</option>)}
+                  </select>
+                </label>
+              </div>
+            )}
+            {b.rendu()}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   // initModeDiscret positionne le drapeau global AVANT le premier rendu :
   // au rechargement d'une page en pleine visio, aucun chiffre n'apparaît.
   const [discret, setDiscretState] = useState(initModeDiscret);
@@ -11415,8 +11550,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
               {reorganiser && (
                 <div className="mt-3 flex items-center gap-3 flex-wrap text-xs bg-teal-50 border border-teal-200 rounded-xl px-3 py-2">
-                  <span className="fa-teal-text">Range tes familles avec les flèches ‹ › en haut, et chaque écran dans la famille de ton choix ci-dessus — mémorisé sur cet ordinateur.</span>
-                  <button onClick={() => { setOrdreOnglets([...ORDRE_ONGLETS_DEFAUT]); ecrireOrdreOnglets(ORDRE_ONGLETS_DEFAUT); setDisposition(null); ecrireDisposition(null); }}
+                  <span className="fa-teal-text">Range tes familles avec les flèches ‹ › en haut, chaque écran dans la famille de ton choix ci-dessus, et chaque tableau de la page avec sa barre « Déplacer vers » — mémorisé sur cet ordinateur.</span>
+                  <button onClick={() => { setOrdreOnglets([...ORDRE_ONGLETS_DEFAUT]); ecrireOrdreOnglets(ORDRE_ONGLETS_DEFAUT); setDisposition(null); ecrireDisposition(null); setDispositionBlocs(null); ecrireDispositionBlocs(null); }}
                     className="underline fa-teal-text">Remettre l'ordre d'origine</button>
                   <button onClick={() => setReorganiser(false)}
                     className="ml-auto fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg">Terminé</button>
@@ -11643,10 +11778,6 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             </div>
           );
         })()}
-
-        {tab === "backoffice" && (
-          <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} />
-        )}
 
         {tab === "dossiers" && (
           <div className="space-y-4">
@@ -13320,50 +13451,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             <div className="space-y-8">
               {/* Vue trésorerie : volontairement hors filtres, on ne pilote pas
                   une caisse par département. */}
-              {tab === "tresorerie" && <Vision360 data={data} vue="tresorerie" />}
-              {tab === "recurrence" && <Vision360 data={data} vue="recurrence" />}
-              {tab === "projections" && (<>
-              <ProjectionCA data={data} />
-              <ObjectifsCA data={data} />
-              <CoutChallenges data={data} />
-              </>)}
-
-              {tab === "journal" && (<>
-              <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                <div className="font-display font-semibold fa-navy mb-3">Dernières connexions</div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS["Sébastien"] }}>Sébastien</span>
-                    <span className="text-gray-500 text-xs">{data.settings.admin.lastLoginAt ? `${fmtDate(data.settings.admin.lastLoginAt)} à ${new Date(data.settings.admin.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
-                  </div>
-                  {data.mandataires.map(m => (
-                    <div key={m.id} className="flex items-center justify-between text-sm">
-                      <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[m.name] }}>{commercialLabel(m.name)}</span>
-                      <span className="text-gray-500 text-xs">{m.lastLoginAt ? `${fmtDate(m.lastLoginAt)} à ${new Date(m.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}` : "Jamais connecté"}</span>
-                    </div>
-                  ))}
-                </div>
-                <ConnexionsPartenaires partners={data.partners} />
-              </div>
-
-              <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                <div className="font-display font-semibold fa-navy mb-3">Journal d'activité</div>
-                {(!data.activityLog || data.activityLog.length === 0) ? (
-                  <div className="text-sm text-gray-400">Aucune action enregistrée pour l'instant.</div>
-                ) : (
-                  <div className="space-y-2 max-h-80 overflow-y-auto">
-                    {data.activityLog.slice(0, 30).map(entry => (
-                      <div key={entry.id} className="flex items-start justify-between gap-2 text-sm">
-                        <span className="text-gray-600">
-                          <strong className="fa-navy" style={{ color: COMMERCIAL_COLORS[entry.actor] }}>{entry.actor}</strong> {entry.message}
-                        </span>
-                        <span className="text-gray-400 text-xs whitespace-nowrap">{fmtDate(entry.at)} {new Date(entry.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              </>)}
+              {/* Trésorerie, récurrence, projections et journal sont faits de
+                  blocs déplaçables : ils sont rendus plus bas, par rendreBlocs. */}
 
 
               {tab === "analyses" && (<>
@@ -13814,35 +13903,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   </ResponsiveContainer>
                 </div>
               </div>
-              <RythmeReseau data={data} commerciaux={COMMERCIAUX} />
               </>)}
             </div>
           );
         })()}
 
-              {tab === "facturation" && (
-          <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} onMajVersement={onMajVersementParrainage} onSupprimerVersement={onSupprimerVersementParrainage}
-            onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} />
-        )}
-        {tab === "challenge" && (
-          <div className="space-y-6">
-            {/* Les objectifs se modifient dans le tableau ci-dessous, pas ici :
-                un seul endroit pour une même valeur. */}
-            <ProductionDuMois data={data} commerciaux={COMMERCIAUX}
-              onSetGoals={onSetChallengeGoals} onSetPeriode={onSetPeriodeProduction} canEdit={isFullAdmin} />
-            <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} />
-            <ChallengeBoard data={data} commerciaux={COMMERCIAUX}
-              onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} />
-          </div>
-        )}
         {tab === "assureurs" && isFullAdmin && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="font-display text-lg font-semibold fa-navy">Assureurs</h2>
-              <p className="text-sm text-gray-500">Les compagnies partenaires, leurs logos et leurs couleurs — et ce que chacune pèse dans ta production.</p>
-            </div>
-            <AssureursPanel data={data} onSet={onSetAssureurs} canEdit={isFullAdmin} busy={busy} />
-            <ProductionParAssureur data={data} dossiers={data.dossiers} />
+          <div>
+            <h2 className="font-display text-lg font-semibold fa-navy">Assureurs</h2>
+            <p className="text-sm text-gray-500">Les compagnies partenaires, leurs logos et leurs couleurs — et ce que chacune pèse dans ta production.</p>
           </div>
         )}
 
@@ -14014,6 +14083,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             </div>
           </div>
         )}
+
+        {rendreBlocs(tab)}
       </main>
     </div>
     </NavAdmin.Provider>
