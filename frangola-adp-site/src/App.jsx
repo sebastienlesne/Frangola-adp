@@ -298,10 +298,18 @@ function LienPartenaire({ p, className = "", children, dansUnBouton = false }) {
   );
 }
 
-function LienClient({ d, className = "", children }) {
+function LienClient({ d, className = "", children, dansUnBouton = false }) {
   const nav = useContext(NavAdmin);
   const texte = children ?? clientName(d);
   if (!nav || !d) return <>{texte}</>;
+  if (dansUnBouton) return (
+    <span role="link" tabIndex={0} title="Ouvrir ce dossier"
+      onClick={(e) => { e.stopPropagation(); nav.ouvrirDossier(d); }}
+      onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); nav.ouvrirDossier(d); } }}
+      className={`cursor-pointer hover:fa-teal-text hover:underline decoration-dotted underline-offset-2 transition ${className}`}>
+      {texte}
+    </span>
+  );
   return (
     <button type="button" title="Ouvrir ce dossier"
       onClick={(e) => { e.stopPropagation(); nav.ouvrirDossier(d); }}
@@ -10545,7 +10553,7 @@ function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
               <div key={d.id}>
                 <button onClick={() => setOuvertId(ouvert ? null : d.id)}
                   className="w-full text-left px-4 py-3 hover:bg-gray-50 transition grid grid-cols-2 sm:grid-cols-[1.3fr_1fr_1fr_110px_70px_2fr] gap-x-3 gap-y-1 items-center text-sm">
-                  <span className="font-bold fa-navy truncate">{clientName(d)}</span>
+                  <span className="font-bold fa-navy truncate"><LienClient d={d} dansUnBouton /></span>
                   <span className="text-gray-600 truncate text-xs sm:text-sm">{nomDe(d.partnerId)}</span>
                   <span className="text-gray-500 truncate text-xs sm:text-sm">{bo.banque || "banque ?"}</span>
                   <span><MiniJaugeBackOffice dossier={d} large="w-14" /></span>
@@ -11462,7 +11470,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                       <Groupe titre="Back-office banque">
                         {alertesBO.length === 0 ? <Vide>✅ Aucun dossier bloqué côté banque.</Vide> : (<>
                           {alertesBO.slice(0, 3).map(({ d, a }) => (
-                            <Ligne key={d.id} item={{ cle: d.id, titre: clientName(d), detail: a.titre, depuis: a.depuis, aller: () => setTab("backoffice") }} />
+                            <Ligne key={d.id} item={{ cle: d.id, titre: clientName(d), detail: a.titre, depuis: a.depuis, aller: () => navAdmin.ouvrirDossier(d) }} />
                           ))}
                           <button onClick={() => setTab("backoffice")} className="text-xs fa-teal-text hover:underline">
                             Ouvrir l'onglet Back-office{alertesBO.length > 3 ? ` (${alertesBO.length} en alerte)` : ""} →
