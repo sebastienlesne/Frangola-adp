@@ -2086,6 +2086,36 @@ export default function App() {
       };
     });
   }
+  // Challenge de bienvenue : un réglage unique pour tout le monde, et une
+  // inscription par partenaire. Cocher une case, c'est lancer une course —
+  // donc le journal en garde trace, comme de la remise du cadeau.
+  async function majChallengeBienvenue(fields) {
+    await mutateData(base => ({
+      ...base,
+      settings: {
+        ...base.settings,
+        challengeBienvenue: { ...BIENVENUE_DEFAUT, ...(base.settings.challengeBienvenue || {}), ...fields },
+      },
+    }));
+  }
+  async function majInscritBienvenue(partnerId, patch) {
+    const nom = nomPartenaire(data.partners.find(x => x.id === partnerId));
+    await mutateData(base => {
+      const r = base.settings?.challengeBienvenue || {};
+      const inscrits = { ...(r.inscrits || {}) };
+      if (patch === null) delete inscrits[partnerId];
+      else inscrits[partnerId] = { ...(inscrits[partnerId] || {}), ...patch };
+      const message = patch === null
+        ? `a retiré ${nom} du challenge de bienvenue`
+        : patch.remisLe
+          ? `a remis la récompense du challenge de bienvenue à ${nom}`
+          : `a inscrit ${nom} au challenge de bienvenue`;
+      return withLog({
+        ...base,
+        settings: { ...base.settings, challengeBienvenue: { ...BIENVENUE_DEFAUT, ...r, inscrits } },
+      }, message);
+    });
+  }
   async function supprimerChallenge(id) {
     await mutateData(base => {
       if (id === ID_CHALLENGE_INITIAL) {
@@ -2773,6 +2803,7 @@ export default function App() {
               partner={cible}
               dossiers={data.dossiers.filter(d => d.partnerId === cible.id)}
               challenges={challengesDe(data)}
+              bienvenue={bilanBienvenue(data, cible.id)}
               onLogout={() => { setApercuPartnerId(null); setApercuEdition(false); }}
               onCreateDossier={ed ? (...args) => creerDossierPour(cible.id, saisisseur, ...args) : bloque}
               onDeclarerParrainage={ed ? declarerParrainage : bloque}
@@ -2795,6 +2826,7 @@ export default function App() {
           partner={data.partners.find(p => p.id === currentPartner.id) || currentPartner}
           dossiers={data.dossiers.filter(d => d.partnerId === currentPartner.id)}
           challenges={challengesDe(data)}
+          bienvenue={bilanBienvenue(data, currentPartner.id)}
           onLogout={logout}
           onCreateDossier={createDossier}
                     onDeclarerParrainage={declarerParrainage}
@@ -2841,6 +2873,8 @@ export default function App() {
                     onSetChallengeGoals={setChallengeGoals}
                     onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
+          onMajBienvenue={majChallengeBienvenue}
+          onMajInscritBienvenue={majInscritBienvenue}
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
@@ -2903,6 +2937,8 @@ export default function App() {
                     onSetChallengeGoals={setChallengeGoals}
                     onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
+          onMajBienvenue={majChallengeBienvenue}
+          onMajInscritBienvenue={majInscritBienvenue}
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
@@ -3864,6 +3900,52 @@ function ParrainageCard({ partner, onDeclarer }) {
 // Toutes les bannières à afficher au partenaire — c'est-à-dire, uniquement les
 // challenges publiés et en cours. Un brouillon, un challenge programmé ou
 // terminé n'apparaît pas : de son côté, il n'existe pas.
+// Challenge de bienvenue, côté partenaire. Un non-inscrit ne voit rien : le
+// bloc n'existe pas pour lui. Le compteur ne retient que les dossiers gagnés,
+// donc on lui dit aussi ce qui est encore en cours — sans quoi il croirait à
+// une erreur de comptage.
+function BanniereBienvenue({ bienvenue, dossiers }) {
+  const bi = bienvenue;
+  if (!bi || !bi.inscrit || !bi.actif || bi.remisLe) return null;
+  if (bi.expire) return null;
+  const r = bi.reglage;
+  const pct = Math.min(100, Math.round((bi.n / bi.objectif) * 100));
+  const dateFin = bi.fin ? new Date(bi.fin).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" }) : null;
+  return (
+    <div className={`rounded-2xl p-5 mb-6 ${bi.atteint ? "bg-emerald-50 border border-emerald-300" : "fa-bg-gold"}`}>
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
+        <span className="font-display font-semibold fa-navy">
+          {bi.atteint ? "🏆 Objectif atteint !" : "🎁 Votre challenge de bienvenue"}
+        </span>
+        <span className="text-xs text-teal-900/70">
+          {dateFin ? <>jusqu'au {dateFin}{bi.joursRestants !== null ? ` · ${bi.joursRestants} jour${bi.joursRestants > 1 ? "s" : ""} restant${bi.joursRestants > 1 ? "s" : ""}` : ""}</> : "sans limite de temps"}
+        </span>
+      </div>
+
+      <div className="flex items-baseline gap-2 mb-2">
+        <span className="font-display text-3xl font-bold fa-navy">{bi.n}</span>
+        <span className="text-sm text-teal-900/70">/ {bi.objectif} dossiers gagnés</span>
+      </div>
+
+      <div className="h-3 rounded-full bg-white/60 overflow-hidden">
+        <div className={`h-full rounded-full ${bi.atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
+      </div>
+
+      <div className="text-sm fa-navy mt-2">
+        {bi.atteint
+          ? <><strong>{r.recompense}</strong> vous revient. Nous vous contactons.</>
+          : <>Plus que <strong>{bi.restants} dossier{bi.restants > 1 ? "s" : ""} gagné{bi.restants > 1 ? "s" : ""}</strong> pour gagner <strong>{r.recompense}</strong>.</>}
+        {bi.enCours > 0 && !bi.atteint && (
+          <span className="text-teal-900/60">
+            {" "}({bi.enCours} dossier{bi.enCours > 1 ? "s" : ""} en cours {bi.enCours > 1 ? "ne sont" : "n'est"} pas encore compté{bi.enCours > 1 ? "s" : ""} :
+            {" "}un dossier compte une fois le contrat souscrit.)
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function BannieresChallenges({ challenges, partner, dossiers }) {
   // Un challenge ciblé n'existe que pour les partenaires qu'il vise.
   const visibles = (challenges || []).filter(c => challengeVisible(c) && challengeCible(c, partner?.id));
@@ -4022,7 +4104,7 @@ function BanniereChallenge({ challenge, partner, dossiers }) {
   );
 }
 
-function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -4225,6 +4307,7 @@ function PartnerDashboard({ partner, dossiers, challenges, onLogout, onCreateDos
           );
         })()}
 
+        <BanniereBienvenue bienvenue={bienvenue} dossiers={dossiers} />
         <BannieresChallenges challenges={challenges} partner={partner} dossiers={dossiers} />
 
         {(tab === "encours" || tab === "clotures") && (
@@ -7203,6 +7286,97 @@ function bornesChallenge(ch) {
 }
 
 // =============================================================================
+// CHALLENGE DE BIENVENUE
+//
+// Le seul challenge permanent de la maison, et le seul qui n'a pas de dates
+// communes : chaque partenaire a sa propre course, qui démarre le jour où on
+// coche sa case. Les challenges ponctuels ci-dessous restent ce qu'ils sont —
+// on les anime quand on veut, pour booster la production.
+//
+// Une seule règle le distingue des autres, et c'est celle qui protège la
+// marge : on compte les dossiers GAGNÉS, c'est-à-dire ceux dont le contrat est
+// toujours vivant aujourd'hui. Un dossier souscrit puis passé KO sort du
+// compteur tout seul, sans rien avoir à corriger à la main. Au plancher de
+// 300 € d'honoraires, la récompense est donc payée par les deux ou trois
+// premiers dossiers : la perte est impossible, et le délai ne sert qu'à poser
+// un cadre — d'où le champ libre plutôt qu'une valeur imposée.
+// =============================================================================
+const BIENVENUE_DEFAUT = { actif: false, objectif: 12, recompense: "", coutRecompense: 0, delaiMois: 12 };
+// Au-delà, on ne propose plus le partenaire spontanément : le challenge est
+// fait pour lancer un nouveau. La recherche permet quand même d'en inscrire un
+// plus ancien — c'est une décision, pas un réflexe.
+const BIENVENUE_ANCIENNETE_MOIS = 3;
+
+function reglageBienvenue(data) {
+  const r = data?.settings?.challengeBienvenue || {};
+  return { ...BIENVENUE_DEFAUT, ...r, inscrits: r.inscrits || {} };
+}
+// Même arithmétique que ajouterMois(), mais sur un horodatage : le 31 janvier
+// + 1 mois donne le 28 février, pas le 3 mars.
+function ajouterMoisTs(ts, n) {
+  const d = new Date(ts);
+  const jour = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + n);
+  const dernier = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(jour, dernier));
+  return d.getTime();
+}
+function bienvenueActif(data) {
+  const r = reglageBienvenue(data);
+  return !!r.actif && !!r.recompense && (Number(r.objectif) || 0) > 0;
+}
+
+// Où en est un partenaire de sa course. Renvoie toujours un objet : `inscrit`
+// dit s'il y a une course du tout.
+function bilanBienvenue(data, partnerId) {
+  const r = reglageBienvenue(data);
+  const objectif = Math.max(1, Number(r.objectif) || 1);
+  const insc = r.inscrits[partnerId];
+  if (!insc || typeof insc.le !== "number") return { reglage: r, objectif, inscrit: false, actif: bienvenueActif(data) };
+  const debut = insc.le;
+  const delai = Math.max(0, Number(r.delaiMois) || 0);
+  const fin = delai > 0 ? ajouterMoisTs(debut, delai) : null;
+  const siens = (data?.dossiers || []).filter(d => d.partnerId === partnerId);
+  // Gagné = contrat vivant aujourd'hui, gagné après l'inscription et dans le
+  // délai. Un KO ultérieur retire le dossier du compteur rétroactivement.
+  const gagnes = siens
+    .filter(d => {
+      if (!STATUTS_CONTRAT_VIVANT.includes(d.status)) return false;
+      const t = dateGain(d);
+      return t !== null && t >= debut && (fin === null || t <= fin);
+    })
+    .sort((a, b) => (dateGain(a) || 0) - (dateGain(b) || 0));
+  const n = gagnes.length;
+  const atteint = n >= objectif;
+  // En cours : ce qu'il a déposé depuis son inscription et qui n'est ni gagné
+  // ni perdu. Sert à lui expliquer pourquoi son compteur ne bouge pas encore.
+  const enCours = siens.filter(d =>
+    !STATUTS_CONTRAT_VIVANT.includes(d.status) && d.status !== "KO" &&
+    (d.createdAt || 0) >= debut).length;
+  const encaisse = gagnes.reduce((sum, d) => sum + partEncaissee(d, d.caAmount || 0), 0);
+  return {
+    reglage: r, objectif, inscrit: true, actif: bienvenueActif(data),
+    le: debut, fin, gagnes, n, atteint, enCours, encaisse,
+    atteintLe: atteint ? dateGain(gagnes[objectif - 1]) : null,
+    restants: Math.max(0, objectif - n),
+    remisLe: insc.remisLe || null,
+    expire: fin !== null && Date.now() > fin && !atteint,
+    joursRestants: fin === null ? null : Math.max(0, Math.ceil((fin - Date.now()) / 86400000)),
+  };
+}
+// Les cadeaux à commander : objectif atteint, cadeau pas encore remis. C'est
+// ce que l'Accueil doit rappeler.
+function cadeauxBienvenueDus(data) {
+  if (!bienvenueActif(data)) return [];
+  return (data.partners || [])
+    .filter(p => !p.deleted)
+    .map(p => ({ p, bi: bilanBienvenue(data, p.id) }))
+    .filter(x => x.bi.inscrit && x.bi.atteint && !x.bi.remisLe)
+    .sort((a, b) => (a.bi.atteintLe || 0) - (b.bi.atteintLe || 0));
+}
+
+// =============================================================================
 // CHALLENGE PARTENAIRES — pilotage côté Frangola
 // =============================================================================
 // Fiche du gérant. Il est administrateur, mais il est aussi commercial : sa
@@ -7737,6 +7911,271 @@ function CoutChallenges({ data }) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// =============================================================================
+// CHALLENGE DE BIENVENUE — réglage unique + la case à cocher, partenaire par
+// partenaire. Placé au-dessus des challenges ponctuels : c'est le socle, les
+// autres sont les coups d'accélérateur.
+// =============================================================================
+function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenaire, canEdit }) {
+  const r = reglageBienvenue(data);
+  const [b, setB] = useState(null);          // brouillon de réglage, null = pas en édition
+  const [rech, setRech] = useState("");
+  const [toutVoir, setToutVoir] = useState(false);
+
+  const objectif = Math.max(1, Number(r.objectif) || 1);
+  const cout = Number(r.coutRecompense) || 0;
+  const actif = bienvenueActif(data);
+
+  // Point d'équilibre au plancher d'honoraires, dans les deux cas de figure :
+  // le dossier suivi par le gérant, et celui suivi par un mandataire. C'est la
+  // seule chose à savoir avant de fixer une récompense.
+  const vivantsDossiers = (data.dossiers || []).filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status) && (d.caAmount || 0) > 0);
+  const taux = tauxRetrocession(vivantsDossiers);
+  const netSeul = CA_MINIMUM_REFERENCE * (1 - taux);
+  const netMandataire = netSeul * (1 - PART_MANDATAIRE);
+  const couvSeul = cout > 0 && netSeul > 0 ? Math.ceil(cout / netSeul) : null;
+  const couvMand = cout > 0 && netMandataire > 0 ? Math.ceil(cout / netMandataire) : null;
+
+  const vivants = (data.partners || []).filter(p => !p.deleted && p.active !== false);
+  const lignes = vivants.map(p => ({ p, bi: bilanBienvenue(data, p.id) }));
+  const limiteAnciennete = ajouterMoisTs(Date.now(), -BIENVENUE_ANCIENNETE_MOIS);
+  const q = (rech || "").trim().toLowerCase();
+
+  // À offrir d'abord — c'est la seule ligne qui demande une action — puis les
+  // courses en cours, de la plus avancée à la moins avancée.
+  const enCourse = lignes.filter(x => x.bi.inscrit).sort((a, c) => {
+    const du = (x) => (x.bi.atteint && !x.bi.remisLe) ? 0 : (x.bi.expire ? 2 : 1);
+    return du(a) - du(c) || (c.bi.n / c.bi.objectif) - (a.bi.n / a.bi.objectif);
+  });
+  const libres = lignes.filter(x => !x.bi.inscrit);
+  const proposes = q
+    ? libres.filter(x => `${x.p.firstName || ""} ${x.p.name || ""} ${x.p.company || ""} ${x.p.ville || ""}`.toLowerCase().includes(q)).slice(0, 8)
+    : libres.filter(x => (dateEntreeDe(x.p) || 0) >= limiteAnciennete)
+        .sort((a, c) => (dateEntreeDe(c.p) || 0) - (dateEntreeDe(a.p) || 0));
+  // On ne déroule jamais tout le réseau : au-delà, la recherche est le bon
+  // outil. Quatre propositions suffisent à faire le geste, vingt à choisir.
+  const proposesVus = toutVoir ? proposes.slice(0, 20) : proposes.slice(0, 4);
+
+  const totalGagnes = enCourse.reduce((sum, x) => sum + x.bi.n, 0);
+  const totalRemis = enCourse.filter(x => x.bi.remisLe).length;
+  const margeGeneree = enCourse.reduce((sum, x) => sum + x.bi.gagnes.reduce((t, d) =>
+    t + ((d.caAmount || 0) - (d.commissionAmount || 0)) * (1 - PART_MANDATAIRE), 0), 0);
+
+  const champ = "text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500";
+
+  function ouvrirEdition() {
+    setB({ objectif: r.objectif, recompense: r.recompense || "", coutRecompense: r.coutRecompense || "", delaiMois: r.delaiMois });
+  }
+  function enregistrer() {
+    onMajReglage({
+      objectif: Math.max(1, Number(b.objectif) || 1),
+      recompense: (b.recompense || "").trim(),
+      coutRecompense: Number(b.coutRecompense) || 0,
+      delaiMois: Math.max(0, Number(b.delaiMois) || 0),
+    });
+    setB(null);
+  }
+
+  const libelleDelai = (mois) => (Number(mois) || 0) > 0 ? `${mois} mois` : "sans limite de temps";
+
+  // Une ligne de partenaire — inscrit ou non, la case est au même endroit.
+  // Sur téléphone la ligne se replie : nom et étiquette d'abord, la
+  // progression en dessous. Sur écran large, tout s'aligne en colonnes.
+  const Ligne = ({ p, bi }) => {
+    const pct = bi.inscrit ? Math.min(100, Math.round((bi.n / bi.objectif) * 100)) : 0;
+    const aOffrir = bi.inscrit && bi.atteint && !bi.remisLe;
+
+    const etiquette = aOffrir ? (
+      <span className="text-[11px] font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap">🎁 À offrir</span>
+    ) : bi.remisLe ? (
+      <span className="text-[11px] text-gray-400 whitespace-nowrap">Remis le {fmtDate(bi.remisLe)}</span>
+    ) : bi.inscrit && !bi.expire && bi.restants <= 3 && bi.n > 0 ? (
+      <span className="text-[11px] font-bold px-2 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 whitespace-nowrap">Plus que {bi.restants}</span>
+    ) : bi.inscrit ? (
+      <span className="text-[11px] text-gray-400 whitespace-nowrap">Inscrit le {fmtDate(bi.le)}</span>
+    ) : null;
+
+    const action = aOffrir && canEdit ? (
+      <button onClick={() => onMajInscrit(p.id, { remisLe: Date.now() })}
+        className="fa-bg-gold text-[11px] font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap">Marquer remis</button>
+    ) : bi.inscrit && canEdit ? (
+      <button onClick={() => onMajInscrit(p.id, null)} className="text-[11px] text-gray-400 hover:text-red-600">retirer</button>
+    ) : null;
+
+    const progression = bi.inscrit ? (<>
+      <div className="h-2 rounded-full bg-gray-100 overflow-hidden mb-1">
+        <div className={`h-full rounded-full ${bi.atteint ? "bg-emerald-500" : "bg-blue-500"}`} style={{ width: `${pct}%` }} />
+      </div>
+      <div className="text-[11px] text-gray-500">
+        <strong className="fa-navy">{bi.n}</strong> / {bi.objectif} gagnés
+        {bi.atteint
+          ? <> — atteint le {fmtDate(bi.atteintLe)}</>
+          : bi.expire
+            ? <span className="text-red-600"> · délai dépassé</span>
+            : bi.joursRestants !== null ? <> · il reste {bi.joursRestants} j</> : <> · sans limite</>}
+      </div>
+    </>) : (
+      <div className="text-[11px] text-gray-400">Cochez pour démarrer</div>
+    );
+
+    return (
+      <div className={`border-t border-gray-100 py-2.5 sm:flex sm:items-center sm:gap-3 ${bi.inscrit ? "" : "opacity-60"}`}>
+        <div className="flex items-center gap-3 sm:flex-1 sm:min-w-0">
+          <button
+            onClick={() => canEdit && onMajInscrit(p.id, bi.inscrit ? null : { le: Date.now() })}
+            disabled={!canEdit}
+            title={bi.inscrit ? "Retirer du challenge" : "Inscrire au challenge"}
+            className={`w-[19px] h-[19px] rounded-md border-2 shrink-0 flex items-center justify-center text-[11px] font-bold text-white transition
+              ${bi.inscrit ? "bg-emerald-600 border-emerald-600" : "border-gray-300 hover:border-emerald-500"} ${canEdit ? "" : "cursor-default"}`}>
+            {bi.inscrit ? "✓" : ""}
+          </button>
+          <div className="flex-1 min-w-0">
+            <button onClick={() => onOuvrirPartenaire && onOuvrirPartenaire(p)}
+              className="text-sm font-bold fa-navy truncate hover:underline text-left block max-w-full">
+              {nomPartenaire(p)}
+            </button>
+            <div className="text-[11px] text-gray-400 truncate">
+              {[p.company, p.ville].filter(Boolean).join(" · ")}
+              {dateEntreeDe(p) ? `${p.company || p.ville ? " · " : ""}depuis ${ancienneteTexte(dateEntreeDe(p))}` : ""}
+            </div>
+          </div>
+          <div className="sm:hidden shrink-0">{etiquette}</div>
+        </div>
+
+        <div className="mt-1.5 pl-[31px] sm:mt-0 sm:pl-0 sm:w-[212px] sm:shrink-0">{progression}</div>
+        <div className="hidden sm:block sm:w-[112px] sm:text-right sm:shrink-0">{etiquette}</div>
+        {action && <div className="mt-1.5 pl-[31px] sm:mt-0 sm:pl-0 sm:w-[104px] sm:text-right sm:shrink-0">{action}</div>}
+        {!action && <div className="hidden sm:block sm:w-[104px] sm:shrink-0" />}
+      </div>
+    );
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-4">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+        <div className="font-display font-semibold fa-navy">🎁 Challenge nouveau partenaire</div>
+        <div className="flex items-center gap-2">
+          <span className={`text-[11px] font-bold px-2 py-1 rounded-full border ${actif ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-100 text-gray-500 border-gray-200"}`}>
+            {actif ? `Actif · ${enCourse.filter(x => !x.bi.remisLe && !x.bi.expire).length} en course` : "Inactif"}
+          </span>
+          {canEdit && (
+            <button onClick={() => onMajReglage({ actif: !r.actif })} className="text-xs fa-teal-text hover:underline">
+              {r.actif ? "Désactiver" : "Activer"}
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="text-sm text-gray-500 mb-3">
+        Le seul challenge permanent : pas de dates communes, chaque partenaire a sa propre course,
+        qui démarre le jour où vous cochez sa case. On compte les dossiers <strong className="fa-navy">gagnés</strong> —
+        un dossier passé KO sort du compteur tout seul.
+      </p>
+
+      {/* ---------------------------------------------------------- réglage */}
+      {b === null ? (
+        <div className="fa-bg-offwhite rounded-xl px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          <span><strong className="fa-navy text-base">{objectif}</strong> <span className="text-gray-500">dossiers gagnés</span></span>
+          <span className="text-gray-400">→</span>
+          <span className="fa-navy font-semibold">{r.recompense || <span className="text-gray-400 font-normal italic">récompense à définir</span>}</span>
+          {cout > 0 && <span className="text-gray-500">coût {fmtEuro(cout)}</span>}
+          <span className="text-gray-500">délai : <strong className="fa-navy">{libelleDelai(r.delaiMois)}</strong></span>
+          {canEdit && <button onClick={ouvrirEdition} className="text-xs fa-teal-text hover:underline ml-auto">Modifier</button>}
+        </div>
+      ) : (
+        <div className="fa-bg-offwhite rounded-xl px-4 py-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <input type="number" onFocus={selectionTotale} min="1" value={b.objectif}
+              onChange={e => setB(x => ({ ...x, objectif: sansZeroDeTete(e.target.value) }))}
+              className={champ + " w-16 text-center"} />
+            <span className="text-xs text-gray-500">dossiers gagnés pour obtenir</span>
+            <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
+              placeholder="Récompense — ex. une paire d'AirPods 5" className={champ + " flex-1 min-w-[200px]"} />
+            <label className="text-xs text-gray-500 flex items-center gap-1.5">
+              Elle me coûte
+              <input type="number" onFocus={selectionTotale} min="0" value={b.coutRecompense ?? ""}
+                onChange={e => setB(x => ({ ...x, coutRecompense: sansZeroDeTete(e.target.value) }))}
+                placeholder="169" className={champ + " w-20 text-center"} /> €
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+            <span className="font-semibold fa-navy">Délai</span>
+            {[3, 6, 12].map(m => (
+              <button key={m} onClick={() => setB(x => ({ ...x, delaiMois: m }))}
+                className={`px-2.5 py-1 rounded-full border text-[11px] font-semibold transition ${Number(b.delaiMois) === m ? "bg-gray-900 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-gray-400"}`}>
+                {m} mois
+              </button>
+            ))}
+            <button onClick={() => setB(x => ({ ...x, delaiMois: 0 }))}
+              className={`px-2.5 py-1 rounded-full border text-[11px] font-semibold transition ${(Number(b.delaiMois) || 0) === 0 ? "bg-gray-900 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-gray-400"}`}>
+              Sans limite
+            </button>
+            <span className="text-gray-400">ou</span>
+            <input type="number" onFocus={selectionTotale} min="0" value={b.delaiMois ?? ""}
+              onChange={e => setB(x => ({ ...x, delaiMois: sansZeroDeTete(e.target.value) }))}
+              className={champ + " w-16 text-center"} />
+            <span>mois</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={enregistrer} disabled={!b.recompense?.trim()}
+              className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
+            <button onClick={() => setB(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------- point d'équilibre */}
+      {cout > 0 && couvSeul !== null && (
+        <div className="mt-2 text-xs rounded-xl px-3 py-2 bg-emerald-50 border border-emerald-200 text-emerald-900">
+          Au plancher de {fmtEuro(CA_MINIMUM_REFERENCE)} d'honoraires, il vous reste {fmtEuro(netSeul)} par dossier
+          que vous suivez vous-même, {fmtEuro(netMandataire)} s'il est suivi par un mandataire :
+          la récompense est payée par le <strong>{couvSeul}{couvSeul > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné</strong>
+          {couvMand !== couvSeul ? <> (le <strong>{couvMand}ᵉ</strong> avec un mandataire)</> : null}.
+          Les {Math.max(0, objectif - (couvMand || couvSeul))} suivants sont du bénéfice net — la perte est impossible.
+        </div>
+      )}
+
+      {/* --------------------------------------------------------- la liste */}
+      <input value={rech} onChange={e => setRech(e.target.value)}
+        placeholder="Chercher un partenaire à inscrire…"
+        className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 mt-3 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+
+      <div className="mt-1">
+        {enCourse.length === 0 && proposes.length === 0 ? (
+          <div className="text-sm text-gray-400 py-4 text-center border border-dashed border-gray-200 rounded-xl mt-2">
+            Aucun partenaire en course. Cochez un nouveau venu pour lancer la sienne.
+          </div>
+        ) : (<>
+          {enCourse.map(({ p, bi }) => <Ligne key={p.id} p={p} bi={bi} />)}
+          {proposesVus.map(({ p, bi }) => <Ligne key={p.id} p={p} bi={bi} />)}
+          {proposes.length > proposesVus.length && (
+            <button onClick={() => setToutVoir(true)} disabled={toutVoir}
+              className="text-xs fa-teal-text hover:underline disabled:no-underline disabled:text-gray-400 mt-1.5">
+              {toutVoir
+                ? `${proposes.length - proposesVus.length} autres nouveaux — utilisez la recherche`
+                : `Voir plus de nouveaux (${proposes.length - proposesVus.length}) →`}
+            </button>
+          )}
+        </>)}
+      </div>
+
+      <p className="text-[11px] text-gray-400 mt-2">
+        {q
+          ? "Recherche sur tous les partenaires — vous restez libre d'en inscrire un plus ancien."
+          : `Sont proposés les partenaires entrés il y a moins de ${BIENVENUE_ANCIENNETE_MOIS} mois. La recherche donne accès aux autres.`}
+      </p>
+
+      {enCourse.length > 0 && (
+        <div className="mt-2 text-xs rounded-xl px-3 py-2 bg-emerald-50 border border-emerald-200 text-emerald-900">
+          {enCourse.length} partenaire{enCourse.length > 1 ? "s" : ""} en course ·
+          {" "}<strong>{totalGagnes} dossier{totalGagnes > 1 ? "s" : ""} gagné{totalGagnes > 1 ? "s" : ""}</strong> à ce titre ·
+          {" "}<strong>{fmtEuro(margeGeneree)}</strong> de marge nette générée
+          {cout > 0 && <> pour <strong>{fmtEuro(totalRemis * cout)}</strong> de cadeaux remis</>}.
+        </div>
+      )}
     </div>
   );
 }
@@ -10595,11 +11034,11 @@ function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
   const recents = suivis.filter(x => x.etape === 6 && x.d.dateEffet && joursCalendairesDepuis(x.d.dateEffet, maintenant) <= 60);
   const FILTRES = [
     ["tous", "Tous", enCours],
-    ["1", "1 · Demande à envoyer", enCours.filter(x => x.etape === 1)],
-    ["2", "2 · En attente banque", enCours.filter(x => x.etape === 2)],
-    ["3", "3 · Avenant", enCours.filter(x => x.etape === 3)],
-    ["4", "4 · Résiliation à confirmer", enCours.filter(x => x.etape === 4)],
-    ["5", "5 · En vigueur", [...enCours.filter(x => x.etape === 5), ...recents]],
+    ["1", "Demande à envoyer", enCours.filter(x => x.etape === 1)],
+    ["2", "En attente banque", enCours.filter(x => x.etape === 2)],
+    ["3", "Avenant", enCours.filter(x => x.etape === 3)],
+    ["4", "Résiliation à confirmer", enCours.filter(x => x.etape === 4)],
+    ["5", "En vigueur", [...enCours.filter(x => x.etape === 5), ...recents]],
     ["alerte", "⚠ En alerte", enCours.filter(x => x.alerte)],
   ];
   const q = recherche.trim().toLowerCase();
@@ -10857,7 +11296,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -10913,6 +11352,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "objectifsCA", label: "Objectifs de C.A.", defaut: "projections", rendu: () => <ObjectifsCA data={data} /> },
     { id: "coutChallenges", label: "Coût des challenges", defaut: "projections", rendu: () => <CoutChallenges data={data} /> },
     { id: "production", label: "Production de la période", defaut: "challenge", rendu: () => <ProductionDuMois data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} onSetPeriode={onSetPeriodeProduction} canEdit={isFullAdmin} /> },
+    { id: "challengeBienvenue", label: "Challenge nouveau partenaire", defaut: "challenge", rendu: () => <ChallengeBienvenue data={data} onMajReglage={onMajBienvenue} onMajInscrit={onMajInscritBienvenue} onOuvrirPartenaire={navAdmin.ouvrirPartenaire} canEdit={isFullAdmin} /> },
     { id: "challengesPartenaires", label: "Challenges partenaires", defaut: "challenge", rendu: () => <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} /> },
     { id: "challengeBoard", label: "Tableau des objectifs", defaut: "challenge", rendu: () => <ChallengeBoard data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} /> },
     { id: "facturation", label: "Facturation et versements", defaut: "facturation", rendu: () => <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} onMajVersement={onMajVersementParrainage} onSupprimerVersement={onSupprimerVersementParrainage} onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} /> },
@@ -10920,6 +11360,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "productionAssureur", label: "Production par assureur", defaut: "assureurs", fullAdmin: true, rendu: () => <ProductionParAssureur data={data} dossiers={data.dossiers} /> },
     { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
     { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} /> },
+    { id: "sauvegardes", label: "Sauvegarde automatique", defaut: "journal", rendu: () => <SauvegardesPanel /> },
     { id: "connexions", label: "Dernières connexions", defaut: "journal", rendu: () => <BlocConnexions data={data} /> },
     { id: "journal", label: "Journal d'activité", defaut: "journal", rendu: () => <BlocJournal data={data} /> },
   ];
@@ -11702,6 +12143,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 const alertesBO = liveDossiers.map(d => ({ d, a: alerteBackOffice(d) })).filter(x => x.a)
                   .sort((x, y) => x.a.tri - y.a.tri || x.a.depuis - y.a.depuis);
                 const nbPartenaires = data.partners.filter(p => !p.deleted).map(bilanIntegration).filter(b => !b.integre || !b.conforme).length;
+                // Récompenses du challenge de bienvenue à commander : l'objectif
+                // est atteint, le cadeau n'est pas encore parti.
+                const cadeaux = cadeauxBienvenueDus(data);
                 const Groupe = ({ titre, children }) => (
                   <div className="mt-3 first:mt-0">
                     <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">{titre}</div>
@@ -11754,12 +12198,30 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     <div className="bg-white border border-gray-200 rounded-2xl p-4 min-w-0">
                       <div className="flex items-center gap-2 font-display font-semibold fa-navy">
                         🤝 Partenaires à mettre en ordre
-                        <span className={`text-xs font-bold rounded-full min-w-[22px] h-[22px] px-1.5 flex items-center justify-center ${nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length ? "bg-cyan-50 text-cyan-800" : "bg-gray-100 text-gray-500"}`}>{masqueNb(nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length)}</span>
+                        <span className={`text-xs font-bold rounded-full min-w-[22px] h-[22px] px-1.5 flex items-center justify-center ${nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length + cadeaux.length ? "bg-cyan-50 text-cyan-800" : "bg-gray-100 text-gray-500"}`}>{masqueNb(nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length + cadeaux.length)}</span>
                       </div>
                       <p className="text-xs text-gray-500 mb-3">Intégration et pièces au dossier. Un clic sur un nom ouvre sa fiche.</p>
                       <TableauIntegration partners={data.partners} onUpdatePartner={onUpdatePartner} onOuvrir={ouvrirPartenaire} />
                       {itemsFiches.length > 0 && (
                         <Groupe titre="Fiches à compléter">{itemsFiches.map(item => <Ligne key={item.cle} item={item} />)}</Groupe>
+                      )}
+                      {cadeaux.length > 0 && (
+                        <Groupe titre="Récompenses à commander">
+                          {cadeaux.map(({ p, bi }) => (
+                            <button key={p.id} onClick={() => ouvrirPartenaire(p)}
+                              className="w-full text-left text-sm bg-white hover:bg-gray-50 border border-emerald-200 rounded-xl px-3 py-2 mb-1.5 transition flex items-center gap-2.5">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                              <span className="flex-1 min-w-0">
+                                <span className="block fa-navy font-bold truncate">{nomPartenaire(p)}</span>
+                                <span className="block text-emerald-700 text-xs">
+                                  {bi.n}/{bi.objectif} — {bi.reglage.recompense} à commander
+                                  {bi.encaisse > 0 && <> · {fmtEuro(bi.encaisse)} déjà encaissés</>}
+                                </span>
+                              </span>
+                              <span className="text-[11px] text-gray-400 shrink-0">{joursDepuis(bi.atteintLe)}</span>
+                            </button>
+                          ))}
+                        </Groupe>
                       )}
                       <Groupe titre="Parrainages à valider">
                         {itemsParrainages.length === 0 ? <Vide>Aucune déclaration en attente.</Vide> : itemsParrainages.map(item => <Ligne key={item.cle} item={item} />)}
@@ -13876,7 +14338,6 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 );
               })()}
 
-                            <SauvegardesPanel />
 
               <div className="bg-white border border-gray-200 rounded-2xl p-5">
                 <div className="font-display font-semibold fa-navy mb-4">Évolution du nombre de partenaires</div>
