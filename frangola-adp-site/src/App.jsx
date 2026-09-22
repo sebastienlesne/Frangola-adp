@@ -2214,6 +2214,43 @@ export default function App() {
     return p;
   }
 
+  // Une relance est un acte commercial : elle se retrouve dans le journal et
+  // sur la fiche du partenaire, pas seulement le temps que la ligne reste en
+  // veille à l'Accueil.
+  async function noterRelance(partnerId, code) {
+    const nom = nomPartenaire(data.partners.find(x => x.id === partnerId));
+    const ignore = code === "ignore";
+    await mutateData(base => withLog({
+      ...base,
+      partners: base.partners.map(x => x.id !== partnerId ? x : (ignore
+        ? { ...x, relanceIgnoreLe: Date.now() }
+        : { ...x, relanceLe: Date.now(), relanceCode: code, relanceNb: (Number(x.relanceNb) || 0) + 1 })),
+    }, ignore
+      ? `a mis ${nom} de côté dans les partenaires qui décrochent`
+      : `a relancé ${nom} — ${LIBELLE_DECROCHAGE[code] || "relance"}`));
+  }
+  // Réunir deux réseaux, ou dire une bonne fois qu'ils sont distincts. Les
+  // deux décisions se rangent dans les réglages : la question ne se reposera
+  // plus.
+  async function fusionnerReseaux(cleAbsorbee, cleGardee, nomRetenu) {
+    await mutateData(base => withLog({
+      ...base,
+      settings: {
+        ...base.settings,
+        fusionsReseaux: { ...(base.settings?.fusionsReseaux || {}), [cleAbsorbee]: cleGardee },
+        nomsReseaux: { ...(base.settings?.nomsReseaux || {}), [cleGardee]: nomRetenu },
+      },
+    }, `a réuni deux écritures du réseau ${nomRetenu}`));
+  }
+  async function refuserFusionReseaux(cleA, cleB) {
+    await mutateData(base => ({
+      ...base,
+      settings: {
+        ...base.settings,
+        fusionsRefusees: [...new Set([...(base.settings?.fusionsRefusees || []), clePaire(cleA, cleB)])],
+      },
+    }));
+  }
   async function updatePartner(id, fields) {
        await mutateData(base => ({
       ...base,
@@ -2896,6 +2933,9 @@ export default function App() {
                     onSetChallengeGoals={setChallengeGoals}
                     onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
+          onRelancerPartenaire={noterRelance}
+          onFusionnerReseaux={fusionnerReseaux}
+          onRefuserFusionReseaux={refuserFusionReseaux}
           onMajBienvenue={majChallengeBienvenue}
           onMajInscritBienvenue={majInscritBienvenue}
           onMajChallenge={majChallenge}
@@ -2960,6 +3000,9 @@ export default function App() {
                     onSetChallengeGoals={setChallengeGoals}
                     onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
+          onRelancerPartenaire={noterRelance}
+          onFusionnerReseaux={fusionnerReseaux}
+          onRefuserFusionReseaux={refuserFusionReseaux}
           onMajBienvenue={majChallengeBienvenue}
           onMajInscritBienvenue={majInscritBienvenue}
           onMajChallenge={majChallenge}
@@ -7448,6 +7491,623 @@ function cadeauxBienvenueDus(data) {
 // volume de contrats, et le revenu — honoraires d'un côté, récurrence
 // mensuelle de l'autre, puisqu'elles ne se comportent pas pareil.
 // =============================================================================
+// =============================================================================
+// RÉSEAUX — UNE ENSEIGNE, UNE SEULE LIGNE
+//
+// « Frangola » et « frangola » sont le même réseau, et tant qu'ils comptent
+// pour deux, tous les chiffres sont faux. Deux niveaux de traitement, parce
+// que ce ne sont pas deux fois le même problème :
+//
+//   1. Les écritures qui ne diffèrent que par une majuscule, un accent, un
+//      tiret ou une espace sont réunies D'OFFICE. `cleComparaison` les ramène
+//      à la même chaîne, il n'y a rien à décider.
+//   2. Les noms voisins mais distincts — « IAD » et « IAD Immobilier » — sont
+//      seulement PROPOSÉS. « Nestenn » et « Nestenn Paris 15 » peuvent très
+//      bien être deux choses différentes, ce n'est pas au code d'en juger.
+//
+// Les décisions prises sont mémorisées dans les réglages : une fusion validée
+// (settings.fusionsReseaux) redirige une clé vers une autre, un refus
+// (settings.fusionsRefusees) fait taire la proposition pour de bon.
+// =============================================================================
+const SANS_RESEAU = "Sans réseau";
+
+// Clé d'un réseau, une fois les fusions validées appliquées.
+function cleReseau(data, company) {
+  const brut = cleComparaison(company);
+  if (!brut) return "";
+  const f = data?.settings?.fusionsReseaux || {};
+  let k = brut;
+  // Une redirection peut en cacher une autre ; la borne évite qu'un cycle
+  // accidentel fasse tourner la boucle indéfiniment.
+  for (let i = 0; i < 5 && f[k] && f[k] !== k; i++) k = f[k];
+  return k;
+}
+// Paire ordonnée, pour que « A refusé avec B » vaille aussi dans l'autre sens.
+function clePaire(a, b) { return [a, b].sort().join("|"); }
+
+// Les réseaux tels qu'ils doivent apparaître : une ligne par enseigne réelle,
+// avec le détail des orthographes rencontrées.
+function groupesReseaux(data) {
+  const parPartenaire = new Map();
+  for (const d of (data?.dossiers || [])) {
+    if (!parPartenaire.has(d.partnerId)) parPartenaire.set(d.partnerId, []);
+    parPartenaire.get(d.partnerId).push(d);
+  }
+  const m = new Map();
+  for (const p of (data?.partners || [])) {
+    if (p.deleted) continue;
+    const nom = (p.company || "").trim();
+    const cle = cleReseau(data, nom) || "__sans__";
+    if (!m.has(cle)) m.set(cle, { cle, ecritures: new Map(), partenaires: 0, dossiers: 0, ca: 0, rec: 0 });
+    const g = m.get(cle);
+    if (nom) g.ecritures.set(nom, (g.ecritures.get(nom) || 0) + 1);
+    g.partenaires += 1;
+    const siens = parPartenaire.get(p.id) || [];
+    const gagnes = siens.filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status));
+    g.dossiers += gagnes.length;
+    g.ca += gagnes.reduce((sum, d) => sum + (d.caAmount || 0), 0);
+    g.rec += siens.filter(contratEnCours).reduce((sum, d) => sum + recurrenceMensuelle(d), 0);
+  }
+  const noms = data?.settings?.nomsReseaux || {};
+  for (const g of m.values()) {
+    // Le nom retenu est l'orthographe la plus employée — corrigeable à la
+    // main. À égalité, celle qui porte une majuscule l'emporte : c'est
+    // presque toujours celle que l'on a écrite avec soin.
+    const classe = [...g.ecritures.entries()].sort((a, b) =>
+      b[1] - a[1] ||
+      (/^[A-ZÀ-Ý]/.test(b[0]) ? 1 : 0) - (/^[A-ZÀ-Ý]/.test(a[0]) ? 1 : 0) ||
+      a[0].localeCompare(b[0], "fr"));
+    g.variantes = classe.map(x => x[0]);
+    g.nom = noms[g.cle] || classe[0]?.[0] || SANS_RESEAU;
+  }
+  return [...m.values()];
+}
+
+// Distance de Levenshtein, bornée : au-delà de `max` on arrête, la réponse
+// exacte ne nous intéresse pas.
+function distanceMots(a, b, max = 2) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prec = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cour = [i];
+    let mini = i;
+    for (let j = 1; j <= b.length; j++) {
+      const v = Math.min(prec[j] + 1, cour[j - 1] + 1, prec[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      cour[j] = v;
+      if (v < mini) mini = v;
+    }
+    if (mini > max) return max + 1;
+    prec = cour;
+  }
+  return prec[b.length];
+}
+
+// Les rapprochements à soumettre. On ne propose que ce qui se défend : un nom
+// entièrement contenu dans l'autre (IAD / IAD Immobilier), ou deux écritures
+// à une ou deux lettres près (une faute de frappe). Rien d'automatique ici.
+function fusionsProposees(data) {
+  const refusees = new Set(data?.settings?.fusionsRefusees || []);
+  const groupes = groupesReseaux(data).filter(g => g.cle !== "__sans__" && g.cle.length >= 3);
+  const out = [];
+  for (let i = 0; i < groupes.length; i++) {
+    for (let j = i + 1; j < groupes.length; j++) {
+      const a = groupes[i], b = groupes[j];
+      if (refusees.has(clePaire(a.cle, b.cle))) continue;
+      const court = a.cle.length <= b.cle.length ? a : b;
+      const long = court === a ? b : a;
+      // « Contenu » suppose un vrai ajout (« IAD » → « IAD Immobilier »).
+      // Une lettre de plus n'est pas une déclinaison, c'est une faute de
+      // frappe, et elle se traite par la règle d'à côté.
+      const prefixe = long.cle.startsWith(court.cle) && court.cle.length >= 3
+        && long.cle.length - court.cle.length >= 3;
+      const proche = !prefixe && Math.min(a.cle.length, b.cle.length) >= 6
+        && distanceMots(a.cle, b.cle) <= 2;
+      if (!prefixe && !proche) continue;
+      // Quand un nom est contenu dans l'autre, c'est le COURT qui est
+      // l'enseigne et le long qui est la déclinaison locale (« Nestenn » et
+      // « Nestenn Paris 15 ») : on réunit sous le court. Pour une simple
+      // faute de frappe, c'est l'écriture la plus répandue qui l'emporte.
+      const garde = prefixe
+        ? court
+        : ((a.partenaires + a.dossiers) >= (b.partenaires + b.dossiers) ? a : b);
+      const absorbe = garde === a ? b : a;
+      out.push({ garde, absorbe, motif: prefixe ? "contenu" : "orthographe" });
+    }
+  }
+  return out.sort((x, y) => (y.garde.partenaires + y.absorbe.partenaires) - (x.garde.partenaires + x.absorbe.partenaires));
+}
+
+// =============================================================================
+// GÉOGRAPHIE DU RÉSEAU
+//
+// Une carte de France dessinée à la main plutôt qu'une librairie : le tracé
+// simplifié du littoral tient en six kilo-octets, les centres des quatre-vingt
+// -seize départements en un de plus, et la page n'a rien à télécharger. Les
+// coordonnées sont déjà projetées (cône conforme approché, centré sur 46,6° N)
+// et mises à l'échelle du viewBox — il n'y a plus qu'à les poser.
+//
+// Le parti pris est la bulle plutôt que l'aplat : la question n'est pas
+// « quelle est la forme du Cantal » mais « combien j'ai de monde là, et
+// est-ce que ça produit ». La taille répond à la première, la couleur à la
+// seconde.
+// =============================================================================
+const CARTE_W = 1000, CARTE_H = 986;
+const CARTE_FRANCE = "M825 366L816 367L816 371L812 373L812 375L808 380L817 379L821 382L820 383L813 387L813 392L807 399L799 405L795 409L796 412L791 416L782 418L778 423L780 427L778 436L779 437L756 458L759 461L753 469L752 474L760 479L755 487L757 491L747 494L745 496L747 497L745 502L752 501L757 502L767 494L769 490L766 491L764 488L769 479L772 479L775 482L783 475L798 475L803 478L801 480L807 487L803 495L803 502L810 503L808 510L809 511L811 509L813 511L818 518L820 523L812 531L804 532L803 543L812 551L817 552L815 557L817 565L823 569L824 572L829 575L824 583L826 590L821 594L820 593L814 595L813 598L809 599L809 602L806 603L801 599L799 602L795 601L791 605L794 613L799 614L799 625L807 630L811 631L812 629L817 631L817 636L821 644L822 647L816 647L814 648L812 658L807 662L812 671L809 673L809 679L816 687L817 692L827 695L836 701L840 701L841 703L863 698L862 702L865 709L862 712L861 718L857 720L855 725L850 729L853 736L845 743L841 743L837 747L833 746L831 751L827 750L825 759L823 758L813 762L813 767L809 772L802 774L801 773L798 774L797 781L788 787L788 789L794 787L796 788L790 799L786 796L782 800L776 800L773 801L773 806L767 803L762 803L759 806L759 812L756 811L757 807L750 807L748 805L743 803L741 804L742 806L738 810L736 810L735 804L732 803L733 802L727 801L724 796L721 799L716 794L714 795L703 794L705 791L703 787L704 784L702 779L695 782L682 782L677 772L675 772L670 774L669 782L656 780L649 778L651 775L649 771L622 768L620 766L620 762L618 760L612 760L605 763L592 775L588 776L577 788L569 787L560 792L549 808L545 819L546 823L545 852L546 861L552 863L551 867L554 871L548 872L545 868L540 868L539 867L537 869L531 869L529 873L520 874L519 876L520 881L513 879L511 881L507 881L504 876L491 871L488 873L485 872L480 879L475 879L473 879L469 869L466 870L460 866L455 866L456 860L459 858L455 856L456 854L447 852L443 849L438 850L438 853L435 855L430 843L421 842L416 844L413 838L404 836L402 834L400 836L396 832L385 829L382 831L383 834L381 837L383 846L373 845L367 846L361 843L357 847L355 843L349 841L336 846L330 843L326 835L324 836L315 830L310 835L306 835L302 832L299 837L290 827L287 826L285 818L272 820L260 813L259 814L252 809L250 811L247 808L249 803L244 806L244 812L238 810L236 806L240 802L242 790L233 786L229 786L229 790L226 790L225 785L222 784L218 785L214 778L227 772L238 749L246 702L250 661L255 649L263 651L267 650L264 645L257 638L250 652L259 564L262 559L264 560L265 564L279 578L284 587L290 608L295 614L296 611L291 603L286 579L282 570L269 558L267 554L252 545L252 537L259 535L258 529L261 528L264 521L261 517L265 515L259 503L253 499L254 494L261 490L259 485L254 484L254 489L245 482L236 482L234 476L226 474L212 466L209 455L204 447L190 434L189 427L191 427L198 415L201 413L196 407L184 403L184 401L188 399L188 389L187 388L179 392L174 388L169 390L164 387L165 383L161 379L169 373L168 371L165 370L165 367L169 366L168 365L164 363L158 364L155 362L153 366L141 366L137 360L147 362L151 358L148 352L141 354L138 358L135 356L131 359L129 358L123 359L122 363L125 368L122 369L121 366L121 358L117 352L118 348L120 348L122 344L119 343L116 352L107 343L105 346L100 347L95 340L95 331L94 340L84 338L81 336L79 337L73 336L64 326L64 331L60 332L54 330L51 331L50 328L49 330L52 333L50 336L38 337L36 334L39 333L38 330L33 320L25 315L24 316L19 313L15 313L13 310L37 305L41 307L43 306L44 301L42 297L31 292L28 293L25 299L24 293L25 292L24 290L21 290L24 288L23 284L25 282L26 288L33 287L36 289L41 286L45 288L47 287L40 285L41 283L37 282L37 284L32 284L35 277L33 276L21 282L16 281L14 283L10 283L10 279L8 275L10 269L10 263L14 259L21 259L27 253L28 254L33 253L38 249L47 251L50 248L59 247L64 244L66 251L69 250L73 254L72 248L75 246L86 247L86 250L91 249L91 245L93 241L91 239L94 236L94 234L104 236L109 233L113 233L116 230L117 233L125 230L125 234L130 234L131 236L128 238L136 241L135 244L143 251L143 257L150 261L152 266L153 265L153 263L156 264L161 258L166 255L168 251L171 252L178 249L179 250L176 254L178 255L182 252L186 258L191 256L190 253L192 252L198 254L201 263L203 262L198 251L204 247L210 247L211 248L208 252L210 255L215 256L238 254L241 251L233 247L232 243L230 243L229 234L227 233L231 223L226 208L228 193L225 195L219 184L213 179L210 165L207 162L210 159L210 155L209 151L203 149L204 144L225 152L232 151L236 147L239 146L250 147L252 156L248 158L247 163L257 176L256 179L260 181L263 178L272 177L280 181L308 183L321 188L337 184L346 176L360 172L345 170L341 166L350 146L376 132L407 125L419 119L436 106L438 99L443 95L446 98L452 98L442 88L443 82L449 81L443 77L445 63L448 63L445 59L444 47L447 40L445 30L449 29L459 21L511 8L513 16L517 22L514 25L517 36L523 35L530 45L532 44L535 47L538 43L544 40L548 39L550 37L553 39L557 45L560 47L559 51L562 64L568 68L575 63L578 64L576 67L584 67L588 71L587 80L591 86L594 82L601 82L605 84L613 81L619 87L619 89L625 89L626 91L620 103L624 103L626 109L620 115L622 118L621 119L624 121L632 120L642 123L646 122L650 119L657 117L659 111L658 110L663 103L667 101L671 101L672 103L669 106L668 113L665 120L672 126L669 130L670 137L679 137L686 140L691 147L698 147L702 151L701 155L703 154L709 157L712 167L725 161L728 163L733 160L737 162L739 167L746 167L747 171L756 169L759 166L766 165L773 171L777 169L780 170L786 175L785 176L788 178L787 182L792 187L796 195L797 194L797 198L799 200L805 201L807 199L805 195L812 194L819 197L820 205L824 202L836 205L841 202L842 199L847 198L848 200L850 199L853 207L858 208L860 211L867 212L871 210L876 213L881 211L891 217L900 219L895 227L892 235L883 241L883 244L874 252L871 258L872 264L869 267L867 276L868 283L865 285L862 294L856 304L856 313L859 319L855 328L853 337L854 342L852 346L857 358L851 362L853 364L850 368L846 366L846 368L847 368L843 373L840 372L833 374L828 372L829 367L825 366ZM981 929L980 949L973 954L974 956L975 954L979 955L973 963L973 966L969 970L971 974L969 978L960 975L960 970L956 968L946 964L938 955L939 952L945 950L948 946L938 943L938 941L935 942L932 940L935 937L934 935L939 932L939 926L940 926L939 922L927 925L926 919L931 917L930 914L936 911L936 908L934 905L925 899L924 891L932 888L932 887L928 884L927 880L924 882L923 880L924 877L927 876L927 873L930 873L931 863L934 862L934 859L937 858L939 859L941 855L948 851L954 851L962 842L969 841L974 847L976 845L977 835L975 832L978 814L985 816L987 835L984 848L990 858L992 887L991 904L982 919L981 929Z";
+// Les départements d'outre-mer sont nommés mais sans coordonnées : la carte
+// est métropolitaine, ils apparaissent dans les listes et les totaux, pas
+// sur le tracé.
+const CARTE_DEPARTEMENTS = {
+  "971": ["Guadeloupe", null, null],
+  "972": ["Martinique", null, null],
+  "973": ["Guyane", null, null],
+  "974": ["La Réunion", null, null],
+  "976": ["Mayotte", null, null],
+  "01": ["Ain", 703, 506],
+  "02": ["Aisne", 581, 160],
+  "03": ["Allier", 555, 476],
+  "04": ["Alpes-de-Haute-Provence", 765, 705],
+  "05": ["Hautes-Alpes", 766, 649],
+  "06": ["Alpes-Maritimes", 825, 721],
+  "07": ["Ardèche", 640, 640],
+  "08": ["Ardennes", 655, 155],
+  "09": ["Ariège", 440, 823],
+  "10": ["Aube", 622, 286],
+  "11": ["Aude", 502, 805],
+  "12": ["Aveyron", 520, 687],
+  "13": ["Bouches-du-Rhône", 685, 761],
+  "14": ["Calvados", 312, 206],
+  "15": ["Cantal", 520, 610],
+  "16": ["Charente", 351, 544],
+  "17": ["Charente-Maritime", 290, 538],
+  "18": ["Cher", 508, 409],
+  "19": ["Corrèze", 465, 580],
+  "21": ["Côte-d'Or", 664, 373],
+  "22": ["Côtes-d'Armor", 140, 272],
+  "23": ["Creuse", 475, 507],
+  "24": ["Dordogne", 387, 605],
+  "25": ["Doubs", 773, 399],
+  "26": ["Drôme", 691, 647],
+  "27": ["Eure", 405, 205],
+  "28": ["Eure-et-Loir", 431, 277],
+  "29": ["Finistère", 58, 290],
+  "2A": ["Corse-du-Sud", 953, 928],
+  "2B": ["Haute-Corse", 968, 875],
+  "30": ["Gard", 623, 716],
+  "31": ["Haute-Garonne", 417, 779],
+  "32": ["Gers", 368, 746],
+  "33": ["Gironde", 297, 633],
+  "34": ["Hérault", 568, 757],
+  "35": ["Ille-et-Vilaine", 224, 301],
+  "36": ["Indre", 445, 438],
+  "37": ["Indre-et-Loire", 384, 390],
+  "38": ["Isère", 719, 589],
+  "39": ["Jura", 727, 443],
+  "40": ["Landes", 283, 719],
+  "41": ["Loir-et-Cher", 435, 354],
+  "42": ["Loire", 622, 543],
+  "43": ["Haute-Loire", 598, 603],
+  "44": ["Loire-Atlantique", 222, 380],
+  "45": ["Loiret", 497, 325],
+  "46": ["Lot", 447, 653],
+  "47": ["Lot-et-Garonne", 368, 679],
+  "48": ["Lozère", 577, 664],
+  "49": ["Maine-et-Loire", 298, 377],
+  "50": ["Manche", 246, 208],
+  "51": ["Marne", 627, 221],
+  "52": ["Haute-Marne", 695, 305],
+  "53": ["Mayenne", 292, 301],
+  "54": ["Meurthe-et-Moselle", 759, 237],
+  "55": ["Meuse", 706, 217],
+  "56": ["Morbihan", 144, 331],
+  "57": ["Moselle", 793, 213],
+  "58": ["Nièvre", 577, 404],
+  "59": ["Nord", 557, 72],
+  "60": ["Oise", 503, 175],
+  "61": ["Orne", 345, 254],
+  "62": ["Pas-de-Calais", 494, 67],
+  "63": ["Puy-de-Dôme", 552, 543],
+  "64": ["Pyrénées-Atlantiques", 285, 789],
+  "65": ["Hautes-Pyrénées", 348, 810],
+  "66": ["Pyrénées-Orientales", 509, 855],
+  "67": ["Bas-Rhin", 854, 249],
+  "68": ["Haut-Rhin", 835, 330],
+  "69": ["Rhône", 655, 529],
+  "70": ["Haute-Saône", 754, 352],
+  "71": ["Saône-et-Loire", 648, 451],
+  "72": ["Sarthe", 352, 317],
+  "73": ["Savoie", 778, 568],
+  "74": ["Haute-Savoie", 777, 512],
+  "75": ["Paris", 497, 231],
+  "76": ["Seine-Maritime", 407, 151],
+  "77": ["Seine-et-Marne", 538, 254],
+  "78": ["Yvelines", 463, 235],
+  "79": ["Deux-Sèvres", 315, 460],
+  "80": ["Somme", 493, 121],
+  "81": ["Tarn", 485, 737],
+  "82": ["Tarn-et-Garonne", 425, 707],
+  "83": ["Var", 765, 771],
+  "84": ["Vaucluse", 692, 715],
+  "85": ["Vendée", 248, 448],
+  "86": ["Vienne", 368, 459],
+  "87": ["Haute-Vienne", 421, 526],
+  "88": ["Vosges", 774, 297],
+  "89": ["Yonne", 581, 332],
+  "90": ["Territoire de Belfort", 812, 353],
+  "91": ["Essonne", 490, 264],
+  "92": ["Hauts-de-Seine", 491, 231],
+  "93": ["Seine-Saint-Denis", 507, 225],
+  "94": ["Val-de-Marne", 506, 239],
+  "95": ["Val-d'Oise", 483, 208],
+};
+// Paris et la petite couronne tiennent dans quelques kilomètres : leurs
+// centres se chevauchent à toutes les échelles, et c'est justement là que la
+// densité est la plus forte. D'où un encart schématique — les positions sont
+// approximatives, mais chaque département devient lisible, ce qui est le seul
+// but de l'encart.
+const CARTE_IDF = [
+  ["95", 152, 42], ["93", 214, 84], ["78", 52, 116], ["92", 112, 124],
+  ["75", 163, 120], ["77", 264, 152], ["94", 203, 166], ["91", 112, 208],
+];
+const CARTE_IDF_W = 310, CARTE_IDF_H = 250;
+
+// Département d'un partenaire, ramené à un code à deux caractères ("2A" pour
+// la Corse-du-Sud). Le champ est saisi ou déduit du code postal ; on retombe
+// sur le code postal quand il n'a pas été rempli.
+function departementDe(p) {
+  const brut = String(p?.departement || "").trim().toUpperCase();
+  if (CARTE_DEPARTEMENTS[brut]) return brut;
+  const cp = String(p?.postalCode || "").replace(/\s/g, "");
+  if (/^\d{5}$/.test(cp)) {
+    const court = cp.slice(0, 2);
+    if (court === "20") return null;             // Corse : le code postal ne tranche pas
+    const long = cp.slice(0, 3);                 // 971 à 978 : outre-mer
+    if (CARTE_DEPARTEMENTS[long]) return long;
+    if (CARTE_DEPARTEMENTS[court]) return court;
+  }
+  return null;
+}
+
+// Ce que la carte affiche, département par département. `sansDepartement`
+// rassemble ceux qu'on ne sait pas placer : ils ne disparaissent pas, ils
+// deviennent une liste à compléter.
+function repartitionGeographique(data) {
+  const parPartenaire = new Map();
+  for (const d of (data?.dossiers || [])) {
+    if (!parPartenaire.has(d.partnerId)) parPartenaire.set(d.partnerId, []);
+    parPartenaire.get(d.partnerId).push(d);
+  }
+  const carte = new Map();
+  const sansDepartement = [];
+  for (const p of (data?.partners || [])) {
+    if (p.deleted) continue;
+    const siens = parPartenaire.get(p.id) || [];
+    const gagnes = siens.filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status));
+    const dep = departementDe(p);
+    if (!dep) { sansDepartement.push(p); continue; }
+    if (!carte.has(dep)) carte.set(dep, { dep, nom: CARTE_DEPARTEMENTS[dep][0], partenaires: 0, dossiers: 0, ca: 0, liste: [] });
+    const g = carte.get(dep);
+    g.partenaires += 1;
+    g.dossiers += gagnes.length;
+    g.ca += gagnes.reduce((sum, d) => sum + (d.caAmount || 0), 0);
+    g.liste.push(p);
+  }
+  return { carte, sansDepartement };
+}
+
+// Carte d'implantation. Trois lectures d'un même jeu de ronds : combien de
+// partenaires, combien de dossiers, combien de chiffre d'affaires.
+function CarteReseau({ data, onOuvrirPartenaire }) {
+  const [vue, setVue] = useState("partenaires");
+  const [choisi, setChoisi] = useState(null);
+  const { carte, sansDepartement } = repartitionGeographique(data);
+  const lignes = [...carte.values()];
+  const valeur = (g) => vue === "ca" ? g.ca : vue === "dossiers" ? g.dossiers : g.partenaires;
+  const maxi = Math.max(1, ...lignes.map(valeur));
+  const totalPart = lignes.reduce((n, g) => n + g.partenaires, 0);
+  const format = (v) => vue === "ca" ? fmtEuro(v) : masqueNb(v);
+
+  // La surface du rond suit la valeur — c'est la racine carrée qu'il faut
+  // prendre, sinon un département deux fois plus fourni paraît quatre fois
+  // plus gros.
+  const rayon = (g) => {
+    const v = valeur(g);
+    return v <= 0 ? 5 : 6 + 20 * Math.sqrt(v / maxi);
+  };
+  // La couleur dit la production, indépendamment de ce que mesure la taille :
+  // un gros rond gris, c'est du monde qui ne produit pas.
+  const teinte = (g) => g.dossiers === 0 ? "#CBD5E1" : g.dossiers < 3 ? "#7DD3FC" : g.dossiers < 10 ? "#0EA5E9" : "#0369A1";
+
+  const Rond = ({ g, x, y, r, etiquette }) => (
+    <g onClick={() => setChoisi(choisi === g.dep ? null : g.dep)} style={{ cursor: "pointer" }}>
+      <title>{`${g.dep} ${g.nom} — ${g.partenaires} partenaire${g.partenaires > 1 ? "s" : ""}, ${g.dossiers} dossier${g.dossiers > 1 ? "s" : ""}, ${fmtEuro(g.ca)}`}</title>
+      <circle cx={x} cy={y} r={r} fill={teinte(g)} fillOpacity={choisi === g.dep ? 1 : 0.8}
+        stroke={choisi === g.dep ? "#1C2243" : "#fff"} strokeWidth={choisi === g.dep ? 2.5 : 1.5} />
+      {r >= 13 && <text x={x} y={y + 4} fontSize="13" fontWeight="700" textAnchor="middle" fill="#fff">{masqueNb(valeur(g))}</text>}
+      {etiquette && <text x={x} y={y + r + 12} fontSize="10.5" textAnchor="middle" fill="#6B7280">{g.dep}</text>}
+    </g>
+  );
+
+  const idf = new Set(CARTE_IDF.map(x => x[0]));
+  const top = [...lignes].sort((a, b) => valeur(b) - valeur(a) || b.partenaires - a.partenaires).slice(0, 6);
+  const detail = choisi ? carte.get(choisi) : null;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-1">
+        <div className="font-display font-semibold fa-navy">Implantation du réseau</div>
+        <div className="flex gap-1.5 flex-wrap">
+          {[["partenaires", "Partenaires"], ["dossiers", "Dossiers"], ["ca", "C.A."]].map(([v, lib]) => (
+            <button key={v} onClick={() => setVue(v)}
+              className={`fa-tap text-xs font-semibold px-3 py-1.5 rounded-full transition ${vue === v ? "bg-slate-800 text-white" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"}`}>
+              {lib}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="text-sm text-gray-500 mb-3">
+        La taille du rond, c'est {vue === "ca" ? "le chiffre d'affaires" : vue === "dossiers" ? "le nombre de dossiers" : "le nombre de partenaires"}.
+        Sa couleur, ce que le département produit. Cliquez sur un rond pour voir qui s'y trouve.
+      </p>
+
+      <div className="grid lg:grid-cols-[1.5fr_1fr] gap-5 items-start">
+        <div className="min-w-0">
+          <svg viewBox={`0 0 ${CARTE_W} ${CARTE_H}`} className="w-full h-auto">
+            <path d={CARTE_FRANCE} fill="#F1F5F9" stroke="#CBD5E1" strokeWidth="1.5" />
+            {lignes.filter(g => !idf.has(g.dep) && CARTE_DEPARTEMENTS[g.dep]?.[1] !== null && CARTE_DEPARTEMENTS[g.dep])
+              .sort((a, b) => rayon(b) - rayon(a))
+              .map(g => <Rond key={g.dep} g={g} x={CARTE_DEPARTEMENTS[g.dep][1]} y={CARTE_DEPARTEMENTS[g.dep][2]} r={rayon(g)} />)}
+          </svg>
+
+          {lignes.some(g => idf.has(g.dep)) && (
+            <div className="mt-2 fa-bg-offwhite rounded-xl px-3 py-2.5">
+              <div className="text-xs font-bold fa-navy">
+                Île-de-France
+                <span className="font-normal text-gray-500"> — {masqueNb(lignes.filter(g => idf.has(g.dep)).reduce((n, g) => n + g.partenaires, 0))} partenaires, schéma parce qu'ils se chevauchent sur la carte</span>
+              </div>
+              {(() => {
+                // Le cadre se resserre sur les départements réellement
+                // présents : sans quoi trois partenaires franciliens
+                // flotteraient au milieu d'un grand rectangle vide.
+                const poses = CARTE_IDF.map(([dep, x, y]) => ({ dep, x, y, g: carte.get(dep) }))
+                  .filter(o => o.g)
+                  .map(o => ({ ...o, r: Math.max(13, rayon(o.g)) }));
+                if (poses.length === 0) return null;
+                const marge = 16;
+                const x0 = Math.min(...poses.map(o => o.x - o.r)) - marge;
+                const x1 = Math.max(...poses.map(o => o.x + o.r)) + marge;
+                const y0 = Math.min(...poses.map(o => o.y - o.r)) - marge;
+                const y1 = Math.max(...poses.map(o => o.y + o.r + 14)) + marge / 2;
+                const largeur = Math.min(320, Math.max(150, (x1 - x0) * 1.15));
+                return (
+                  <svg viewBox={`${x0.toFixed(0)} ${y0.toFixed(0)} ${(x1 - x0).toFixed(0)} ${(y1 - y0).toFixed(0)}`}
+                    className="h-auto" style={{ width: "100%", maxWidth: `${largeur.toFixed(0)}px` }}>
+                    {poses.map(o => <Rond key={o.dep} g={o.g} x={o.x} y={o.y} r={o.r} etiquette />)}
+                  </svg>
+                );
+              })()}
+            </div>
+          )}
+
+          <div className="flex items-center gap-3 flex-wrap text-[11px] text-gray-500 mt-2">
+            <span>Production :</span>
+            {[["#CBD5E1", "aucune"], ["#7DD3FC", "1 à 2 dossiers"], ["#0EA5E9", "3 à 9"], ["#0369A1", "10 et plus"]].map(([c, lib]) => (
+              <span key={lib} className="flex items-center gap-1.5">
+                <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: c }} />{lib}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="flex gap-2 flex-wrap mb-3">
+            {[[totalPart, "partenaires placés"], [lignes.length, "départements couverts"],
+              [Object.values(CARTE_DEPARTEMENTS).filter(x => x[1] !== null).length - lignes.filter(g => CARTE_DEPARTEMENTS[g.dep]?.[1] !== null).length, "départements vides"]].map(([v, lib]) => (
+              <div key={lib} className="fa-bg-offwhite rounded-xl px-3 py-2 min-w-[92px]">
+                <div className="font-display text-xl font-bold fa-navy leading-tight">{masqueNb(v)}</div>
+                <div className="text-[11px] text-gray-500">{lib}</div>
+              </div>
+            ))}
+          </div>
+
+          {detail ? (
+            <div className="border border-gray-200 rounded-xl p-3">
+              <div className="flex items-baseline justify-between gap-2 mb-1.5">
+                <span className="text-sm font-bold fa-navy">{detail.dep} · {detail.nom}</span>
+                <button onClick={() => setChoisi(null)} className="text-xs text-gray-400 hover:text-gray-700">fermer</button>
+              </div>
+              <div className="text-xs text-gray-500 mb-2">
+                {masqueNb(detail.partenaires)} partenaire{detail.partenaires > 1 ? "s" : ""} · {masqueNb(detail.dossiers)} dossier{detail.dossiers > 1 ? "s" : ""} · {fmtEuro(detail.ca)}
+              </div>
+              <div className="space-y-1">
+                {detail.liste.slice(0, 12).map(p => (
+                  <button key={p.id} onClick={() => onOuvrirPartenaire?.(p)}
+                    className="block text-left text-[13px] fa-navy hover:underline truncate max-w-full">
+                    {nomPartenaire(p)}{p.company ? <span className="text-gray-400"> · {p.company}</span> : null}
+                  </button>
+                ))}
+                {detail.liste.length > 12 && <div className="text-[11px] text-gray-400">et {detail.liste.length - 12} autres</div>}
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm">
+              {top.map((g, i) => (
+                <button key={g.dep} onClick={() => setChoisi(g.dep)}
+                  className="w-full flex items-center gap-2 py-1.5 border-t border-gray-100 first:border-0 text-left hover:bg-gray-50 rounded">
+                  <span className="w-5 text-right text-[11px] text-gray-400">{i + 1}</span>
+                  <span className="w-8 font-bold fa-navy">{g.dep}</span>
+                  <span className="flex-1 min-w-0 text-[12.5px] text-gray-500 truncate">{g.nom}</span>
+                  <span className="text-xs text-gray-500 whitespace-nowrap">
+                    {vue === "ca" ? fmtEuro(g.ca) : <>{masqueNb(g.partenaires)} part. · {masqueNb(g.dossiers)} doss.</>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <p className="text-[11px] text-gray-400 mt-3">
+            Un rond <strong>gris</strong> signale des partenaires qui ne produisent pas : c'est là qu'il faut
+            appeler. Un département <strong>vide</strong> à côté d'un gros rond, c'est une zone à prospecter.
+          </p>
+
+          {lignes.some(g => CARTE_DEPARTEMENTS[g.dep]?.[1] === null) && (
+            <div className="mt-3 text-xs rounded-xl px-3 py-2 fa-bg-offwhite text-gray-600">
+              <strong>Hors métropole</strong> — comptés dans les totaux, absents du tracé :
+              {" "}{lignes.filter(g => CARTE_DEPARTEMENTS[g.dep]?.[1] === null)
+                    .map(g => `${g.nom} (${g.partenaires})`).join(", ")}.
+            </div>
+          )}
+
+          {sansDepartement.length > 0 && (
+            <div className="mt-3 text-xs rounded-xl px-3 py-2 bg-amber-50 border border-amber-200 text-amber-900">
+              <strong>{masqueNb(sansDepartement.length)} partenaire{sansDepartement.length > 1 ? "s" : ""} hors carte</strong> — pas de code postal dans leur fiche :
+              {" "}{sansDepartement.slice(0, 6).map((p, i) => (
+                <span key={p.id}>{i > 0 && ", "}
+                  <button onClick={() => onOuvrirPartenaire?.(p)} className="underline hover:no-underline">{nomPartenaire(p)}</button>
+                </span>
+              ))}
+              {sansDepartement.length > 6 && ` et ${sansDepartement.length - 6} autres`}.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Camembert maison : quatre arcs et une légende, pas de librairie pour ça.
+function Camembert({ parts, total, taille = 190 }) {
+  const R = 92, EP = 34, C = 110;
+  let angle = -Math.PI / 2;
+  const arcs = parts.map(part => {
+    const a = total > 0 ? (2 * Math.PI * part.valeur) / total : 0;
+    const ri = R - EP;
+    const pt = (rayon, ang) => `${(C + rayon * Math.cos(ang)).toFixed(1)} ${(C + rayon * Math.sin(ang)).toFixed(1)}`;
+    // Un camembert à une seule part ne peut pas se dessiner en arc : le point
+    // de départ et le point d'arrivée seraient confondus.
+    const d = a >= 2 * Math.PI - 0.001
+      ? `M${pt(R, 0)}A${R} ${R} 0 1 1 ${pt(R, Math.PI)}A${R} ${R} 0 1 1 ${pt(R, 0)}` +
+        `M${pt(ri, 0)}A${ri} ${ri} 0 1 0 ${pt(ri, Math.PI)}A${ri} ${ri} 0 1 0 ${pt(ri, 0)}`
+      : `M${pt(R, angle)}A${R} ${R} 0 ${a > Math.PI ? 1 : 0} 1 ${pt(R, angle + a)}` +
+        `L${pt(ri, angle + a)}A${ri} ${ri} 0 ${a > Math.PI ? 1 : 0} 0 ${pt(ri, angle)}Z`;
+    const el = <path key={part.nom} d={d} fill={part.couleur} fillRule="evenodd">
+      <title>{`${part.nom} — ${part.valeur} (${total > 0 ? Math.round((part.valeur * 100) / total) : 0} %)`}</title>
+    </path>;
+    angle += a;
+    return el;
+  });
+  return (
+    <svg viewBox="0 0 220 220" width={taille} height={taille} className="shrink-0">
+      {arcs}
+      <text x={C} y={C - 6} textAnchor="middle" fontSize="26" fontWeight="700" fontFamily="Fredoka" fill="currentColor" className="fa-navy">{masqueNb(total)}</text>
+      <text x={C} y={C + 14} textAnchor="middle" fontSize="12" fill="#6B7280">dossiers</text>
+    </svg>
+  );
+}
+
+const COULEURS_PARTS = ["#008BA8", "#FCD947", "#22C55E", "#8B5CF6", "#F97316", "#2F80ED", "#EC4899", "#94A3B8"];
+
+// Répartition de la production, par assureur ou par réseau. Le même bloc sert
+// aux deux : la seule différence est la façon de regrouper les dossiers.
+function RepartitionProduction({ data, axe, onFusionner, onRefuserFusion, canEdit }) {
+  const [toutVoir, setToutVoir] = useState(false);
+  const parAssureur = axe === "assureurs";
+  const gagnes = (data?.dossiers || []).filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status));
+
+  let lignes;
+  if (parAssureur) {
+    const m = new Map();
+    for (const d of gagnes) {
+      const nom = (d.assureur || "").trim() || "Non renseigné";
+      m.set(nom, (m.get(nom) || 0) + 1);
+    }
+    const couleurs = Object.fromEntries((data?.settings?.assureurs || []).map(a => [a.nom, a.couleur]));
+    lignes = [...m.entries()].sort((a, b) => b[1] - a[1])
+      .map(([nom, valeur], i) => ({ nom, valeur, couleur: couleurs[nom] || COULEURS_PARTS[i % COULEURS_PARTS.length] }));
+  } else {
+    lignes = groupesReseaux(data).filter(g => g.dossiers > 0)
+      .sort((a, b) => b.dossiers - a.dossiers)
+      .map((g, i) => ({ nom: g.cle === "__sans__" ? SANS_RESEAU : g.nom, valeur: g.dossiers, variantes: g.variantes, couleur: COULEURS_PARTS[i % COULEURS_PARTS.length] }));
+  }
+
+  // Au-delà de sept parts, le camembert devient un arc-en-ciel illisible : le
+  // reste part dans « Autres », et la liste complète reste consultable.
+  const LIMITE = 7;
+  let parts = lignes;
+  if (!toutVoir && lignes.length > LIMITE) {
+    const reste = lignes.slice(LIMITE - 1);
+    parts = [...lignes.slice(0, LIMITE - 1),
+      { nom: `Autres (${reste.length})`, valeur: reste.reduce((n, x) => n + x.valeur, 0), couleur: "#94A3B8" }];
+  }
+  const total = lignes.reduce((n, x) => n + x.valeur, 0);
+  const propositions = parAssureur ? [] : fusionsProposees(data);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="font-display font-semibold fa-navy">{parAssureur ? "Par assureur" : "Par réseau de partenaires"}</div>
+      <p className="text-sm text-gray-500 mb-3">
+        Part des dossiers gagnés.
+        {!parAssureur && <> Les orthographes d'une même enseigne sont réunies d'office.</>}
+      </p>
+
+      {total === 0 ? (
+        <div className="text-sm text-gray-400 py-4 text-center border border-dashed border-gray-200 rounded-xl">
+          Aucun dossier gagné pour l'instant.
+        </div>
+      ) : (
+        <div className="flex gap-4 items-center flex-wrap">
+          <Camembert parts={parts} total={total} />
+          <div className="flex-1 min-w-[190px]">
+            {parts.map(x => (
+              <div key={x.nom} className="flex items-center gap-2 text-[12.5px] py-0.5">
+                <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: x.couleur }} />
+                <span className="flex-1 min-w-0 truncate" title={x.variantes && x.variantes.length > 1 ? `Écritures réunies : ${x.variantes.join(", ")}` : undefined}>
+                  {x.nom}
+                  {x.variantes && x.variantes.length > 1 && <span className="text-gray-400"> ({x.variantes.length} écritures)</span>}
+                </span>
+                <b className="w-10 text-right">{Math.round((x.valeur * 100) / total)} %</b>
+                <span className="w-16 text-right text-[11.5px] text-gray-400">{masqueNb(x.valeur)} doss.</span>
+              </div>
+            ))}
+            {lignes.length > LIMITE && (
+              <button onClick={() => setToutVoir(v => !v)} className="text-xs fa-teal-text hover:underline mt-1">
+                {toutVoir ? "Regrouper la traîne" : `Voir les ${lignes.length - LIMITE + 1} autres →`}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {propositions.length > 0 && canEdit && (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+          <div className="text-xs font-bold text-amber-900 mb-1">
+            {propositions.length} rapprochement{propositions.length > 1 ? "s" : ""} à valider
+          </div>
+          <p className="text-[11px] text-amber-900/70 mb-2">
+            Ces noms se ressemblent sans être identiques. À vous de dire si c'est la même enseigne — je ne le
+            décide pas tout seul, « Nestenn » et « Nestenn Paris 15 » peuvent être deux choses différentes.
+          </p>
+          {propositions.slice(0, 5).map(({ garde, absorbe, motif }) => (
+            <div key={garde.cle + absorbe.cle} className="flex items-center gap-2 flex-wrap py-1.5 border-t border-amber-200 first:border-0">
+              <span className="flex-1 min-w-[180px] text-[12.5px] text-amber-900">
+                <strong>{garde.nom}</strong> ({masqueNb(garde.partenaires)}) et <strong>{absorbe.nom}</strong> ({masqueNb(absorbe.partenaires)})
+                <span className="text-amber-900/60"> — {motif === "contenu" ? "l'un contient l'autre" : "à une lettre ou deux près"}</span>
+              </span>
+              <button onClick={() => onFusionner?.(absorbe.cle, garde.cle, garde.nom)}
+                className="fa-bg-gold text-[11.5px] font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap">
+                Réunir sous « {garde.nom} »
+              </button>
+              <button onClick={() => onRefuserFusion?.(garde.cle, absorbe.cle)}
+                className="text-[11.5px] text-amber-900/60 hover:text-amber-900 whitespace-nowrap">
+                deux réseaux différents
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProductionParAssureur({ data, dossiers }) {
   const gagnes = (dossiers || []).filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status));
   if (gagnes.length === 0) return null;
@@ -10864,6 +11524,274 @@ function SauvegardesPanel() {
 const MOIS_MS = 30.44 * 86400000;
 const JOUR_MS = 86400000;
 
+// =============================================================================
+// PARTENAIRES QUI DÉCROCHENT
+//
+// À cinquante partenaires on balaie la liste du regard ; à trois cents, un
+// partenaire qui s'éteint passe inaperçu jusqu'à ce que la production baisse.
+// D'où une détection qui vient vous chercher plutôt que d'attendre qu'on aille
+// la consulter.
+//
+// Le point délicat est le seuil de décrochage. Un seuil unique à trente jours
+// alerterait chaque matin sur des gens qui travaillent normalement — et une
+// liste qui crie au loup tous les jours ne se lit plus au bout de trois. On
+// compare donc chaque partenaire à SA cadence : celui qui dépose tous les
+// quarante-cinq jours n'a rien fait d'anormal au bout de trente.
+// =============================================================================
+const DECROCHAGE = {
+  demarrage: 15,     // jours d'ancienneté avant de s'inquiéter d'un zéro dossier
+  minDecroche: 30,   // plancher, quelle que soit la cadence habituelle
+  silence: 60,       // ni connexion ni dossier : la question devient autre
+  masqueRelance: 15, // après une relance, on laisse le temps de réagir
+  masqueIgnore: 30,  // « ignorer » met de côté sans rien envoyer
+};
+// null = ce partenaire va bien. Sinon, ce qui cloche et depuis quand.
+function etatDecrochage(p, dossiers, maintenant = Date.now()) {
+  if (!p || p.deleted || p.active === false) return null;
+  const r = rythmePartenaire(p, dossiers, maintenant);
+  const jours = (t) => Math.max(0, Math.floor((maintenant - t) / JOUR_MS));
+  const anciennete = jours(r.entree);
+  const connexionJ = p.lastLoginAt ? jours(p.lastLoginAt) : null;
+
+  // Jamais rien déposé. Deux situations très différentes derrière le même zéro.
+  if (r.n === 0) {
+    if (anciennete < DECROCHAGE.demarrage) return null;
+    if (connexionJ === null) {
+      return {
+        code: "jamais_connecte", rang: 0, depuis: r.entree, jours: anciennete,
+        groupe: "Jamais démarré · jamais connecté",
+        detail: `Accès créé il y a ${anciennete} j, jamais ouvert · 0 dossier`,
+      };
+    }
+    const nb = Number(p.connexions) || 1;
+    return {
+      code: "sans_dossier", rang: 1, depuis: r.entree, jours: anciennete,
+      groupe: "Jamais démarré · connecté mais rien envoyé",
+      detail: `${nb} connexion${nb > 1 ? "s" : ""}, la dernière il y a ${connexionJ} j · 0 dossier déposé`,
+    };
+  }
+
+  const silenceJ = jours(r.dernier);
+  // Plus de nouvelles du tout : ni dossier, ni passage sur son espace.
+  if (silenceJ >= DECROCHAGE.silence && (connexionJ === null || connexionJ >= DECROCHAGE.silence)) {
+    return {
+      code: "silencieux", rang: 3, depuis: r.dernier, jours: silenceJ,
+      groupe: "Silencieux",
+      detail: `Ni connexion ni dossier depuis ${silenceJ} j · ${r.n} dossier${r.n > 1 ? "s" : ""} en tout`,
+    };
+  }
+  // Décrochage, mesuré à sa propre cadence.
+  const seuil = Math.max(DECROCHAGE.minDecroche, r.intervalle ? r.intervalle * 2 : DECROCHAGE.minDecroche);
+  if (silenceJ >= seuil) {
+    return {
+      code: "decroche", rang: 2, depuis: r.dernier, jours: silenceJ, seuil,
+      groupe: "A décroché",
+      detail: r.intervalle
+        ? `Dernier dossier il y a ${silenceJ} j — il en envoyait un tous les ${r.intervalle} j · ${r.n} dossiers au total`
+        : `Dernier dossier il y a ${silenceJ} j · ${r.n} dossier${r.n > 1 ? "s" : ""} au total`,
+    };
+  }
+  return null;
+}
+// Une relance récente met la ligne en veilleuse ; « ignorer » la retire.
+function veilleDecrochage(p, maintenant = Date.now()) {
+  const j = (t) => (maintenant - t) / JOUR_MS;
+  if (p?.relanceIgnoreLe && j(p.relanceIgnoreLe) < DECROCHAGE.masqueIgnore) {
+    return { type: "ignore", jusqu: p.relanceIgnoreLe + DECROCHAGE.masqueIgnore * JOUR_MS };
+  }
+  if (p?.relanceLe && j(p.relanceLe) < DECROCHAGE.masqueRelance) {
+    return { type: "relance", le: p.relanceLe, jusqu: p.relanceLe + DECROCHAGE.masqueRelance * JOUR_MS };
+  }
+  return null;
+}
+function partenairesQuiDecrochent(data, maintenant = Date.now()) {
+  // Les dossiers sont regroupés une fois : à trois cents partenaires, relire
+  // la liste entière pour chacun coûterait trois cents parcours.
+  const parPartenaire = new Map();
+  for (const d of (data?.dossiers || [])) {
+    if (!parPartenaire.has(d.partnerId)) parPartenaire.set(d.partnerId, []);
+    parPartenaire.get(d.partnerId).push(d);
+  }
+  return (data?.partners || [])
+    .map(p => ({ p, etat: etatDecrochage(p, parPartenaire.get(p.id) || [], maintenant), veille: veilleDecrochage(p, maintenant) }))
+    .filter(x => x.etat !== null)
+    .sort((a, b) => {
+      // Ce qui est en veille descend : ce n'est plus à traiter aujourd'hui.
+      const v = (x) => x.veille ? 1 : 0;
+      // Le groupe d'abord : une ligne en veille descend à la fin de SON
+      // groupe, pas à la fin de la liste — sinon, avec deux cents lignes,
+      // elle disparaît et on ne sait plus qui on a déjà relancé.
+      // À l'intérieur, le problème le PLUS RÉCENT d'abord : c'est là qu'une
+      // relance sert encore. Quelqu'un qui n'a jamais ouvert son accès depuis
+      // un an ne se rattrape pas par un mail de plus.
+      return a.etat.rang - b.etat.rang || v(a) - v(b) || a.etat.jours - b.etat.jours;
+    });
+}
+const LIBELLE_DECROCHAGE = {
+  jamais_connecte: "accès jamais activé",
+  sans_dossier: "connecté mais aucun dossier",
+  decroche: "production arrêtée",
+  silencieux: "sans signe de vie",
+};
+// Le message de relance dépend de la situation : on n'écrit pas la même chose
+// à quelqu'un qui n'a jamais ouvert son accès et à un partenaire qui produisait.
+function messageRelance(p, code) {
+  const prenom = (p.firstName || "").trim();
+  const bonjour = prenom ? `Bonjour ${prenom},` : "Bonjour,";
+  if (code === "jamais_connecte") {
+    return {
+      sujet: "Votre espace Frangola vous attend",
+      corps: [
+        bonjour, "",
+        "Je reviens vers vous : votre espace partenaire Frangola est ouvert, mais il n'a pas encore été activé.",
+        "",
+        "C'est l'affaire de deux minutes :",
+        `1. Rendez-vous sur ${SITE_URL}`,
+        "2. Cliquez sur « Première connexion, ou mot de passe oublié ? »",
+        `3. Saisissez votre adresse email (${(p.email || "").trim()}) et choisissez votre mot de passe`,
+        "",
+        "Si vous n'avez pas reçu le premier message ou si quelque chose bloque, dites-le moi : je vous rappelle et on le fait ensemble.",
+        "", "À très vite,",
+      ].join("\n"),
+    };
+  }
+  if (code === "sans_dossier") {
+    return {
+      sujet: "Un premier dossier à me confier ?",
+      corps: [
+        bonjour, "",
+        "Vous avez ouvert votre espace Frangola, et je voulais m'assurer que tout était clair de votre côté.",
+        "",
+        "Pour vous lancer, il suffit d'un client qui vient de signer son prêt : vous déposez son offre de prêt et son tableau d'amortissement dans votre espace, et je m'occupe de tout le reste — étude, devis, résiliation de son ancien contrat. Vous n'avez rien d'autre à faire, et votre commission vous est reversée dès que les honoraires sont encaissés.",
+        "",
+        "Si vous avez une question, un doute sur un dossier ou simplement envie qu'on en reparle, appelez-moi.",
+        "", "À très vite,",
+      ].join("\n"),
+    };
+  }
+  return {
+    sujet: "On refait un dossier ensemble ?",
+    corps: [
+      bonjour, "",
+      "Je n'ai pas eu de nouveau dossier de votre part depuis quelque temps, et je voulais prendre de vos nouvelles.",
+      "",
+      "Rien de particulier à me signaler ? Si un dossier s'est mal passé ou si quelque chose vous a gêné dans le fonctionnement, dites-le moi franchement, je préfère le savoir.",
+      "",
+      "Et si c'est simplement que l'activité a été calme : dès que vous avez un client qui signe un prêt, pensez à moi. Vous déposez son offre de prêt dans votre espace, je m'occupe du reste.",
+      "", "À très vite,",
+    ].join("\n"),
+  };
+}
+
+function PartenairesQuiDecrochent({ data, onRelancer, onOuvrirPartenaire, canEdit }) {
+  const [copie, setCopie] = useState(null);
+  const [tout, setTout] = useState(false);
+  const lignes = partenairesQuiDecrochent(data);
+  const actifs = lignes.filter(x => !x.veille || x.veille.type !== "ignore");
+  const misDeCote = lignes.length - actifs.length;
+  const aTraiter = actifs.filter(x => !x.veille).length;
+
+  async function relancer(p, code) {
+    const { corps } = messageRelance(p, code);
+    const ok = await copierRiche(messageEnHtml(corps), corps);
+    setCopie(ok ? p.id : "echec");
+    setTimeout(() => setCopie(null), 3500);
+    // Copier n'est pas envoyer, mais c'en est toujours la suite : on note la
+    // relance, et la ligne se met en veille quinze jours.
+    if (ok) onRelancer?.(p.id, code);
+  }
+
+  // Le quota est PAR groupe, pas global : avec quarante « jamais connectés »,
+  // un quota global ferait disparaître les trois autres catégories de l'écran.
+  const PAR_GROUPE = tout ? 15 : 4;
+  const EN_VEILLE_VUES = tout ? 10 : 3;
+  const groupes = [];
+  for (const x of actifs) {
+    const g = groupes.find(y => y.titre === x.etat.groupe);
+    if (g) g.lignes.push(x);
+    else groupes.push({ titre: x.etat.groupe, lignes: [x] });
+  }
+  // Les lignes déjà relancées gardent leur place quoi qu'il arrive : savoir
+  // qui on a relancé fait partie du travail, et dans un groupe de quarante
+  // elles seraient sinon repoussées hors de l'écran.
+  for (const g of groupes) {
+    const aFaire = g.lignes.filter(x => !x.veille);
+    const enVeille = g.lignes.filter(x => x.veille);
+    g.total = g.lignes.length;
+    g.vues = [...aFaire.slice(0, PAR_GROUPE), ...enVeille.slice(0, EN_VEILLE_VUES)];
+    g.caches = g.total - g.vues.length;
+  }
+  const trop = groupes.reduce((n, g) => n + g.caches, 0);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-4">
+      <div className="flex items-center gap-2 font-display font-semibold fa-navy">
+        📉 Partenaires qui décrochent
+        <span className={`text-xs font-bold rounded-full min-w-[22px] h-[22px] px-1.5 flex items-center justify-center ${aTraiter ? "bg-red-50 text-red-700" : "bg-gray-100 text-gray-500"}`}>
+          {masqueNb(aTraiter)}
+        </span>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">
+        Le plus urgent en premier. Un clic sur un nom ouvre sa fiche.
+        {misDeCote > 0 && <span className="text-gray-400"> · {misDeCote} mis de côté</span>}
+      </p>
+
+      {actifs.length === 0 ? (
+        <div className="text-sm rounded-xl px-3 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-900">
+          ✅ Personne ne décroche. Tous vos partenaires actifs ont envoyé un dossier dans leur rythme habituel.
+        </div>
+      ) : (<>
+        {groupes.map(g => (
+          <div key={g.titre} className="mt-3 first:mt-0">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">
+              {g.titre} ({g.total})
+            </div>
+            {g.vues.map(({ p, etat, veille }) => (
+              <div key={p.id}
+                className={`flex items-start sm:items-center gap-2.5 flex-wrap border rounded-xl px-3 py-2 mb-1.5 ${veille ? "border-dashed border-gray-200 opacity-70" : "border-gray-200"}`}>
+                <span className={`w-2 h-2 rounded-full shrink-0 mt-1.5 sm:mt-0 ${etat.rang === 0 ? "bg-red-500" : etat.rang === 3 ? "bg-gray-400" : "bg-amber-500"}`} />
+                <span className="flex-1 min-w-[150px]">
+                  <button onClick={() => onOuvrirPartenaire?.(p)} className="block fa-navy font-bold text-sm truncate max-w-full hover:underline text-left">
+                    {nomPartenaire(p)}
+                  </button>
+                  <span className={`block text-[11px] ${veille ? "text-gray-400" : etat.rang === 0 ? "text-red-700" : etat.rang === 3 ? "text-gray-500" : "text-amber-700"}`}>
+                    {veille
+                      ? `Relancé le ${fmtDate(veille.le)} — on lui laisse jusqu'au ${fmtDate(veille.jusqu)}`
+                      : etat.detail}
+                  </span>
+                </span>
+                <span className="text-[11px] text-gray-400 shrink-0">{etat.jours} j</span>
+                {canEdit && (
+                  <button onClick={() => relancer(p, etat.code)}
+                    className={`text-[11px] font-bold px-2.5 py-1.5 rounded-lg shrink-0 transition ${veille ? "bg-white border border-gray-200 text-gray-600" : "fa-bg-gold"}`}>
+                    {copie === p.id ? "✓ Message copié" : veille ? "Relancer à nouveau" : "Relancer"}
+                  </button>
+                )}
+                {canEdit && !veille && (
+                  <button onClick={() => onRelancer?.(p.id, "ignore")}
+                    title={`Le retirer de la liste pendant ${DECROCHAGE.masqueIgnore} jours, sans rien envoyer`}
+                    className="text-[11px] text-gray-400 hover:text-gray-700 shrink-0">ignorer</button>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+        {(trop > 0 || tout) && (
+          <button onClick={() => setTout(v => !v)} className="text-xs fa-teal-text hover:underline mt-1">
+            {tout ? "Réduire" : `Voir plus (${trop} autre${trop > 1 ? "s" : ""}) →`}
+          </button>
+        )}
+        {copie === "echec" && <div className="text-[11px] text-red-600 mt-1">La copie a échoué — réessayez.</div>}
+        <p className="text-[11px] text-gray-400 mt-2">
+          Le plus récent en haut de chaque groupe : c'est là qu'une relance sert encore.
+          « Relancer » copie un message adapté à la situation et met la ligne en veille {DECROCHAGE.masqueRelance} jours.
+          Un partenaire qui produisait n'est signalé qu'au double de sa cadence habituelle, jamais avant {DECROCHAGE.minDecroche} jours.
+        </p>
+      </>)}
+    </div>
+  );
+}
+
 function rythmePartenaire(p, dossiers, maintenant = Date.now()) {
   const entree = dateEntreeDe(p) || maintenant;
   const siens = (dossiers || []).filter(d => d.partnerId === p.id).sort((a, b) => a.createdAt - b.createdAt);
@@ -11602,7 +12530,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -11658,6 +12586,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "objectifsCA", label: "Objectifs de C.A.", defaut: "projections", rendu: () => <ObjectifsCA data={data} /> },
     { id: "coutChallenges", label: "Coût des challenges", defaut: "projections", rendu: () => <CoutChallenges data={data} /> },
     { id: "production", label: "Production de la période", defaut: "challenge", rendu: () => <ProductionDuMois data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} onSetPeriode={onSetPeriodeProduction} canEdit={isFullAdmin} /> },
+    { id: "carteReseau", label: "Implantation du réseau (carte)", defaut: "analyses", rendu: () => <CarteReseau data={data} onOuvrirPartenaire={navAdmin.ouvrirPartenaire} /> },
+    { id: "partAssureurs", label: "Répartition par assureur", defaut: "analyses", rendu: () => <RepartitionProduction data={data} axe="assureurs" /> },
+    { id: "partReseaux", label: "Répartition par réseau", defaut: "analyses", rendu: () => <RepartitionProduction data={data} axe="reseaux" onFusionner={onFusionnerReseaux} onRefuserFusion={onRefuserFusionReseaux} canEdit={isFullAdmin} /> },
+    { id: "decrochage", label: "Partenaires qui décrochent", defaut: "accueil", rendu: () => <PartenairesQuiDecrochent data={data} onRelancer={onRelancerPartenaire} onOuvrirPartenaire={navAdmin.ouvrirPartenaire} canEdit={true} /> },
     { id: "challengeBienvenue", label: "Challenge nouveau partenaire", defaut: "challenge", rendu: () => <ChallengeBienvenue data={data} onMajReglage={onMajBienvenue} onMajInscrit={onMajInscritBienvenue} onOuvrirPartenaire={navAdmin.ouvrirPartenaire} canEdit={isFullAdmin} /> },
     { id: "challengesPartenaires", label: "Challenges partenaires", defaut: "challenge", rendu: () => <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} /> },
     { id: "challengeBoard", label: "Tableau des objectifs", defaut: "challenge", rendu: () => <ChallengeBoard data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} /> },
@@ -13720,6 +14652,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             return <span className={c.teinte} title={c.jamais ? "" : c.long}>{c.jamais ? "jamais connecté" : `dernière connexion ${fmtDate(p.lastLoginAt)} à ${new Date(p.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })} (${c.court})`}</span>;
                           })()}
                         </span>
+                        {p.relanceLe && (
+                          <span className="text-xs bg-amber-50 border border-amber-200 text-amber-800 px-3 py-1.5 rounded-lg">
+                            Relancé {Number(p.relanceNb) > 1 ? `${p.relanceNb} fois, la dernière ` : ""}le {fmtDate(p.relanceLe)}
+                            {p.relanceCode && <span className="text-amber-700/70"> · {LIBELLE_DECROCHAGE[p.relanceCode]}</span>}
+                          </span>
+                        )}
                         <BlocAcces cible={p} expediteur={viewerLabel} telephone={viewerTelephone} genre="partenaire" onReinitialiser={() => reinitialiserAcces("partner", p.id)}
                           onMarquer={(champ) => onUpdatePartner(p.id, { integration: { ...(p.integration || {}), [champ]: Date.now() } })} />
                         {data.settings?.contratType && (
@@ -14192,23 +15130,13 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           // Top réseaux : l'échelon au-dessus du partenaire. Il dit quelles
           // enseignes ouvrir en priorité — recruter dans un réseau qui produit
           // déjà coûte moins cher que d'en défricher un nouveau.
-          const topReseaux = (() => {
-            const m = new Map();
-            for (const p of partners.filter(x => !x.deleted)) {
-              const nom = (p.company || "").trim() || "Sans réseau";
-              if (!m.has(nom)) m.set(nom, { nom, partenaires: 0, dossiers: 0, ca: 0, rec: 0 });
-              const g = m.get(nom);
-              g.partenaires += 1;
-              const siens = dossiers.filter(d => d.partnerId === p.id);
-              g.dossiers += siens.length;
-              g.ca += siens.filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status)).reduce((s, d) => s + (d.caAmount || 0), 0);
-              g.rec += siens.filter(contratEnCours).reduce((s, d) => s + recurrenceMensuelle(d), 0);
-            }
-            return [...m.values()]
-              .filter(g => g.dossiers > 0 || g.partenaires > 0)
-              .sort((a, b) => b.dossiers - a.dossiers || b.partenaires - a.partenaires)
-              .slice(0, 6);
-          })();
+          // Une seule ligne par enseigne : « Frangola » et « frangola » sont
+          // le même réseau, et les compter deux fois fausse tout le tableau.
+          const topReseaux = groupesReseaux(data)
+            .map(g => ({ ...g, nom: g.cle === "__sans__" ? "Sans réseau" : g.nom }))
+            .filter(g => g.dossiers > 0 || g.partenaires > 0)
+            .sort((a, b) => b.dossiers - a.dossiers || b.partenaires - a.partenaires)
+            .slice(0, 6);
 
           const STATUS_BAR_COLORS = {
             "Déposé": "#F0C61A", "En vérification": "#0EA5E9", "Devis en cours": "#008BA8",
