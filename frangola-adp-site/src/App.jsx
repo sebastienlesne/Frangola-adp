@@ -2123,9 +2123,13 @@ export default function App() {
         delete exclus[partnerId];
         inscrits[partnerId] = { ...(inscrits[partnerId] || {}), le: patch.le };
         message = `a inscrit ${nom} au challenge de bienvenue`;
+      } else if (patch.remisPalier !== undefined) {
+        const avant = inscrits[partnerId] || {};
+        inscrits[partnerId] = { ...avant, remis: { ...(avant.remis || {}), [patch.remisPalier]: Date.now() } };
+        message = `a remis la récompense du challenge de bienvenue à ${nom}`;
       } else {
         inscrits[partnerId] = { ...(inscrits[partnerId] || {}), ...patch };
-        message = `a remis la récompense du challenge de bienvenue à ${nom}`;
+        message = `a mis à jour le challenge de bienvenue de ${nom}`;
       }
       return withLog({
         ...base,
@@ -3972,36 +3976,56 @@ function ParrainageCard({ partner, onDeclarer }) {
 // une erreur de comptage.
 function BanniereBienvenue({ bienvenue, dossiers }) {
   const bi = bienvenue;
-  if (!bi || !bi.inscrit || !bi.actif || bi.remisLe) return null;
-  if (bi.expire) return null;
-  const r = bi.reglage;
-  const pct = Math.min(100, Math.round((bi.n / bi.objectif) * 100));
+  if (!bi || !bi.inscrit || !bi.actif) return null;
+  if (bi.expire || bi.termine) return null;
+  const palier = bi.suivant;
+  if (!palier || !palier.recompense) return null;
+
+  const pct = Math.min(100, Math.round((bi.n / palier.objectif) * 100));
   const dateFin = bi.fin ? new Date(bi.fin).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" }) : null;
+  const dejaGagne = bi.atteints.length;
+  // Le dernier palier, s'il en reste un après celui-ci : de quoi voir la
+  // marche suivante sans la confondre avec celle du moment.
+  const apres = bi.paliers.filter(x => x.objectif > palier.objectif);
+
   return (
-    <div className={`rounded-2xl p-5 mb-6 ${bi.atteint ? "bg-emerald-50 border border-emerald-300" : "fa-bg-gold"}`}>
+    <div className="rounded-2xl p-5 mb-6 fa-bg-gold">
       <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
-        <span className="font-display font-semibold fa-navy">
-          {bi.atteint ? "🏆 Objectif atteint !" : "🎁 Votre challenge de bienvenue"}
-        </span>
+        <span className="font-display font-semibold fa-navy">🎁 Votre challenge de bienvenue</span>
         <span className="text-xs text-teal-900/70">
-          {dateFin ? <>jusqu'au {dateFin}{bi.joursRestants !== null ? ` · ${bi.joursRestants} jour${bi.joursRestants > 1 ? "s" : ""} restant${bi.joursRestants > 1 ? "s" : ""}` : ""}</> : "sans limite de temps"}
+          {!bi.demarre
+            ? "le compte à rebours démarre à votre premier dossier"
+            : dateFin
+              ? <>jusqu'au {dateFin}{bi.joursRestants !== null ? ` · ${bi.joursRestants} jour${bi.joursRestants > 1 ? "s" : ""} restant${bi.joursRestants > 1 ? "s" : ""}` : ""}</>
+              : "sans limite de temps"}
         </span>
       </div>
+
+      {dejaGagne > 0 && (
+        <div className="text-xs text-teal-900/70 mb-1.5">
+          ✓ Déjà décroché : {bi.atteints.map(x => x.recompense).filter(Boolean).join(", ")}
+        </div>
+      )}
 
       <div className="flex items-baseline gap-2 mb-2">
         <span className="font-display text-3xl font-bold fa-navy">{bi.n}</span>
-        <span className="text-sm text-teal-900/70">/ {bi.objectif} dossiers gagnés</span>
+        <span className="text-sm text-teal-900/70">/ {palier.objectif} dossiers gagnés</span>
       </div>
 
       <div className="h-3 rounded-full bg-white/60 overflow-hidden">
-        <div className={`h-full rounded-full ${bi.atteint ? "bg-emerald-500" : "fa-bg-teal"}`} style={{ width: `${pct}%` }} />
+        <div className="h-full rounded-full fa-bg-teal" style={{ width: `${pct}%` }} />
       </div>
 
       <div className="text-sm fa-navy mt-2">
-        {bi.atteint
-          ? <><strong>{r.recompense}</strong> vous revient. Nous vous contactons.</>
-          : <>Plus que <strong>{bi.restants} dossier{bi.restants > 1 ? "s" : ""} gagné{bi.restants > 1 ? "s" : ""}</strong> pour gagner <strong>{r.recompense}</strong>.</>}
-        {bi.enCours > 0 && !bi.atteint && (
+        {bi.n === 0
+          ? <>Votre premier dossier lance le compteur. Plus que <strong>{palier.objectif} dossiers gagnés</strong> pour gagner <strong>{palier.recompense}</strong>.</>
+          : <>Plus que <strong>{bi.restants} dossier{bi.restants > 1 ? "s" : ""} gagné{bi.restants > 1 ? "s" : ""}</strong> pour gagner <strong>{palier.recompense}</strong>.</>}
+        {apres.length > 0 && (
+          <span className="text-teal-900/60">
+            {" "}Ensuite, {apres[0].objectif} dossiers vous donnent {apres[0].recompense}.
+          </span>
+        )}
+        {bi.enCours > 0 && (
           <span className="text-teal-900/60">
             {" "}({bi.enCours} dossier{bi.enCours > 1 ? "s" : ""} en cours {bi.enCours > 1 ? "ne sont" : "n'est"} pas encore compté{bi.enCours > 1 ? "s" : ""} :
             {" "}un dossier compte une fois le contrat souscrit.)
@@ -4014,7 +4038,10 @@ function BanniereBienvenue({ bienvenue, dossiers }) {
 
 function BannieresChallenges({ challenges, partner, dossiers }) {
   // Un challenge ciblé n'existe que pour les partenaires qu'il vise.
-  const visibles = (challenges || []).filter(c => challengeVisible(c) && challengeCible(c, partner?.id));
+  // Un partenaire ne voit une opération que s'il y a droit — la règle de
+  // non-cumul se lit donc aussi de son côté, sinon on lui promettrait une
+  // prime qu'il ne toucherait pas.
+  const visibles = (challenges || []).filter(c => challengeVisible(c) && challengeConcerne(c, partner?.id, _colorDataRef));
   if (visibles.length === 0) return null;
   return <>{visibles.map(c => <BanniereChallenge key={c.id} challenge={c} partner={partner} dossiers={dossiers} />)}</>;
 }
@@ -7119,6 +7146,31 @@ function souscritsSurPeriode(dossiers, partnerId, debut, fin) {
 // celui qu'on veut, et les autres restent invisibles des partenaires. Le champ
 // historique `challengePartenaires` (un seul challenge) est conservé et relu en
 // tête de liste, pour ne pas perdre celui qui tourne peut-être déjà.
+// Opérations préfabriquées : le gros du travail, c'est de se décider, pas de
+// remplir le formulaire. On propose donc des coups tout montés — titre, durée,
+// bonus — que l'on retouche avant de publier. Rien n'est publié tout seul :
+// un challenge naît toujours en brouillon.
+const MODELES_OPERATION = [
+  { id: "bf", titre: "BLACK FRIDAY", type: "boost", bonusMode: "pourcent", bonusValeur: 10, jours: 4,
+    aide: "4 jours, +10 % de commission" },
+  { id: "we", titre: "WEEK-END DE FOLIE", type: "boost", bonusMode: "pourcent", bonusValeur: 15, jours: 3,
+    aide: "3 jours, +15 % de commission" },
+  { id: "3j", titre: "3 JOURS DE FOU", type: "boost", bonusMode: "pourcent", bonusValeur: 20, jours: 3,
+    aide: "3 jours, +20 % de commission" },
+  { id: "mois", titre: "OBJECTIF DU MOIS", type: "objectif", objectif: 5, jours: 30,
+    aide: "30 jours, 5 dossiers à décrocher" },
+];
+// Le prochain vendredi (ou aujourd'hui si on y est) : un coup de trois jours
+// se lance un vendredi, pas un mardi.
+function prochainVendredi(depuis = new Date()) {
+  const d = new Date(depuis.getFullYear(), depuis.getMonth(), depuis.getDate());
+  d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7));
+  return d;
+}
+function isoJour(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 const ID_CHALLENGE_INITIAL = "challenge-initial";
 function challengesDe(data) {
   const ancien = data?.settings?.challengePartenaires;
@@ -7174,7 +7226,7 @@ function libelleBonus(ch) {
 function dossiersBoostes(ch, dossiers, partnerId) {
   if (!estBoost(ch)) return [];
   const { debut, fin, valide } = bornesChallenge(ch);
-  if (!valide || !challengeCible(ch, partnerId)) return [];
+  if (!valide || !challengeConcerne(ch, partnerId, _colorDataRef)) return [];
   return (dossiers || []).filter(d => {
     if (d.partnerId !== partnerId || d.status === "KO") return false;
     const t = dateGain(d);
@@ -7191,7 +7243,7 @@ function bonusTotalDossier(d) {
   let total = 0;
   for (const ch of challenges) {
     const { debut, fin, valide } = bornesChallenge(ch);
-    if (!valide || !challengeCible(ch, d.partnerId)) continue;
+    if (!valide || !challengeConcerne(ch, d.partnerId, _colorDataRef)) continue;
     const t = dateGain(d);
     if (t === null || t < debut || t > fin) continue;
     total += bonusDossier(ch, d);
@@ -7204,7 +7256,7 @@ function boostsDuDossier(d) {
   return challengesDe(_colorDataRef).filter(c => {
     if (!estBoost(c) || !c.publie) return false;
     const { debut, fin, valide } = bornesChallenge(c);
-    if (!valide || !challengeCible(c, d.partnerId)) return false;
+    if (!valide || !challengeConcerne(c, d.partnerId, _colorDataRef)) return false;
     const t = dateGain(d);
     return t !== null && t >= debut && t <= fin;
   });
@@ -7265,6 +7317,23 @@ function challengeCible(ch, partnerId) {
   if (ch?.cible !== "selection") return true;
   const o = ch?.participants?.[partnerId];
   return o !== undefined && o !== null && o !== "";
+}
+// La règle d'or : deux CADEAUX ne se cumulent pas sur la même production.
+// Un partenaire en cours de challenge de bienvenue est déjà servi ; lui offrir
+// en plus la récompense d'un challenge ponctuel, c'est payer deux fois les
+// mêmes dossiers, et sur un dossier au plancher suivi par un mandataire il ne
+// resterait presque rien.
+//
+// La surcommission, elle, se cumule volontiers : elle est proportionnelle à ce
+// qui rentre (dix pour cent d'une commission de 150 €, c'est quinze euros),
+// elle ne peut donc pas creuser un trou. C'est même tout l'intérêt d'un week-end
+// de folie par-dessus un parcours d'accueil : on accélère quelqu'un qui est
+// déjà en train de courir. D'où le défaut inversé selon la nature de
+// l'opération — et la case reste sous la main dans les deux sens.
+function challengeConcerne(ch, partnerId, data) {
+  if (!challengeCible(ch, partnerId)) return false;
+  if (ch?.cumulBienvenue || estBoost(ch)) return true;
+  return !enCourseBienvenue(data, partnerId);
 }
 function objectifChallenge(ch, partnerId) {
   const brut = ch?.cible === "selection" ? ch?.participants?.[partnerId] : ch?.objectif;
@@ -7368,7 +7437,21 @@ function bornesChallenge(ch) {
 // un cadre — d'où le champ libre plutôt qu'une valeur imposée.
 // =============================================================================
 const BIENVENUE_DEFAUT = {
-  actif: false, objectif: 12, recompense: "", coutRecompense: 0, delaiMois: 12,
+  actif: false,
+  // Deux paliers : le premier transforme un inscrit en producteur, le second
+  // installe l'habitude. La vraie bataille est entre zéro et un dossier, pas
+  // entre huit et douze — un objectif lointain ne pèse rien sur la décision
+  // d'aujourd'hui, un petit cadeau atteignable en six semaines, si.
+  paliers: [
+    { objectif: 3, recompense: "", coutRecompense: 0 },
+    { objectif: 8, recompense: "", coutRecompense: 0 },
+  ],
+  delaiMois: 6,
+  // Le chronomètre ne part qu'au premier dossier gagné. Sans ça, un partenaire
+  // qui signe en janvier et démarre en juin a déjà brûlé la moitié de son
+  // temps sans rien faire : il est puni d'avoir mis du temps à se lancer,
+  // exactement au moment où il fallait l'encourager.
+  departAuPremierDossier: true,
   // Inscription automatique : tout partenaire entré à partir de cette date
   // court sans qu'on ait rien à cocher. À 300 partenaires, cocher une case par
   // arrivée n'est pas une option — la règle vaut d'elle-même, et les
@@ -7381,9 +7464,37 @@ const BIENVENUE_DEFAUT = {
 // plus ancien — c'est une décision, pas un réflexe.
 const BIENVENUE_ANCIENNETE_MOIS = 3;
 
+// Les paliers, normalisés et triés. Le réglage d'avant (un objectif unique)
+// est relu comme un palier unique : personne ne perd sa course en route.
+function paliersBienvenue(r) {
+  const bruts = Array.isArray(r?.paliers) && r.paliers.length
+    ? r.paliers
+    : [{ objectif: r?.objectif, recompense: r?.recompense, coutRecompense: r?.coutRecompense }];
+  return bruts
+    .map((x, i) => ({
+      rang: i,
+      objectif: Math.max(1, Number(x?.objectif) || 1),
+      recompense: (x?.recompense || "").trim(),
+      coutRecompense: Math.max(0, Number(x?.coutRecompense) || 0),
+    }))
+    .sort((a, b) => a.objectif - b.objectif)
+    .map((x, i) => ({ ...x, rang: i }));
+}
+
 function reglageBienvenue(data) {
   const r = data?.settings?.challengeBienvenue || {};
-  return { ...BIENVENUE_DEFAUT, ...r, inscrits: r.inscrits || {}, exclus: r.exclus || {} };
+  const base = { ...BIENVENUE_DEFAUT, ...r, inscrits: r.inscrits || {}, exclus: r.exclus || {} };
+  // Un réglage enregistré avant l'arrivée des paliers n'a pas de champ
+  // `paliers` : sans cette reprise, les valeurs par défaut l'écraseraient et
+  // un challenge en cours changerait d'objectif du jour au lendemain.
+  if (!Array.isArray(r.paliers) && (r.recompense || r.objectif)) {
+    base.paliers = [{
+      objectif: Math.max(1, Number(r.objectif) || 1),
+      recompense: (r.recompense || "").trim(),
+      coutRecompense: Number(r.coutRecompense) || 0,
+    }];
+  }
+  return base;
 }
 // Un partenaire relève-t-il de la règle automatique ? Oui s'il est entré à
 // partir de la date de bascule et qu'on ne l'a pas retiré à la main.
@@ -7406,53 +7517,85 @@ function ajouterMoisTs(ts, n) {
 }
 function bienvenueActif(data) {
   const r = reglageBienvenue(data);
-  return !!r.actif && !!r.recompense && (Number(r.objectif) || 0) > 0;
+  return !!r.actif && paliersBienvenue(r).some(x => x.recompense);
 }
 
-// Où en est un partenaire de sa course. Renvoie toujours un objet : `inscrit`
-// dit s'il y a une course du tout. Le départ est soit la date d'entrée du
-// partenaire (règle automatique), soit le jour où on l'a coché (inscription
-// manuelle d'un ancien) — l'inscription manuelle l'emporte.
+// Où en est un partenaire de sa course. `inscrit` dit s'il y a une course du
+// tout ; `demarre` dit si le chronomètre tourne.
+//
+// Le départ de la course (l'inscription) et le départ du chronomètre sont deux
+// choses distinctes : on est inscrit dès son arrivée — c'est ce qui permet de
+// lui montrer ce qu'il y a à gagner — mais le compte à rebours n'est lancé que
+// par son premier dossier gagné.
 function calculBienvenue(r, p, siens, actif) {
-  const objectif = Math.max(1, Number(r.objectif) || 1);
+  const paliers = paliersBienvenue(r);
+  const dernier = paliers[paliers.length - 1];
   const insc = r.inscrits[p.id] || {};
   const manuel = typeof insc.le === "number";
   const auto = !manuel && bienvenueAuto(r, p);
-  if (!manuel && !auto) return { reglage: r, objectif, inscrit: false, auto: false, actif };
-  const debut = manuel ? insc.le : dateEntreeDe(p);
+  if (!manuel && !auto) return { reglage: r, paliers, objectif: dernier.objectif, inscrit: false, auto: false, actif };
+
+  const inscritLe = manuel ? insc.le : dateEntreeDe(p);
   const delai = Math.max(0, Number(r.delaiMois) || 0);
-  const fin = delai > 0 ? ajouterMoisTs(debut, delai) : null;
-  // Gagné = contrat vivant aujourd'hui, gagné après le départ et dans le
-  // délai. Un KO ultérieur retire le dossier du compteur rétroactivement.
-  const gagnes = siens
+
+  // Tous ses dossiers gagnés depuis son inscription, dans l'ordre. Un KO
+  // ultérieur les retire d'eux-mêmes : le compteur se corrige tout seul.
+  const depuisInscription = siens
     .filter(d => {
       if (!STATUTS_CONTRAT_VIVANT.includes(d.status)) return false;
       const t = dateGain(d);
-      return t !== null && t >= debut && (fin === null || t <= fin);
+      return t !== null && t >= inscritLe;
     })
     .sort((a, b) => (dateGain(a) || 0) - (dateGain(b) || 0));
+
+  const departAuPremier = r.departAuPremierDossier !== false;
+  const premier = depuisInscription.length ? dateGain(depuisInscription[0]) : null;
+  const depart = departAuPremier ? premier : inscritLe;
+  const demarre = depart !== null;
+  const fin = (demarre && delai > 0) ? ajouterMoisTs(depart, delai) : null;
+
+  // Seuls les dossiers gagnés dans la fenêtre comptent. Le premier, qui a
+  // déclenché le chrono, en fait évidemment partie.
+  const gagnes = fin === null ? depuisInscription : depuisInscription.filter(d => (dateGain(d) || 0) <= fin);
   const n = gagnes.length;
-  const atteint = n >= objectif;
-  // En cours : ce qu'il a déposé depuis son départ et qui n'est ni gagné ni
-  // perdu. Sert à lui expliquer pourquoi son compteur ne bouge pas encore.
+
+  // Palier courant : le premier non atteint. Tous atteints, la course est finie.
+  const atteints = paliers.filter(x => n >= x.objectif);
+  const suivant = paliers.find(x => n < x.objectif) || null;
+  // Une remise enregistrée avant les paliers portait sur l'unique récompense
+  // d'alors : elle vaut pour le premier palier.
+  const remis = insc.remis || (insc.remisLe ? { 0: insc.remisLe } : {});
+  // Un palier atteint dont le cadeau n'est pas parti : c'est ce qui demande
+  // une action, et c'est le plus haut qui compte.
+  const aOffrir = [...atteints].reverse().find(x => !remis[x.rang]) || null;
+
   const enCours = siens.filter(d =>
     !STATUTS_CONTRAT_VIVANT.includes(d.status) && d.status !== "KO" &&
-    (d.createdAt || 0) >= debut).length;
+    (d.createdAt || 0) >= inscritLe).length;
   const encaisse = gagnes.reduce((sum, d) => sum + partEncaissee(d, d.caAmount || 0), 0);
+  const termine = suivant === null;
+
   return {
-    reglage: r, objectif, inscrit: true, auto, actif,
-    le: debut, fin, gagnes, n, atteint, enCours, encaisse,
-    atteintLe: atteint ? dateGain(gagnes[objectif - 1]) : null,
-    restants: Math.max(0, objectif - n),
-    remisLe: insc.remisLe || null,
-    expire: fin !== null && Date.now() > fin && !atteint,
+    reglage: r, paliers, inscrit: true, auto, actif,
+    le: inscritLe, depart, demarre, fin, gagnes, n, enCours, encaisse,
+    // Compatibilité de lecture : « objectif » et « atteint » désignent
+    // désormais le palier en cours, ou le dernier si tout est décroché.
+    objectif: (suivant || dernier).objectif,
+    palier: suivant || dernier,
+    atteints, suivant, termine,
+    atteint: termine,
+    aOffrir,
+    remis,
+    atteintLe: atteints.length ? dateGain(gagnes[atteints[atteints.length - 1].objectif - 1]) : null,
+    restants: suivant ? Math.max(0, suivant.objectif - n) : 0,
+    expire: fin !== null && Date.now() > fin && !termine,
     joursRestants: fin === null ? null : Math.max(0, Math.ceil((fin - Date.now()) / 86400000)),
   };
 }
 function bilanBienvenue(data, partnerId) {
   const r = reglageBienvenue(data);
   const p = (data?.partners || []).find(x => x.id === partnerId);
-  if (!p) return { reglage: r, objectif: Math.max(1, Number(r.objectif) || 1), inscrit: false, auto: false, actif: bienvenueActif(data) };
+  if (!p) return { reglage: r, paliers: paliersBienvenue(r), inscrit: false, auto: false, actif: bienvenueActif(data) };
   return calculBienvenue(r, p, (data?.dossiers || []).filter(d => d.partnerId === partnerId), bienvenueActif(data));
 }
 // Le bilan de tout le monde en une passe : à 300 partenaires, relire la liste
@@ -7467,12 +7610,20 @@ function bilansBienvenue(data) {
   }
   return (data?.partners || []).map(p => ({ p, bi: calculBienvenue(r, p, parPartenaire.get(p.id) || [], actif) }));
 }
+// Un partenaire est « en course » tant qu'il lui reste un palier à décrocher
+// et que son délai n'est pas écoulé. C'est ce qui le rend inéligible aux
+// opérations saisonnières : il est déjà servi.
+function enCourseBienvenue(data, partnerId) {
+  if (!bienvenueActif(data)) return false;
+  const bi = bilanBienvenue(data, partnerId);
+  return bi.inscrit && !bi.termine && !bi.expire;
+}
 // Les cadeaux à commander : objectif atteint, cadeau pas encore remis. C'est
 // ce que l'Accueil doit rappeler.
 function cadeauxBienvenueDus(data) {
   if (!bienvenueActif(data)) return [];
   return bilansBienvenue(data)
-    .filter(x => !x.p.deleted && x.bi.inscrit && x.bi.atteint && !x.bi.remisLe)
+    .filter(x => !x.p.deleted && x.bi.inscrit && x.bi.aOffrir)
     .sort((a, b) => (a.bi.atteintLe || 0) - (b.bi.atteintLe || 0));
 }
 
@@ -8783,40 +8934,39 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
   const [rech, setRech] = useState("");
   const [toutVoir, setToutVoir] = useState(false);
 
-  const objectif = Math.max(1, Number(r.objectif) || 1);
-  const cout = Number(r.coutRecompense) || 0;
+  const paliers = paliersBienvenue(r);
+  const dernier = paliers[paliers.length - 1];
+  const coutTotal = paliers.reduce((sum, x) => sum + x.coutRecompense, 0);
   const actif = bienvenueActif(data);
 
   const lignes = bilansBienvenue(data).filter(x => !x.p.deleted && x.p.active !== false);
   const limiteAnciennete = ajouterMoisTs(Date.now(), -BIENVENUE_ANCIENNETE_MOIS);
   const q = (rech || "").trim().toLowerCase();
   const isoDeTs = (ts) => {
-    const d = new Date(ts);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const d2 = new Date(ts);
+    return `${d2.getFullYear()}-${String(d2.getMonth() + 1).padStart(2, "0")}-${String(d2.getDate()).padStart(2, "0")}`;
   };
   const depuisDefaut = ajouterMoisTs(Date.now(), -BIENVENUE_ANCIENNETE_MOIS);
 
-  // À offrir d'abord — c'est la seule ligne qui demande une action — puis les
-  // courses en cours, de la plus avancée à la moins avancée.
+  // À offrir d'abord — seule ligne qui demande une action — puis les courses
+  // en marche, de la plus avancée à la moins avancée, puis celles qui n'ont
+  // pas encore démarré.
   const enCourse = lignes.filter(x => x.bi.inscrit).sort((a, c) => {
-    const du = (x) => (x.bi.atteint && !x.bi.remisLe) ? 0 : (x.bi.expire ? 2 : 1);
-    return du(a) - du(c) || (c.bi.n / c.bi.objectif) - (a.bi.n / a.bi.objectif);
+    const rang = (x) => x.bi.aOffrir ? 0 : x.bi.expire ? 3 : x.bi.demarre ? 1 : 2;
+    return rang(a) - rang(c) || (c.bi.n / c.bi.objectif) - (a.bi.n / a.bi.objectif);
   });
   const libres = lignes.filter(x => !x.bi.inscrit);
   const proposes = q
     ? libres.filter(x => `${x.p.firstName || ""} ${x.p.name || ""} ${x.p.company || ""} ${x.p.ville || ""}`.toLowerCase().includes(q)).slice(0, 8)
     : libres.filter(x => (dateEntreeDe(x.p) || 0) >= limiteAnciennete)
         .sort((a, c) => (dateEntreeDe(c.p) || 0) - (dateEntreeDe(a.p) || 0));
-  // On ne déroule jamais tout le réseau : au-delà, la recherche est le bon
-  // outil. Quatre propositions suffisent à faire le geste, vingt à choisir.
+  const PAR_LISTE = toutVoir ? 40 : 8;
+  const enCourseVus = enCourse.slice(0, PAR_LISTE);
   const proposesVus = toutVoir ? proposes.slice(0, 20) : proposes.slice(0, 4);
-  // À trois cents partenaires, la liste ne se déroule pas : on montre les
-  // courses qui demandent une action, et la recherche fait le reste.
-  const enCourseVus = toutVoir ? enCourse.slice(0, 40) : enCourse.slice(0, 8);
 
   const nbExclus = Object.keys(r.exclus || {}).length;
   const totalGagnes = enCourse.reduce((sum, x) => sum + x.bi.n, 0);
-  const totalRemis = enCourse.filter(x => x.bi.remisLe).length;
+  const cadeauxRemis = enCourse.reduce((sum, x) => sum + Object.keys(x.bi.remis || {}).length, 0);
   const margeGeneree = enCourse.reduce((sum, x) => sum + x.bi.gagnes.reduce((t, d) =>
     t + ((d.caAmount || 0) - (d.commissionAmount || 0)) * (1 - PART_MANDATAIRE), 0), 0);
 
@@ -8824,61 +8974,83 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
 
   function ouvrirEdition() {
     setB({
-      objectif: r.objectif, recompense: r.recompense || "", coutRecompense: r.coutRecompense || "",
+      paliers: paliers.map(x => ({ objectif: x.objectif, recompense: x.recompense, coutRecompense: x.coutRecompense || "" })),
       delaiMois: r.delaiMois,
+      departAuPremierDossier: r.departAuPremierDossier !== false,
       depuisIso: typeof r.depuisLe === "number" ? isoDeTs(r.depuisLe) : "",
     });
   }
+  function majPalier(i, champNom, valeur) {
+    setB(x => ({ ...x, paliers: x.paliers.map((pa, j) => j === i ? { ...pa, [champNom]: valeur } : pa) }));
+  }
   function enregistrer() {
     onMajReglage({
-      objectif: Math.max(1, Number(b.objectif) || 1),
-      recompense: (b.recompense || "").trim(),
-      coutRecompense: Number(b.coutRecompense) || 0,
+      paliers: b.paliers
+        .filter(x => (x.recompense || "").trim())
+        .map(x => ({
+          objectif: Math.max(1, Number(x.objectif) || 1),
+          recompense: (x.recompense || "").trim(),
+          coutRecompense: Number(x.coutRecompense) || 0,
+        })),
       delaiMois: Math.max(0, Number(b.delaiMois) || 0),
+      departAuPremierDossier: !!b.departAuPremierDossier,
       depuisLe: b.depuisIso ? new Date(b.depuisIso + "T00:00:00").getTime() : null,
     });
     setB(null);
   }
-
   const libelleDelai = (mois) => (Number(mois) || 0) > 0 ? `${mois} mois` : "sans limite de temps";
 
   // Une ligne de partenaire — inscrit ou non, la case est au même endroit.
-  // Sur téléphone la ligne se replie : nom et étiquette d'abord, la
-  // progression en dessous. Sur écran large, tout s'aligne en colonnes.
   const Ligne = ({ p, bi }) => {
-    const pct = bi.inscrit ? Math.min(100, Math.round((bi.n / bi.objectif) * 100)) : 0;
-    const aOffrir = bi.inscrit && bi.atteint && !bi.remisLe;
+    const pct = bi.inscrit && bi.objectif ? Math.min(100, Math.round((bi.n / bi.objectif) * 100)) : 0;
 
-    const etiquette = aOffrir ? (
-      <span className="text-[11px] font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap">🎁 À offrir</span>
-    ) : bi.remisLe ? (
-      <span className="text-[11px] text-gray-400 whitespace-nowrap">Remis le {fmtDate(bi.remisLe)}</span>
-    ) : bi.inscrit && !bi.expire && bi.restants <= 3 && bi.n > 0 ? (
+    const etiquette = !bi.inscrit ? null : bi.aOffrir ? (
+      // Le nom du cadeau tient rarement dans la colonne : il passe en
+      // infobulle, l'étiquette reste courte et la ligne ne déborde pas.
+      <span title={`À offrir : ${bi.aOffrir.recompense}`}
+        className="text-[11px] font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap">
+        🎁 À offrir
+      </span>
+    ) : bi.termine ? (
+      <span className="text-[11px] text-gray-400 whitespace-nowrap">Parcours terminé</span>
+    ) : bi.expire ? (
+      <span className="text-[11px] text-red-600 whitespace-nowrap">Délai dépassé</span>
+    ) : !bi.demarre ? (
+      <span className="text-[11px] text-gray-400 whitespace-nowrap">Chrono non démarré</span>
+    ) : bi.restants <= 2 ? (
       <span className="text-[11px] font-bold px-2 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 whitespace-nowrap">Plus que {bi.restants}</span>
     ) : bi.inscrit ? (
-      <span className="text-[11px] text-gray-400 whitespace-nowrap">
-        {bi.auto ? "Inscrit d'office" : `Inscrit le ${fmtDate(bi.le)}`}
-      </span>
+      <span className="text-[11px] text-gray-400 whitespace-nowrap">{bi.auto ? "Inscrit d'office" : `Inscrit le ${fmtDate(bi.le)}`}</span>
     ) : null;
 
-    const action = aOffrir && canEdit ? (
-      <button onClick={() => onMajInscrit(p.id, { remisLe: Date.now() })}
+    const action = bi.aOffrir && canEdit ? (
+      <button onClick={() => onMajInscrit(p.id, { remisPalier: bi.aOffrir.rang })}
         className="fa-bg-gold text-[11px] font-bold px-2.5 py-1.5 rounded-lg whitespace-nowrap">Marquer remis</button>
     ) : bi.inscrit && canEdit ? (
       <button onClick={() => onMajInscrit(p.id, null)} className="text-[11px] text-gray-400 hover:text-red-600">retirer</button>
     ) : null;
 
     const progression = bi.inscrit ? (<>
-      <div className="h-2 rounded-full bg-gray-100 overflow-hidden mb-1">
-        <div className={`h-full rounded-full ${bi.atteint ? "bg-emerald-500" : "bg-blue-500"}`} style={{ width: `${pct}%` }} />
+      <div className="relative h-2 rounded-full bg-gray-100 overflow-hidden mb-1">
+        <div className={`h-full rounded-full ${bi.termine ? "bg-emerald-500" : "bg-blue-500"}`} style={{ width: `${pct}%` }} />
+        {/* Les paliers intermédiaires sont marqués sur la barre : on voit d'un
+            coup d'œil ce qui est décroché et ce qui reste. */}
+        {bi.paliers.slice(0, -1).map(x => (
+          <span key={x.rang} className="absolute top-0 bottom-0 w-0.5 bg-white/90"
+            style={{ left: `${Math.min(99, (x.objectif / bi.objectif) * 100)}%` }} />
+        ))}
       </div>
       <div className="text-[11px] text-gray-500">
         <strong className="fa-navy">{bi.n}</strong> / {bi.objectif} gagnés
-        {bi.atteint
-          ? <> — atteint le {fmtDate(bi.atteintLe)}</>
+        {bi.aOffrir
+          ? <span className="text-emerald-700"> — {bi.aOffrir.recompense} à offrir</span>
+          : bi.termine
+          ? <> — parcours terminé</>
           : bi.expire
             ? <span className="text-red-600"> · délai dépassé</span>
-            : bi.joursRestants !== null ? <> · il reste {bi.joursRestants} j</> : <> · sans limite</>}
+            : !bi.demarre
+              ? <span className="text-gray-400"> · départ au 1<sup>er</sup> dossier</span>
+              : bi.joursRestants !== null ? <> · il reste {bi.joursRestants} j</> : <> · sans limite</>}
       </div>
     </>) : (
       <div className="text-[11px] text-gray-400">
@@ -8893,8 +9065,6 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
             onClick={() => {
               if (!canEdit) return;
               if (bi.inscrit) return onMajInscrit(p.id, null);
-              // Un partenaire qui relève de la règle automatique y retourne —
-              // sa course repart de sa date d'entrée, pas d'aujourd'hui.
               return onMajInscrit(p.id, bienvenueAuto({ ...r, exclus: {} }, p) ? { auto: true } : { le: Date.now() });
             }}
             disabled={!canEdit}
@@ -8915,7 +9085,6 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
           </div>
           <div className="sm:hidden shrink-0">{etiquette}</div>
         </div>
-
         <div className="mt-1.5 pl-[31px] sm:mt-0 sm:pl-0 sm:w-[212px] sm:shrink-0">{progression}</div>
         <div className="hidden sm:block sm:w-[112px] sm:text-right sm:shrink-0">{etiquette}</div>
         {action && <div className="mt-1.5 pl-[31px] sm:mt-0 sm:pl-0 sm:w-[104px] sm:text-right sm:shrink-0">{action}</div>}
@@ -8930,7 +9099,7 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
         <div className="font-display font-semibold fa-navy">🎁 Challenge nouveau partenaire</div>
         <div className="flex items-center gap-2">
           <span className={`text-[11px] font-bold px-2 py-1 rounded-full border ${actif ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-100 text-gray-500 border-gray-200"}`}>
-            {actif ? `Actif · ${enCourse.filter(x => !x.bi.remisLe && !x.bi.expire).length} en course` : "Inactif"}
+            {actif ? `Actif · ${enCourse.filter(x => !x.bi.termine && !x.bi.expire).length} en course` : "Inactif"}
           </span>
           {canEdit && (
             <button
@@ -8944,39 +9113,65 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
         </div>
       </div>
       <p className="text-sm text-gray-500 mb-3">
-        Le seul challenge permanent : pas de dates communes, chaque partenaire a sa propre course,
-        qui démarre à son arrivée. On compte les dossiers <strong className="fa-navy">gagnés</strong> —
-        un dossier passé KO sort du compteur tout seul. Le jour où vous ne voulez plus de ce cadeau,
-        vous désactivez : il disparaît de l'espace de tous les partenaires.
+        Le seul challenge permanent, et le seul qui compte les dossiers <strong className="fa-navy">gagnés</strong> —
+        un dossier passé KO sort du compteur tout seul. Chaque partenaire a sa propre course :
+        {r.departAuPremierDossier !== false
+          ? <> il la voit dès son arrivée, mais le chronomètre ne part qu'à son <strong className="fa-navy">premier dossier gagné</strong>.</>
+          : <> le chronomètre part de son arrivée.</>}
       </p>
 
       {/* ---------------------------------------------------------- réglage */}
       {b === null ? (
-        <div className="fa-bg-offwhite rounded-xl px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-          <span><strong className="fa-navy text-base">{objectif}</strong> <span className="text-gray-500">dossiers gagnés</span></span>
-          <span className="text-gray-400">→</span>
-          <span className="fa-navy font-semibold">{r.recompense || <span className="text-gray-400 font-normal italic">récompense à définir</span>}</span>
-          {cout > 0 && <span className="text-gray-500">coût {fmtEuro(cout)}</span>}
-          <span className="text-gray-500">délai : <strong className="fa-navy">{libelleDelai(r.delaiMois)}</strong></span>
-          {canEdit && <button onClick={ouvrirEdition} className="text-xs fa-teal-text hover:underline ml-auto">Modifier</button>}
+        <div className="fa-bg-offwhite rounded-xl px-4 py-3 space-y-1.5">
+          {paliers.map((x, i) => (
+            <div key={x.rang} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+              <span className="text-[11px] font-bold text-gray-400 w-14 shrink-0">Palier {i + 1}</span>
+              <span><strong className="fa-navy text-base">{x.objectif}</strong> <span className="text-gray-500">dossiers gagnés</span></span>
+              <span className="text-gray-400">→</span>
+              <span className="fa-navy font-semibold">{x.recompense || <span className="text-gray-400 font-normal italic">récompense à définir</span>}</span>
+              {x.coutRecompense > 0 && <span className="text-gray-500">{fmtEuro(x.coutRecompense)}</span>}
+            </div>
+          ))}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm pt-1">
+            <span className="text-[11px] font-bold text-gray-400 w-14 shrink-0">Délai</span>
+            <span className="text-gray-500">
+              <strong className="fa-navy">{libelleDelai(r.delaiMois)}</strong>
+              {r.departAuPremierDossier !== false ? " à partir du 1er dossier gagné" : " à partir de l'inscription"}
+            </span>
+            {canEdit && <button onClick={ouvrirEdition} className="text-xs fa-teal-text hover:underline ml-auto">Modifier</button>}
+          </div>
         </div>
       ) : (
         <div className="fa-bg-offwhite rounded-xl px-4 py-3 space-y-2">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <input type="number" onFocus={selectionTotale} min="1" value={b.objectif}
-              onChange={e => setB(x => ({ ...x, objectif: sansZeroDeTete(e.target.value) }))}
-              className={champ + " w-16 text-center"} />
-            <span className="text-xs text-gray-500">dossiers gagnés pour obtenir</span>
-            <input value={b.recompense} onChange={e => setB(x => ({ ...x, recompense: e.target.value }))}
-              placeholder="Récompense — ex. une paire d'AirPods 5" className={champ + " flex-1 min-w-[200px]"} />
-            <label className="text-xs text-gray-500 flex items-center gap-1.5">
-              Elle me coûte
-              <input type="number" onFocus={selectionTotale} min="0" value={b.coutRecompense ?? ""}
-                onChange={e => setB(x => ({ ...x, coutRecompense: sansZeroDeTete(e.target.value) }))}
-                placeholder="169" className={champ + " w-20 text-center"} /> €
-            </label>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+          {b.paliers.map((pa, i) => (
+            <div key={i} className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-[11px] font-bold text-gray-400 w-14 shrink-0">Palier {i + 1}</span>
+              <input type="number" onFocus={selectionTotale} min="1" value={pa.objectif}
+                onChange={e => majPalier(i, "objectif", sansZeroDeTete(e.target.value))}
+                className={champ + " w-16 text-center"} />
+              <span className="text-xs text-gray-500">dossiers gagnés →</span>
+              <input value={pa.recompense} onChange={e => majPalier(i, "recompense", e.target.value)}
+                placeholder={i === 0 ? "ex. une carte cadeau" : "ex. une paire d'AirPods 5"}
+                className={champ + " flex-1 min-w-[170px]"} />
+              <label className="text-xs text-gray-500 flex items-center gap-1.5">
+                coût
+                <input type="number" onFocus={selectionTotale} min="0" value={pa.coutRecompense ?? ""}
+                  onChange={e => majPalier(i, "coutRecompense", sansZeroDeTete(e.target.value))}
+                  placeholder={i === 0 ? "60" : "169"} className={champ + " w-20 text-center"} /> €
+              </label>
+              {b.paliers.length > 1 && (
+                <button onClick={() => setB(x => ({ ...x, paliers: x.paliers.filter((_, j) => j !== i) }))}
+                  title="Retirer ce palier" className="text-xs text-gray-400 hover:text-red-600">✕</button>
+              )}
+            </div>
+          ))}
+          {b.paliers.length < 4 && (
+            <button onClick={() => setB(x => ({ ...x, paliers: [...x.paliers, { objectif: (Number(x.paliers[x.paliers.length - 1]?.objectif) || 1) * 2, recompense: "", coutRecompense: "" }] }))}
+              className="text-xs fa-teal-text hover:underline">+ Ajouter un palier</button>
+          )}
+          <p className="text-[11px] text-gray-400">Un palier sans récompense n'est pas enregistré.</p>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500 pt-1">
             <span className="font-semibold fa-navy">Délai</span>
             {[3, 6, 12].map(m => (
               <button key={m} onClick={() => setB(x => ({ ...x, delaiMois: m }))}
@@ -8994,16 +9189,28 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
               className={champ + " w-16 text-center"} />
             <span>mois</span>
           </div>
+          <label className="fa-tap flex items-start gap-2 text-xs text-gray-600 cursor-pointer">
+            <input type="checkbox" checked={b.departAuPremierDossier}
+              onChange={e => setB(x => ({ ...x, departAuPremierDossier: e.target.checked }))}
+              className="rounded border-gray-300 mt-0.5" />
+            <span>
+              Le chronomètre démarre au <strong className="fa-navy">premier dossier gagné</strong>, pas à l'inscription.
+              <span className="block text-gray-400">
+                Sinon un partenaire qui met quatre mois à se lancer a déjà perdu la moitié de son temps — et il est
+                puni au moment où il faut l'encourager.
+              </span>
+            </span>
+          </label>
+
           <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
             <span className="font-semibold fa-navy">Inscription automatique</span>
             <span>de tout partenaire entré à partir du</span>
             <input type="date" value={b.depuisIso}
-              onChange={e => setB(x => ({ ...x, depuisIso: e.target.value }))}
-              className={champ} />
+              onChange={e => setB(x => ({ ...x, depuisIso: e.target.value }))} className={champ} />
             <span className="text-gray-400">— laissez vide pour n'inscrire personne automatiquement.</span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button onClick={enregistrer} disabled={!b.recompense?.trim()}
+            <button onClick={enregistrer} disabled={!b.paliers.some(x => (x.recompense || "").trim())}
               className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
             <button onClick={() => setB(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
           </div>
@@ -9022,12 +9229,11 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
       )}
 
       {/* ----------------------------------------------------- la projection */}
-      {/* Branchée sur le brouillon quand on édite : les chiffres bougent en
-          même temps que les champs, c'est là que l'arbitrage se fait. */}
       <ProjectionChallenge data={data}
-        objectif={b ? b.objectif : objectif}
-        cout={b ? b.coutRecompense : cout}
-        dureeMois={b ? b.delaiMois : r.delaiMois} />
+        objectif={b ? (b.paliers[b.paliers.length - 1]?.objectif || 1) : dernier.objectif}
+        cout={b ? b.paliers.reduce((sum, x) => sum + (Number(x.coutRecompense) || 0), 0) : coutTotal}
+        dureeMois={b ? b.delaiMois : r.delaiMois}
+        titre={`Projection sur le parcours complet — ${paliers.length} palier${paliers.length > 1 ? "s" : ""}, au plancher de ${fmtEuro(CA_MINIMUM_REFERENCE)} d'honoraires`} />
 
       {/* --------------------------------------------------------- la liste */}
       <input value={rech} onChange={e => setRech(e.target.value)}
@@ -9069,7 +9275,7 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
           {enCourse.length} partenaire{enCourse.length > 1 ? "s" : ""} en course ·
           {" "}<strong>{totalGagnes} dossier{totalGagnes > 1 ? "s" : ""} gagné{totalGagnes > 1 ? "s" : ""}</strong> à ce titre ·
           {" "}<strong>{fmtEuro(margeGeneree)}</strong> de marge nette générée
-          {cout > 0 && <> pour <strong>{fmtEuro(totalRemis * cout)}</strong> de cadeaux remis</>}.
+          {cadeauxRemis > 0 && <> pour <strong>{cadeauxRemis} cadeau{cadeauxRemis > 1 ? "x" : ""}</strong> remis</>}.
         </div>
       )}
     </div>
@@ -9088,12 +9294,30 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
   const defautDebut = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
   const defautFin = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
 
+  // Ouvre le formulaire prérempli d'après un modèle. Tout reste modifiable :
+  // c'est un point de départ, pas une décision.
+  function ouvrirModele(m) {
+    const debut = m.jours <= 4 ? prochainVendredi() : new Date();
+    const fin = new Date(debut); fin.setDate(fin.getDate() + m.jours - 1);
+    setB({
+      titre: m.titre,
+      type: m.type === "boost" ? TYPE_BOOST : TYPE_OBJECTIF,
+      objectif: m.objectif ?? 3, recompense: "", coutRecompense: "",
+      cible: "tous", participants: {},
+      bonusMode: m.bonusMode || "pourcent", bonusValeur: m.bonusValeur ?? 10,
+      cumulBienvenue: m.type === "boost",
+      debut: isoJour(debut), fin: isoJour(fin),
+    });
+    setRechPart("");
+    setEdition("nouveau");
+  }
   function ouvrirNouveau() {
     setB({
       titre: `Challenge ${now.toLocaleDateString("fr-FR", { month: "long" })}`,
       type: TYPE_OBJECTIF,
       objectif: 3, recompense: "", coutRecompense: "", cible: "tous", participants: {},
       bonusMode: "pourcent", bonusValeur: 10,
+      cumulBienvenue: false,   // un cadeau ne se cumule pas ; un boost, si (voir plus bas)
       debut: defautDebut, fin: defautFin,
     });
     setRechPart("");
@@ -9106,6 +9330,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
       coutRecompense: c.coutRecompense ?? "", cible: c.cible === "selection" ? "selection" : "tous",
       participants: { ...(c.participants || {}) },
       bonusMode: c.bonusMode || "pourcent", bonusValeur: c.bonusValeur ?? 10,
+      cumulBienvenue: !!c.cumulBienvenue,
       debut: c.debut || defautDebut, fin: c.fin || defautFin,
     });
     setRechPart("");
@@ -9130,6 +9355,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
       bonusMode: b.bonusMode || "pourcent",
       bonusValeur: Math.max(0, Number(b.bonusValeur) || 0),
       cible, participants,
+      cumulBienvenue: !!b.cumulBienvenue,
       debut: b.debut, fin: b.fin,
     };
     // Un challenge naît toujours en brouillon : on le prépare tranquillement,
@@ -9222,7 +9448,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
           {[[TYPE_OBJECTIF, "Un objectif à atteindre → une récompense"], [TYPE_BOOST, "Un bonus sur chaque dossier, sans palier"]].map(([v, label]) => (
             <label key={v} className="text-xs text-gray-600 flex items-center gap-1.5 cursor-pointer">
               <input type="radio" checked={(b.type === TYPE_BOOST) === (v === TYPE_BOOST)}
-                onChange={() => setB(x => ({ ...x, type: v }))} />
+                onChange={() => setB(x => ({ ...x, type: v, cumulBienvenue: v === TYPE_BOOST }))} />
               {label}
             </label>
           ))}
@@ -9263,6 +9489,23 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
             </label>
           </div>
         )}
+
+        <label className="fa-tap flex items-start gap-2 text-xs text-gray-600 cursor-pointer pt-1">
+          <input type="checkbox" checked={!b.cumulBienvenue}
+            onChange={e => setB(x => ({ ...x, cumulBienvenue: !e.target.checked }))}
+            className="rounded border-gray-300 mt-0.5" />
+          <span>
+            Exclure les partenaires en cours de <strong className="fa-navy">challenge de bienvenue</strong>
+            <span className="block text-gray-400">
+              {boost
+                ? <>Décoché, c'est le cumul : un nouveau qui court déjà touche la surcommission en plus. C'est
+                    recommandé pour un boost — il est proportionnel à ce qui rentre, il ne peut pas vous coûter
+                    plus que ce qu'il rapporte.</>
+                : <>Ils sont déjà servis par leur cadeau d'accueil : cumuler deux récompenses revient à payer
+                    deux fois la même production. Décochez seulement si vous le voulez vraiment.</>}
+            </span>
+          </span>
+        </label>
 
         <div className="flex flex-wrap items-center gap-3 pt-1">
           <span className="text-xs font-semibold fa-navy">Pour qui ?</span>
@@ -9453,6 +9696,19 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
         pendant sa période.
       </p>
 
+      {canEdit && edition === null && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mr-1">Coups tout montés</span>
+          {MODELES_OPERATION.map(m => (
+            <button key={m.id} onClick={() => ouvrirModele(m)} title={m.aide}
+              className="fa-tap text-[11.5px] font-semibold px-2.5 py-1.5 rounded-full border border-gray-200 bg-white hover:border-teal-300 transition">
+              {m.titre}
+              <span className="font-normal text-gray-400"> · {m.aide}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {edition === "nouveau" && formulaire()}
 
       {ordonnee.length === 0 && edition !== "nouveau" ? (
@@ -9471,7 +9727,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
             // Coût réel du boost à date : le bonus de tous les dossiers gagnés
             // dans la fenêtre, tous partenaires visés confondus.
             const lignesBoost = boostC && bornes.valide
-              ? data.partners.filter(p => !p.deleted && challengeCible(c, p.id))
+              ? data.partners.filter(p => !p.deleted && challengeConcerne(c, p.id, data))
                   .map(p => ({ p, ds: dossiersBoostes(c, data.dossiers, p.id) }))
                   .filter(x => x.ds.length > 0)
                   .map(x => ({ ...x, total: x.ds.reduce((s2, d) => s2 + bonusDossier(c, d), 0) }))
@@ -9483,7 +9739,7 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
             // SON objectif — sinon le classement compare des choses
             // différentes.
             const classement = bornes.valide
-              ? data.partners.filter(p => !p.deleted && challengeCible(c, p.id))
+              ? data.partners.filter(p => !p.deleted && challengeConcerne(c, p.id, data))
                   .map(p => ({ p, n: souscritsSurPeriode(data.dossiers, p.id, bornes.debut, bornes.fin), obj: objectifChallenge(c, p.id) }))
                   .filter(x => x.n > 0 || vise)
                   .sort((a, b2) => (b2.n / b2.obj) - (a.n / a.obj))
@@ -13453,7 +13709,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                               <span className="flex-1 min-w-0">
                                 <span className="block fa-navy font-bold truncate">{nomPartenaire(p)}</span>
                                 <span className="block text-emerald-700 text-xs">
-                                  {bi.n}/{bi.objectif} — {bi.reglage.recompense} à commander
+                                  {bi.n}/{bi.aOffrir.objectif} — {bi.aOffrir.recompense} à commander
                                   {bi.encaisse > 0 && <> · {fmtEuro(bi.encaisse)} déjà encaissés</>}
                                 </span>
                               </span>
