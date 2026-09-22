@@ -8883,6 +8883,8 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
   const surMoyenne = base === "moyenne" && moyenneDispo;
   const colSeul = surMoyenne ? pr.moyenSeul : pr.seul;
   const colMand = surMoyenne ? pr.moyenMandataire : pr.mandataire;
+  // Sert à choisir la phrase de conclusion — les couleurs, elles, ne
+  // dépendent que du signe de chaque chiffre pris isolément.
   const perdant = pr.cout > 0 && colMand.gain < 0;
   // Le test de sécurité ne disparaît jamais : même en regardant la moyenne,
   // on est prévenu si le plancher est perdant.
@@ -8900,29 +8902,26 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
     <div className="min-w-0">
       <div className="font-bold mb-1">{label}</div>
       <Rang t="Honoraires du dossier" v={fmtEuro(l.ca)} />
-      <Rang t={`− rétrocession apporteur (${Math.round(pr.taux * 100)} %)`} v={`−${fmtEuro(l.retro)}`} />
-      <Rang t="− part mandataire" v={l.mand > 0 ? `−${fmtEuro(l.mand)}` : "0 €"} />
-      <div className={`border-t mt-1 pt-1 ${perdant ? "border-red-200" : "border-emerald-200"}`}>
+      <Rang t={`− rétrocession apporteur (${Math.round(pr.taux * 100)} %)`} v={`−${fmtEuro(l.retro)}`} rouge={l.retro > 0} />
+      <Rang t="− part mandataire" v={l.mand > 0 ? `−${fmtEuro(l.mand)}` : "0 €"} rouge={l.mand > 0} />
+      <div className="border-t border-emerald-200 mt-1 pt-1">
         <Rang t="Net Frangola / dossier" v={fmtEuro(l.net)} fort />
       </div>
       {pr.cout > 0 && (
         // Une récompense qui ne serait couverte qu'au-delà de l'objectif n'est
         // jamais couverte : l'opération se termine avant.
         <Rang t={`Les ${fmtEuro(pr.cout)} sont récoltés au`}
-          v={l.couvertAu ? `${l.couvertAu}${l.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné` : "—"}
-          rouge={!l.couvertAu || l.couvertAu > pr.objectif} />
+          v={l.couvertAu ? `${l.couvertAu}${l.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné` : "—"} />
       )}
+      {pr.cout > 0 && <Rang t="− coût de la récompense" v={`−${fmtEuro(pr.cout)}`} rouge />}
       <Rang t={`Sur les ${pr.objectif} dossiers`} v={`${l.gain >= 0 ? "+" : ""}${fmtEuro(l.gain)}`}
-        rouge={l.gain < 0} />
+        rouge={l.gain < 0} fort />
     </div>
   );
   return (
-    <div className={`mt-2 text-xs rounded-xl px-3 py-2.5 border ${perdant
-      ? "bg-red-50 border-red-200 text-red-900"
-      : "bg-emerald-50 border-emerald-200 text-emerald-900"}`}>
+    <div className="mt-2 text-xs rounded-xl px-3 py-2.5 border bg-emerald-50 border-emerald-200 text-emerald-900">
       <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
         <div className="font-bold uppercase tracking-wide text-[10px] opacity-80">
-          {perdant ? "⚠ " : ""}
           {titre || "Projection"}
           {" — "}{surMoyenne ? `à votre panier moyen de ${fmtEuro(pr.caMoyen)}` : `au plancher de ${fmtEuro(pr.plancher)} d'honoraires`}
         </div>
@@ -8952,16 +8951,16 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
 
       {pr.cout > 0 && (
         <p className="mt-2 leading-relaxed">
-          {pr.seul.couvertAu && pr.seul.gain >= 0
-            ? <>La récompense est payée par le <strong>{pr.seul.couvertAu}{pr.seul.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné</strong>
-                {pr.mandataire.couvertAu !== pr.seul.couvertAu && <> (le <strong>{pr.mandataire.couvertAu}ᵉ</strong> avec un mandataire)</>} :
+          {colSeul.couvertAu && colSeul.gain >= 0
+            ? <>La récompense est payée par le <strong>{colSeul.couvertAu}{colSeul.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné</strong>
+                {colMand.couvertAu !== colSeul.couvertAu && <> (le <strong>{colMand.couvertAu}ᵉ</strong> avec un mandataire)</>} :
                 les suivants sont du bénéfice net, <strong>la perte est impossible</strong>.</>
-            : <span className="text-amber-900">Attention : à cet objectif, la récompense coûte plus cher qu'elle ne rapporte. Il faut viser
-                au moins <strong>{pr.mandataire.couvertAu || "—"} dossiers</strong> pour rentrer dans vos frais.</span>}
+            : <>À cet objectif, la récompense coûte plus cher qu'elle ne rapporte : il faut viser
+                au moins <strong>{colMand.couvertAu || "—"} dossiers</strong> pour rentrer dans vos frais.</>}
           {surMoyenne
             ? (plancherPerdant
-                ? <span className="text-red-700"> Au plancher de {fmtEuro(pr.plancher)} elle est perdante : la moyenne
-                    la sauve, mais chaque dossier au minimum vous coûtera de l'argent.</span>
+                ? <> Au plancher de {fmtEuro(pr.plancher)} elle est perdante : la moyenne la sauve, mais chaque
+                    dossier au minimum vous coûtera de l'argent.</>
                 : <> Au plancher de {fmtEuro(pr.plancher)}, elle reste gagnante — le test de sécurité passe.</>)
             : (pr.caMoyen && pr.moyenMandataire
                 ? <> À votre panier moyen réel de <strong>{fmtEuro(pr.caMoyen)}</strong>, le net passe à {fmtEuro(pr.moyenMandataire.net)} par
@@ -8971,7 +8970,7 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
         </p>
       )}
 
-      <div className={`mt-2.5 pt-2 border-t ${perdant ? "border-red-200" : "border-emerald-200"}`}>
+      <div className="mt-2.5 pt-2 border-t border-emerald-200">
         <div className="font-bold uppercase tracking-wide text-[10px] mb-1 opacity-80">
           Temps nécessaire pour {pr.objectif} dossier{pr.objectif > 1 ? "s" : ""} gagné{pr.objectif > 1 ? "s" : ""}
           <span className="font-normal normal-case tracking-normal opacity-70">
@@ -8984,7 +8983,7 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
           {pr.rythmes.map(({ rythme, mois, libelle, note }) => {
             const tenable = duree === null || mois <= duree + 0.001;
             return (
-              <div key={`${rythme}-${note || ""}`} className={`rounded-lg px-2 py-1.5 border ${tenable ? (perdant ? "bg-white/70 border-red-200" : "bg-white/70 border-emerald-200") : "bg-red-50 border-red-300"}`}>
+              <div key={`${rythme}-${note || ""}`} className={`rounded-lg px-2 py-1.5 border ${tenable ? "bg-white/70 border-emerald-200" : "bg-red-50 border-red-300"}`}>
                 <div className="opacity-70 text-[10px]">
                   {libelle}{note ? <span className="opacity-70"> · {note}</span> : null}
                 </div>
