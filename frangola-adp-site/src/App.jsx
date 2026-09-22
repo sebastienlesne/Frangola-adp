@@ -3981,6 +3981,11 @@ function BanniereBienvenue({ bienvenue, dossiers }) {
   const palier = bi.suivant;
   if (!palier || !palier.recompense) return null;
 
+  // La valeur du cadeau rend la promesse concrète : « une carte cadeau »
+  // n'engage à rien, « une carte cadeau (60 €) » se visualise.
+  const avecValeur = (x) => x.coutRecompense > 0
+    ? <>{x.recompense} <span className="text-teal-900/60 font-normal">d'une valeur de {fmtEuro(x.coutRecompense)}</span></>
+    : <>{x.recompense}</>;
   const pct = Math.min(100, Math.round((bi.n / palier.objectif) * 100));
   const dateFin = bi.fin ? new Date(bi.fin).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" }) : null;
   const dejaGagne = bi.atteints.length;
@@ -3994,7 +3999,15 @@ function BanniereBienvenue({ bienvenue, dossiers }) {
         <span className="font-display font-semibold fa-navy">🎁 Votre challenge de bienvenue</span>
         <span className="text-xs text-teal-900/70">
           {!bi.demarre
-            ? "le compte à rebours démarre à votre premier dossier"
+            ? (() => {
+                // Tant que le chrono n'a pas démarré, il n'y a pas de date de
+                // fin à afficher — mais la durée, elle, se sait déjà, et c'est
+                // elle qui dit si l'objectif est à portée.
+                const mois = Math.max(0, Number(bi.reglage?.delaiMois) || 0);
+                return mois > 0
+                  ? <>le compte à rebours démarre à votre premier dossier · <strong>{mois} mois</strong> pour y arriver</>
+                  : <>le compte à rebours démarre à votre premier dossier · sans limite de temps</>;
+              })()
             : dateFin
               ? <>jusqu'au {dateFin}{bi.joursRestants !== null ? ` · ${bi.joursRestants} jour${bi.joursRestants > 1 ? "s" : ""} restant${bi.joursRestants > 1 ? "s" : ""}` : ""}</>
               : "sans limite de temps"}
@@ -4003,7 +4016,9 @@ function BanniereBienvenue({ bienvenue, dossiers }) {
 
       {dejaGagne > 0 && (
         <div className="text-xs text-teal-900/70 mb-1.5">
-          ✓ Déjà décroché : {bi.atteints.map(x => x.recompense).filter(Boolean).join(", ")}
+          ✓ Déjà décroché : {bi.atteints.filter(x => x.recompense).map((x, i) => (
+            <span key={x.rang}>{i > 0 && ", "}{x.recompense}{x.coutRecompense > 0 ? ` d'une valeur de ${fmtEuro(x.coutRecompense)}` : ""}</span>
+          ))}
         </div>
       )}
 
@@ -4012,17 +4027,30 @@ function BanniereBienvenue({ bienvenue, dossiers }) {
         <span className="text-sm text-teal-900/70">/ {palier.objectif} dossiers gagnés</span>
       </div>
 
-      <div className="h-3 rounded-full bg-white/60 overflow-hidden">
-        <div className="h-full rounded-full fa-bg-teal" style={{ width: `${pct}%` }} />
-      </div>
+      {/* Une case par dossier attendu : on voit le chemin parcouru et ce qu'il
+          reste d'un seul regard, mieux qu'un pourcentage. Au-delà de douze la
+          ligne deviendrait illisible, on repasse alors à une barre pleine. */}
+      {palier.objectif <= 12 ? (
+        <div className="flex gap-1.5 flex-wrap">
+          {Array.from({ length: palier.objectif }, (_, i) => (
+            <div key={i} title={i < bi.n ? `Dossier ${i + 1} gagné` : "À gagner"}
+              className={`h-3 flex-1 min-w-[16px] rounded-full ${i < bi.n ? "fa-bg-teal" : "bg-white/60"}`} />
+          ))}
+        </div>
+      ) : (
+        <div className="h-3 rounded-full bg-white/60 overflow-hidden">
+          <div className="h-full rounded-full fa-bg-teal" style={{ width: `${pct}%` }} />
+        </div>
+      )}
 
       <div className="text-sm fa-navy mt-2">
         {bi.n === 0
-          ? <>Votre premier dossier lance le compteur. Plus que <strong>{palier.objectif} dossiers gagnés</strong> pour gagner <strong>{palier.recompense}</strong>.</>
-          : <>Plus que <strong>{bi.restants} dossier{bi.restants > 1 ? "s" : ""} gagné{bi.restants > 1 ? "s" : ""}</strong> pour gagner <strong>{palier.recompense}</strong>.</>}
+          ? <>Votre premier dossier lance le compteur. Plus que <strong>{palier.objectif} dossiers gagnés</strong> pour gagner <strong>{avecValeur(palier)}</strong>.</>
+          : <>Plus que <strong>{bi.restants} dossier{bi.restants > 1 ? "s" : ""} gagné{bi.restants > 1 ? "s" : ""}</strong> pour gagner <strong>{avecValeur(palier)}</strong>.</>}
         {apres.length > 0 && (
           <span className="text-teal-900/60">
-            {" "}Ensuite, {apres[0].objectif} dossiers vous donnent {apres[0].recompense}.
+            {" "}Ensuite, {apres[0].objectif} dossiers vous donnent {apres[0].recompense}
+            {apres[0].coutRecompense > 0 ? ` d'une valeur de ${fmtEuro(apres[0].coutRecompense)}` : ""}.
           </span>
         )}
         {bi.enCours > 0 && (
@@ -7438,6 +7466,15 @@ const BIENVENUE_DEFAUT = {
 // fait pour lancer un nouveau. La recherche permet quand même d'en inscrire un
 // plus ancien — c'est une décision, pas un réflexe.
 const BIENVENUE_ANCIENNETE_MOIS = 3;
+// Un dossier facturé sous le plancher ne compte pas dans un challenge. Le cas
+// type est le dossier du partenaire lui-même, dont on lui fait cadeau des
+// honoraires : il ne rapporte rien, il ne peut donc pas financer une
+// récompense. Zéro euro en fait partie. Inutile de l'écrire au partenaire,
+// c'est du bon sens de gestion, mais la règle doit être dans le code.
+const BIENVENUE_HONORAIRES_MINI = CA_MINIMUM_REFERENCE;
+function dossierCompteBienvenue(d) {
+  return (Number(d?.caAmount) || 0) >= BIENVENUE_HONORAIRES_MINI;
+}
 
 // Les paliers, normalisés et triés. Le réglage d'avant (un objectif unique)
 // est relu comme un palier unique : personne ne perd sa course en route.
@@ -7515,13 +7552,17 @@ function calculBienvenue(r, p, siens, actif) {
 
   // Tous ses dossiers gagnés depuis son inscription, dans l'ordre. Un KO
   // ultérieur les retire d'eux-mêmes : le compteur se corrige tout seul.
-  const depuisInscription = siens
+  const tousDepuisInscription = siens
     .filter(d => {
       if (!STATUTS_CONTRAT_VIVANT.includes(d.status)) return false;
       const t = dateGain(d);
       return t !== null && t >= inscritLe;
     })
     .sort((a, b) => (dateGain(a) || 0) - (dateGain(b) || 0));
+  // Les dossiers sous le plancher sortent du jeu — y compris pour lancer le
+  // chronomètre : un dossier offert ne démarre pas la course.
+  const depuisInscription = tousDepuisInscription.filter(dossierCompteBienvenue);
+  const horsJeu = tousDepuisInscription.length - depuisInscription.length;
 
   const departAuPremier = r.departAuPremierDossier !== false;
   const premier = depuisInscription.length ? dateGain(depuisInscription[0]) : null;
@@ -7552,7 +7593,7 @@ function calculBienvenue(r, p, siens, actif) {
 
   return {
     reglage: r, paliers, inscrit: true, auto, actif,
-    le: inscritLe, depart, demarre, fin, gagnes, n, enCours, encaisse,
+    le: inscritLe, depart, demarre, fin, gagnes, n, enCours, encaisse, horsJeu,
     // Compatibilité de lecture : « objectif » et « atteint » désignent
     // désormais le palier en cours, ou le dernier si tout est décroché.
     objectif: (suivant || dernier).objectif,
@@ -8902,8 +8943,11 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
     <div className="min-w-0">
       <div className="font-bold mb-1">{label}</div>
       <Rang t="Honoraires du dossier" v={fmtEuro(l.ca)} />
-      <Rang t={`− rétrocession apporteur (${Math.round(pr.taux * 100)} %)`} v={`−${fmtEuro(l.retro)}`} rouge={l.retro > 0} />
-      <Rang t="− part mandataire" v={l.mand > 0 ? `−${fmtEuro(l.mand)}` : "0 €"} rouge={l.mand > 0} />
+      {/* Rétrocession et part mandataire sont des prélèvements connus et
+          assumés : ils se lisent en gras, pas en rouge. Le rouge est réservé
+          à ce qui doit alerter. */}
+      <Rang t={`− rétrocession apporteur (${Math.round(pr.taux * 100)} %)`} v={`−${fmtEuro(l.retro)}`} fort />
+      <Rang t="− part mandataire" v={l.mand > 0 ? `−${fmtEuro(l.mand)}` : "0 €"} fort />
       <div className="border-t border-emerald-200 mt-1 pt-1">
         <Rang t="Net Frangola / dossier" v={fmtEuro(l.net)} fort />
       </div>
@@ -8955,12 +8999,13 @@ function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
             ? <>La récompense est payée par le <strong>{colSeul.couvertAu}{colSeul.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné</strong>
                 {colMand.couvertAu !== colSeul.couvertAu && <> (le <strong>{colMand.couvertAu}ᵉ</strong> avec un mandataire)</>} :
                 les suivants sont du bénéfice net, <strong>la perte est impossible</strong>.</>
-            : <>À cet objectif, la récompense coûte plus cher qu'elle ne rapporte : il faut viser
-                au moins <strong>{colMand.couvertAu || "—"} dossiers</strong> pour rentrer dans vos frais.</>}
+            : <span className="text-red-700 font-semibold">À cet objectif, la récompense coûte plus cher
+                qu'elle ne rapporte : il faut viser au moins <strong>{colMand.couvertAu || "—"} dossiers</strong> pour
+                rentrer dans vos frais.</span>}
           {surMoyenne
             ? (plancherPerdant
-                ? <> Au plancher de {fmtEuro(pr.plancher)} elle est perdante : la moyenne la sauve, mais chaque
-                    dossier au minimum vous coûtera de l'argent.</>
+                ? <span className="text-red-700 font-semibold"> Au plancher de {fmtEuro(pr.plancher)} elle est
+                    perdante : la moyenne la sauve, mais chaque dossier au minimum vous coûtera de l'argent.</span>
                 : <> Au plancher de {fmtEuro(pr.plancher)}, elle reste gagnante — le test de sécurité passe.</>)
             : (pr.caMoyen && pr.moyenMandataire
                 ? <> À votre panier moyen réel de <strong>{fmtEuro(pr.caMoyen)}</strong>, le net passe à {fmtEuro(pr.moyenMandataire.net)} par
@@ -9130,6 +9175,11 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
       </div>
       <div className="text-[11px] text-gray-500">
         <strong className="fa-navy">{bi.n}</strong> / {bi.objectif} gagnés
+        {bi.horsJeu > 0 && (
+          <span className="text-gray-400" title={`Dossier(s) facturé(s) sous ${fmtEuro(BIENVENUE_HONORAIRES_MINI)} : hors challenge`}>
+            {" "}(+{bi.horsJeu} hors jeu)
+          </span>
+        )}
         {bi.aOffrir
           ? <span className="text-emerald-700"> — {bi.aOffrir.recompense} à offrir</span>
           : bi.termine
@@ -9202,7 +9252,9 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
       </div>
       <p className="text-sm text-gray-500 mb-3">
         Le seul challenge permanent, et le seul qui compte les dossiers <strong className="fa-navy">gagnés</strong> —
-        un dossier passé KO sort du compteur tout seul. Chaque partenaire a sa propre course :
+        un dossier passé KO sort du compteur tout seul, et un dossier facturé sous
+        {" "}<strong className="fa-navy">{fmtEuro(BIENVENUE_HONORAIRES_MINI)}</strong> n'y entre jamais —
+        des honoraires offerts ne financent aucune récompense. Chaque partenaire a sa propre course :
         {r.departAuPremierDossier !== false
           ? <> il la voit dès son arrivée, mais le chronomètre ne part qu'à son <strong className="fa-navy">premier dossier gagné</strong>.</>
           : <> le chronomètre part de son arrivée.</>}
@@ -12391,10 +12443,13 @@ function annexeParrainageConcernee(p) {
   const i = p?.integration || {};
   if (i.annexeConcernee === true) return true;
   if (i.annexeConcernee === false) return false;
-  // Par défaut : concerné dès qu'il a présenté quelqu'un.
+  // L'annexe n'est due qu'à partir du moment où il PARRAINE vraiment
+  // quelqu'un. Une déclaration en attente peut être refusée, et une refusée
+  // n'a jamais existé : réclamer l'annexe dans ces deux cas revient à afficher
+  // une pièce manquante pour un parrainage qui n'aura peut-être jamais lieu.
   const aDesFilleuls = (_colorDataRef?.partners || []).some(x => !x.deleted && x.parrainId === p.id);
-  const aDeclare = (_colorDataRef?.parrainages || []).some(x => x.parrainId === p.id);
-  return aDesFilleuls || aDeclare;
+  const aParrainageValide = (_colorDataRef?.parrainages || []).some(x => x.parrainId === p.id && x.statut === "valide");
+  return aDesFilleuls || aParrainageValide;
 }
 function integrePartenaireAvantSuivi(p) {
   if (p?.integration) return false;
