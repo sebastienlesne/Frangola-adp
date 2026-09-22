@@ -2492,6 +2492,38 @@ export default function App() {
     });
   }
 
+  // Un partenaire n'est effaçable pour de bon que s'il n'a RIEN laissé : pas
+  // un dossier, pas un filleul, pas une déclaration, pas un virement. C'est le
+  // cas d'un enregistrement de test, et seulement celui-là. Dès qu'il a
+  // produit, l'archive au pot commun est la bonne réponse : on ne réécrit pas
+  // l'histoire comptable.
+  function effacableDefinitivement(base, id) {
+    const dossiers = (base.dossiers || []).some(d => d.partnerId === id);
+    const filleuls = (base.partners || []).some(x => x.id !== id && (x.parrainId === id || x.ancienParrainId === id));
+    const declarations = (base.parrainages || []).some(x => x.parrainId === id || x.filleulId === id);
+    const p = (base.partners || []).find(x => x.id === id);
+    const virements = (p?.retrocessionVersements || []).length > 0;
+    const factures = (p?.factures || []).length > 0;
+    const raisons = [];
+    if (dossiers) raisons.push("il a des dossiers");
+    if (filleuls) raisons.push("il est lié à un filleul");
+    if (declarations) raisons.push("une déclaration de parrainage le cite");
+    if (virements) raisons.push("un virement lui a été fait");
+    if (factures) raisons.push("il a déposé une facture");
+    if (p?.parrainId) raisons.push("il est le filleul de quelqu'un");
+    return { ok: raisons.length === 0, raisons };
+  }
+  async function supprimerPartenaireDefinitivement(id) {
+    const nom = nomPartenaire(data.partners.find(x => x.id === id));
+    await mutateData(base => {
+      const verdict = effacableDefinitivement(base, id);
+      // Vérifié une seconde fois au moment d'écrire : entre l'affichage du
+      // bouton et le clic, un dossier a pu arriver.
+      if (!verdict.ok) return base;
+      return withLog({ ...base, partners: (base.partners || []).filter(x => x.id !== id) },
+        `a effacé définitivement le partenaire ${nom}`);
+    });
+  }
   async function restorePartner(id) {
     await mutateData(base => {
       const p = base.partners.find(p => p.id === id);
@@ -2930,6 +2962,8 @@ export default function App() {
           onUploadContratType={uploadContratType}
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
+          onEffacerPartenaire={supprimerPartenaireDefinitivement}
+          estEffacable={(id) => effacableDefinitivement(data, id)}
           onAddMandataire={addMandataire}
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
@@ -2997,6 +3031,8 @@ export default function App() {
           onUploadContratType={uploadContratType}
           onDeletePartner={deletePartner}
           onRestorePartner={restorePartner}
+          onEffacerPartenaire={supprimerPartenaireDefinitivement}
+          estEffacable={(id) => effacableDefinitivement(data, id)}
           onAddMandataire={addMandataire}
           onUpdateMandataire={updateMandataire}
           onDeleteMandataire={deleteMandataire}
@@ -12899,7 +12935,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -13289,6 +13325,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   }
   const [fileToutVoir, setFileToutVoir] = useState(false);
   const [tousReseaux, setTousReseaux] = useState(false);
+  const [caseOuverte, setCaseOuverte] = useState(null);
+  const [confirmEffacerId, setConfirmEffacerId] = useState(null);
   const [viewingPartnerId, setViewingPartnerId] = useState(null);
   // Fiches dont la liste des filleuls est dépliée (clic sur la pastille dorée).
   const [filleulsOuverts, setFilleulsOuverts] = useState(new Set());
@@ -15313,10 +15351,34 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                       );
                     })()}
                   </div>
-                  <button onClick={() => onRestorePartner(p.id)} title="Le partenaire retrouve son accès et ses clients quittent le Pot commun"
-                    className="flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-3 py-1.5 rounded-full transition">
-                    <RotateCcw size={13} /> Restaurer
-                  </button>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button onClick={() => onRestorePartner(p.id)} title="Le partenaire retrouve son accès et ses clients quittent le Pot commun"
+                      className="flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-3 py-1.5 rounded-full transition">
+                      <RotateCcw size={13} /> Restaurer
+                    </button>
+                    {isFullAdmin && (() => {
+                      const verdict = estEffacable ? estEffacable(p.id) : { ok: false, raisons: [] };
+                      if (!verdict.ok) {
+                        return (
+                          <span className="text-[11px] text-gray-400" title={`Effacement impossible : ${verdict.raisons.join(", ")}.`}>
+                            effacement impossible
+                          </span>
+                        );
+                      }
+                      return confirmEffacerId === p.id ? (
+                        <span className="flex items-center gap-1.5 text-xs">
+                          <span className="text-red-700">Effacer pour de bon ?</span>
+                          <button onClick={() => { onEffacerPartenaire(p.id); setConfirmEffacerId(null); }}
+                            className="font-semibold text-red-700 hover:underline">Oui</button>
+                          <button onClick={() => setConfirmEffacerId(null)} className="text-gray-500 hover:underline">Non</button>
+                        </span>
+                      ) : (
+                        <button onClick={() => setConfirmEffacerId(p.id)}
+                          title="Aucun dossier, aucun filleul, aucun virement : cette fiche peut disparaître sans laisser de trou"
+                          className="text-xs text-gray-400 hover:text-red-600 px-1">Effacer définitivement</button>
+                      );
+                    })()}
+                  </div>
                 </div>
               ))}
 
@@ -15573,24 +15635,78 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
               <div>
                 <h2 className="font-display text-lg font-semibold fa-navy mb-3">Partenaires</h2>
-                <div className="grid sm:grid-cols-4 gap-4">
-                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                    <div className="text-xs text-gray-400 mb-1">Total partenaires</div>
-                    <div className="font-display text-2xl font-bold fa-navy">{totalEver === 1 && partners.length === 0 ? 0 : partners.length}</div>
-                  </div>
-                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                    <div className="text-xs text-gray-400 mb-1">Actifs</div>
-                    <div className="font-display text-2xl font-bold text-emerald-600">{activePartners.length} <span className="text-sm font-normal text-gray-400">({pct(activePartners.length)}%)</span></div>
-                  </div>
-                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                    <div className="text-xs text-gray-400 mb-1">Inactifs</div>
-                    <div className="font-display text-2xl font-bold text-gray-500">{inactivePartners.length} <span className="text-sm font-normal text-gray-400">({pct(inactivePartners.length)}%)</span></div>
-                  </div>
-                  <div className="bg-white border border-gray-200 rounded-2xl p-5">
-                    <div className="text-xs text-gray-400 mb-1">Supprimés</div>
-                    <div className="font-display text-2xl font-bold text-red-500">{deletedPartners.length} <span className="text-sm font-normal text-gray-400">({pct(deletedPartners.length)}%)</span></div>
-                  </div>
-                </div>
+                {/* Un chiffre qu'on ne peut pas ouvrir est un chiffre qu'on
+                    ne peut pas vérifier : chaque encadré déplie la liste des
+                    partenaires qu'il compte. */}
+                {(() => {
+                  const cases = [
+                    { id: "total", label: "Total partenaires", valeur: totalEver === 1 && partners.length === 0 ? 0 : partners.length, liste: partners, couleur: "fa-navy", pourcent: false },
+                    { id: "actifs", label: "Actifs", valeur: activePartners.length, liste: activePartners, couleur: "text-emerald-600" },
+                    { id: "inactifs", label: "Inactifs", valeur: inactivePartners.length, liste: inactivePartners, couleur: "text-gray-500" },
+                    { id: "supprimes", label: "Supprimés", valeur: deletedPartners.length, liste: deletedPartners, couleur: "text-red-500" },
+                  ];
+                  const ouverte = cases.find(c => c.id === caseOuverte);
+                  return (
+                    <>
+                      <div className="grid sm:grid-cols-4 gap-4">
+                        {cases.map(c => (
+                          <button key={c.id} onClick={() => setCaseOuverte(caseOuverte === c.id ? null : c.id)}
+                            disabled={c.liste.length === 0}
+                            className={`text-left bg-white border rounded-2xl p-5 transition disabled:cursor-default
+                              ${caseOuverte === c.id ? "border-teal-400 ring-2 ring-teal-100" : "border-gray-200 enabled:hover:border-teal-300"}`}>
+                            <div className="text-xs text-gray-400 mb-1 flex items-center gap-1.5">
+                              {c.label}
+                              {c.liste.length > 0 && (
+                                <ChevronDown size={12} className={`text-gray-300 transition ${caseOuverte === c.id ? "rotate-180" : ""}`} />
+                              )}
+                            </div>
+                            <div className={`font-display text-2xl font-bold ${c.couleur}`}>
+                              {masqueNb(c.valeur)}
+                              {c.pourcent !== false && <span className="text-sm font-normal text-gray-400"> ({pct(c.valeur)}%)</span>}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+
+                      {ouverte && (
+                        <div className="bg-white border border-teal-200 rounded-2xl p-4 mt-3">
+                          <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
+                            <span className="text-sm font-bold fa-navy">
+                              {ouverte.label} — {masqueNb(ouverte.liste.length)} partenaire{ouverte.liste.length > 1 ? "s" : ""}
+                            </span>
+                            <button onClick={() => setCaseOuverte(null)} className="text-xs text-gray-400 hover:text-gray-700">fermer</button>
+                          </div>
+                          {/* À trois cents partenaires, dérouler la liste
+                              entière donne une colonne de cinq mille pixels
+                              que personne ne lit. On en montre assez pour
+                              vérifier, et l'onglet Partenaires fait le reste :
+                              il a la recherche et les filtres. */}
+                          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-x-4">
+                            {[...ouverte.liste]
+                              .sort((a, b) => nomPartenaire(a).localeCompare(nomPartenaire(b), "fr"))
+                              .slice(0, 24)
+                              .map(pa => (
+                                <button key={pa.id} onClick={() => navAdmin.ouvrirPartenaire(pa)}
+                                  className="text-left py-1 border-t border-gray-100 first:border-0 hover:bg-gray-50 rounded px-1">
+                                  <span className="text-[13px] fa-navy font-medium block truncate">{nomPartenaire(pa)}</span>
+                                  <span className="text-[11px] text-gray-400 block truncate">
+                                    {[pa.company, pa.ville].filter(Boolean).join(" · ") || "—"}
+                                    {pa.deleted && pa.deletedAt ? ` · supprimé le ${fmtDate(pa.deletedAt)}` : ""}
+                                    {pa.active === false && !pa.deleted ? " · inactif" : ""}
+                                  </span>
+                                </button>
+                              ))}
+                          </div>
+                          {ouverte.liste.length > 24 && (
+                            <button onClick={() => setTab("partenaires")} className="text-xs fa-teal-text hover:underline mt-2">
+                              et {masqueNb(ouverte.liste.length - 24)} autres — ouvrir l'onglet Partenaires →
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
 
                 {/* Deux réseaux dans le réseau : les apporteurs immobiliers,
                     rémunérés en pourcentage, et les apporteurs hors immobilier,
