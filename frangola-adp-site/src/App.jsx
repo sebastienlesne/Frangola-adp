@@ -5820,6 +5820,34 @@ function fmtJourLong(iso) {
 }
 
 function backOfficeDe(d) { return d?.backOffice || {}; }
+// Banque et ancienne cotisation : ce qui a été saisi dans le suivi, sinon ce
+// que l'analyse des documents (offre, tableau) et l'étude en ont tiré.
+function banqueDuDossier(d) {
+  return backOfficeDe(d).banque || d?.simulation?.banqueDetectee || "";
+}
+function ancienneCotisationDuDossier(d) {
+  const bo = backOfficeDe(d);
+  if (bo.ancienneCotisation != null && bo.ancienneCotisation !== "") return { valeur: Number(bo.ancienneCotisation), source: "saisie" };
+  const sim = d?.simulation || {};
+  if (Number(sim.cotisationActuelle) > 0) return { valeur: Math.round(Number(sim.cotisationActuelle) * 100) / 100, source: "etude" };
+  if (Number(sim.assuranceRestante) > 0 && Number(sim.dureeRestanteMois) > 0)
+    return { valeur: Math.round(Number(sim.assuranceRestante) / Number(sim.dureeRestanteMois) * 100) / 100, source: "etude" };
+  return { valeur: null, source: null };
+}
+// Jalons dans l'ordre : cocher l'un coche d'office ceux qui le précèdent.
+const ORDRE_JALONS_BO = ["demandeLe", "reponseLe", "avenantRecuLe", "avenantSigneLe", "resiliationDemandeeLe", "resiliationConfirmeeLe", "prelevementVerifieLe"];
+function cocherJalonEnCascade(bo, champ, date) {
+  const n = { ...bo };
+  const sansAncienne = bo.ancienneAssurance === "aucune";
+  const rang = ORDRE_JALONS_BO.indexOf(champ);
+  ORDRE_JALONS_BO.slice(0, rang + 1).forEach((c) => {
+    if (sansAncienne && c.startsWith("resiliation")) return;
+    if (c === champ) { n[c] = date; }
+    else if (!n[c]) n[c] = date;
+    if (c === "reponseLe") n.reponse = "acceptee";
+  });
+  return n;
+}
 function echangesTries(bo) {
   return [...(bo.echanges || [])].sort((a, b) => (a.le || "").localeCompare(b.le || "") || (a.at || 0) - (b.at || 0));
 }
@@ -5835,7 +5863,7 @@ function suiviBanqueApplicable(d, maintenant = Date.now()) {
   if (!d || !STATUTS_SUIVI_BANQUE.includes(d.status)) return false;
   const bo = backOfficeDe(d);
   if (bo.horsSuivi) return false;
-  if (suiviBanqueDemarre(d) || bo.banque) return true;
+  if (suiviBanqueDemarre(d) || banqueDuDossier(d)) return true;
   if (d.dateEffet && joursCalendairesDepuis(d.dateEffet, maintenant) > 0) return false;
   return true;
 }
@@ -5876,7 +5904,7 @@ function alerteBackOffice(d, maintenant = Date.now()) {
   const et = etapesBackOffice(d, maintenant);
   if (et[4].fait) return null;
   const resilOk = et[3].fait;
-  const banque = bo.banque || "La banque";
+  const banque = banqueDuDossier(d) || "La banque";
 
   if (d.dateEffet && !resilOk) {
     const j = joursCalendairesDepuis(d.dateEffet, maintenant);
@@ -5985,6 +6013,20 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
 
   const maj = (champs) => onUpdate(dossier.id, { backOffice: { ...bo, ...champs } });
   const sansAncienne = bo.ancienneAssurance === "aucune";
+  const cotis = ancienneCotisationDuDossier(dossier);
+  // Cocher un jalon coche d'office ceux d'avant (à la même date, modifiable) ;
+  // décocher n'efface que lui.
+  const basculerJalon = (champ, coche) => {
+    if (!coche) {
+      const n = { ...bo, [champ]: null };
+      if (champ === "reponseLe") n.reponse = null;
+      onUpdate(dossier.id, { backOffice: n });
+    } else {
+      onUpdate(dossier.id, { backOffice: cocherJalonEnCascade(bo, champ, isoAujourdhui()) });
+    }
+  };
+  // Clic sur un rond de la jauge : valide l'étape (et les précédentes).
+  const CHAMP_ETAPE = { demande: "demandeLe", reponse: "reponseLe", avenant: "avenantSigneLe", resiliation: "resiliationConfirmeeLe" };
 
   async function enregistrerEchange() {
     let piece = null;
@@ -6017,7 +6059,7 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
       <div className="flex items-center gap-2 py-1.5 border-t border-gray-100 first:border-t-0 text-xs">
         <label className="fa-tap flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
           <input type="checkbox" checked={coche}
-            onChange={e => onBasculer ? onBasculer(e.target.checked) : maj({ [champ]: e.target.checked ? isoAujourdhui() : null })}
+            onChange={e => onBasculer ? onBasculer(e.target.checked) : basculerJalon(champ, e.target.checked)}
             className={`rounded w-4 h-4 shrink-0 ${alerteRouge && !coche ? "border-red-400" : "border-gray-300"}`} />
           <span className={alerteRouge && !coche ? "text-red-700 font-semibold" : coche ? "fa-navy" : "text-gray-600"}>{libelle}</span>
         </label>
@@ -6076,9 +6118,12 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
                   {i < etapes.length - 1 && (
                     <span className={`absolute top-[13px] left-1/2 w-full h-[3px] ${e.fait ? "bg-emerald-500" : "bg-gray-200"}`} />
                   )}
-                  <span className={`relative z-10 w-7 h-7 rounded-full border-2 flex items-center justify-center text-xs font-bold ${rond}`}>
+                  <button type="button" disabled={!CHAMP_ETAPE[e.id] || e.fait || (e.id === "resiliation" && sansAncienne)}
+                    onClick={() => basculerJalon(CHAMP_ETAPE[e.id], true)}
+                    title={CHAMP_ETAPE[e.id] && !e.fait ? `Valider « ${e.label} » (et les étapes précédentes) à la date du jour — modifiable dans les jalons` : ""}
+                    className={`relative z-10 w-7 h-7 rounded-full border-2 flex items-center justify-center text-xs font-bold ${rond} enabled:hover:ring-2 enabled:hover:ring-teal-300 enabled:cursor-pointer disabled:cursor-default`}>
                     {e.fait ? <Check size={14} /> : enAlerte ? "!" : i + 1}
-                  </span>
+                  </button>
                   <span className={`hidden sm:block mt-1.5 px-0.5 text-[11px] font-semibold leading-tight ${rouge ? "text-red-700" : enAlerte ? "text-amber-800" : "fa-navy"}`}>{e.label}</span>
                   <span className="hidden sm:block text-[10px] text-gray-400 leading-tight mt-0.5">
                     {e.fait && e.date ? fmtJourCourt(e.date) : ""}{e.fait && e.date && e.detail ? " · " : ""}{e.detail || (!e.fait && enAlerte ? "à faire" : "")}
@@ -6181,8 +6226,9 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
               <div className="text-xs font-bold fa-navy mb-2">Jalons et anti-doublon</div>
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <label className="text-[11px] text-gray-500 col-span-2">Banque
-                  <input key={"b" + (bo.banque || "")} defaultValue={bo.banque || ""} placeholder="ex. Crédit Agricole"
-                    onBlur={e => e.target.value.trim() !== (bo.banque || "") && maj({ banque: e.target.value.trim() })}
+                  {!bo.banque && dossier.simulation?.banqueDetectee && <span className="ml-1 text-teal-700">· lue sur l'offre / le tableau</span>}
+                  <input key={"b" + banqueDuDossier(dossier)} defaultValue={banqueDuDossier(dossier)} placeholder="ex. Crédit Agricole"
+                    onBlur={e => e.target.value.trim() !== banqueDuDossier(dossier) && maj({ banque: e.target.value.trim() })}
                     className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 </label>
                 <label className="text-[11px] text-gray-500">Ancienne assurance
@@ -6203,11 +6249,12 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
                 ) : <span />}
                 {!sansAncienne && (
                   <label className="text-[11px] text-gray-500 col-span-2">Ancienne cotisation (€ / mois)
-                    <input key={"c" + (bo.ancienneCotisation ?? "")} type="number" min="0" step="0.01" onFocus={selectionTotale}
-                      defaultValue={bo.ancienneCotisation ?? ""} placeholder="ce que le client paierait en double"
+                    {cotis.source === "etude" && <span className="ml-1 text-teal-700">· cotisation moyenne de l'étude</span>}
+                    <input key={"c" + (cotis.valeur ?? "")} type="number" min="0" step="0.01" onFocus={selectionTotale}
+                      defaultValue={cotis.valeur ?? ""} placeholder="ce que le client paierait en double"
                       onBlur={e => {
                         const v = e.target.value === "" ? null : Number(e.target.value);
-                        if (v !== (bo.ancienneCotisation ?? null)) maj({ ancienneCotisation: v });
+                        if (v !== (cotis.valeur ?? null)) maj({ ancienneCotisation: v });
                       }}
                       className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
                   </label>
@@ -6215,8 +6262,8 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
               </div>
               {jalon({ champ: "demandeLe", libelle: "Demande envoyée à la banque" })}
               {jalon({ libelle: "Acceptée par la banque", valeur: bo.reponse === "acceptee" ? (bo.reponseLe || isoAujourdhui()) : null,
-                onBasculer: v => maj(v ? { reponse: "acceptee", reponseLe: isoAujourdhui() } : { reponse: null, reponseLe: null }),
-                onDate: v => maj({ reponseLe: v }) })}
+                onBasculer: v => basculerJalon("reponseLe", v),
+                onDate: v => maj({ reponseLe: v, reponse: "acceptee" }) })}
               {jalon({ champ: "avenantRecuLe", libelle: "Avenant reçu" })}
               {jalon({ champ: "avenantSigneLe", libelle: "Avenant signé par le client" })}
               {!sansAncienne && <>
@@ -6234,9 +6281,9 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
                     onChange={e => e.target.files?.[0] && joindreConfirmation(e.target.files[0])} />
                 </>
               )}
-              {bo.ancienneCotisation > 0 && alerte?.code === "double" && (
+              {cotis.valeur > 0 && alerte?.code === "double" && (
                 <div className="mt-2 text-[11px] text-red-700">
-                  Chaque mois de retard coûte {fmtEuroPrecis(bo.ancienneCotisation)} au client.
+                  Chaque mois de retard coûte {fmtEuroPrecis(cotis.valeur)} au client.
                 </div>
               )}
             </div>
@@ -10555,7 +10602,7 @@ function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
                   className="w-full text-left px-4 py-3 hover:bg-gray-50 transition grid grid-cols-2 sm:grid-cols-[1.3fr_1fr_1fr_110px_70px_2fr] gap-x-3 gap-y-1 items-center text-sm">
                   <span className="font-bold truncate"><LienClient d={d} dansUnBouton className="fa-teal-text underline decoration-dotted underline-offset-2" /></span>
                   <span className="text-gray-600 truncate text-xs sm:text-sm">{nomDe(d.partnerId)}</span>
-                  <span className="text-gray-500 truncate text-xs sm:text-sm">{bo.banque || "banque ?"}</span>
+                  <span className="text-gray-500 truncate text-xs sm:text-sm">{banqueDuDossier(d) || "banque ?"}</span>
                   <span><MiniJaugeBackOffice dossier={d} large="w-14" /></span>
                   <span className="text-xs text-gray-500">{d.dateEffet ? fmtJourCourt(d.dateEffet) : "effet ?"}</span>
                   <span className="col-span-2 sm:col-span-1 min-w-0">
@@ -12023,6 +12070,13 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                               <button onClick={async () => {
                                                 setSimAnalyzing(d.id); setSimAnalyzeError(""); setSimAnalysisResult(null); setSimAutoReclassified(false);
                                                 const { result, error } = await onAnalyzeDossierIA(d.id);
+                                                // Banque et cotisation actuelle servent aussi au suivi back-office.
+                                                if (result && (result.banque || result.cotisationMensuelleActuelle)) {
+                                                  onUpdateDossierSimulation(d.id, {
+                                                    ...(result.banque ? { banqueDetectee: result.banque } : {}),
+                                                    ...(result.cotisationMensuelleActuelle ? { cotisationActuelle: result.cotisationMensuelleActuelle } : {}),
+                                                  });
+                                                }
                                                 setSimAnalyzing(null);
                                                 if (error) { setSimAnalyzeError(error); return; }
                                                 const misclassified =
