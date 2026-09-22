@@ -2098,21 +2098,38 @@ export default function App() {
       },
     }));
   }
+  // Quatre gestes possibles : retirer quelqu'un (il passe en exclusion, sinon
+  // la règle automatique le réinscrirait aussitôt), le remettre dans la règle,
+  // l'inscrire à la main alors qu'il n'en relève pas, ou marquer son cadeau
+  // comme remis.
   async function majInscritBienvenue(partnerId, patch) {
     const nom = nomPartenaire(data.partners.find(x => x.id === partnerId));
     await mutateData(base => {
       const r = base.settings?.challengeBienvenue || {};
       const inscrits = { ...(r.inscrits || {}) };
-      if (patch === null) delete inscrits[partnerId];
-      else inscrits[partnerId] = { ...(inscrits[partnerId] || {}), ...patch };
-      const message = patch === null
-        ? `a retiré ${nom} du challenge de bienvenue`
-        : patch.remisLe
-          ? `a remis la récompense du challenge de bienvenue à ${nom}`
-          : `a inscrit ${nom} au challenge de bienvenue`;
+      const exclus = { ...(r.exclus || {}) };
+      let message;
+      if (patch === null) {
+        delete inscrits[partnerId];
+        exclus[partnerId] = true;
+        message = `a retiré ${nom} du challenge de bienvenue`;
+      } else if (patch.auto) {
+        delete exclus[partnerId];
+        const reste = { ...(inscrits[partnerId] || {}) };
+        delete reste.le;
+        if (Object.keys(reste).length) inscrits[partnerId] = reste; else delete inscrits[partnerId];
+        message = `a remis ${nom} dans le challenge de bienvenue`;
+      } else if (typeof patch.le === "number") {
+        delete exclus[partnerId];
+        inscrits[partnerId] = { ...(inscrits[partnerId] || {}), le: patch.le };
+        message = `a inscrit ${nom} au challenge de bienvenue`;
+      } else {
+        inscrits[partnerId] = { ...(inscrits[partnerId] || {}), ...patch };
+        message = `a remis la récompense du challenge de bienvenue à ${nom}`;
+      }
       return withLog({
         ...base,
-        settings: { ...base.settings, challengeBienvenue: { ...BIENVENUE_DEFAUT, ...r, inscrits } },
+        settings: { ...base.settings, challengeBienvenue: { ...BIENVENUE_DEFAUT, ...r, inscrits, exclus } },
       }, message);
     });
   }
@@ -2142,7 +2159,7 @@ export default function App() {
   }
   // Nouvelle période de production. L'ancienne est archivée pour rester
   // consultable dans « Périodes précédentes ».
-  async function setPeriodeProduction(periode) {
+  async function setPeriodeProduction(periode, objectifsSemaine) {
     await mutateData(base => {
       const ancienne = base.settings?.periodeProduction;
       const archives = [...(base.settings?.periodesProduction || [])];
@@ -2156,7 +2173,13 @@ export default function App() {
       }
       return withLog({
         ...base,
-        settings: { ...base.settings, periodeProduction: periode, periodesProduction: archives.slice(-24) },
+        settings: {
+          ...base.settings,
+          periodeProduction: periode,
+          periodesProduction: archives.slice(-24),
+          // La base hebdomadaire est le socle : elle survit aux périodes.
+          ...(objectifsSemaine ? { objectifsSemaine } : {}),
+        },
       }, `a fixé une période de production du ${periode.debut} au ${periode.fin}`);
     });
   }
@@ -7301,7 +7324,15 @@ function bornesChallenge(ch) {
 // premiers dossiers : la perte est impossible, et le délai ne sert qu'à poser
 // un cadre — d'où le champ libre plutôt qu'une valeur imposée.
 // =============================================================================
-const BIENVENUE_DEFAUT = { actif: false, objectif: 12, recompense: "", coutRecompense: 0, delaiMois: 12 };
+const BIENVENUE_DEFAUT = {
+  actif: false, objectif: 12, recompense: "", coutRecompense: 0, delaiMois: 12,
+  // Inscription automatique : tout partenaire entré à partir de cette date
+  // court sans qu'on ait rien à cocher. À 300 partenaires, cocher une case par
+  // arrivée n'est pas une option — la règle vaut d'elle-même, et les
+  // exceptions se traitent à la main.
+  depuisLe: null,
+  exclus: {},
+};
 // Au-delà, on ne propose plus le partenaire spontanément : le challenge est
 // fait pour lancer un nouveau. La recherche permet quand même d'en inscrire un
 // plus ancien — c'est une décision, pas un réflexe.
@@ -7309,7 +7340,15 @@ const BIENVENUE_ANCIENNETE_MOIS = 3;
 
 function reglageBienvenue(data) {
   const r = data?.settings?.challengeBienvenue || {};
-  return { ...BIENVENUE_DEFAUT, ...r, inscrits: r.inscrits || {} };
+  return { ...BIENVENUE_DEFAUT, ...r, inscrits: r.inscrits || {}, exclus: r.exclus || {} };
+}
+// Un partenaire relève-t-il de la règle automatique ? Oui s'il est entré à
+// partir de la date de bascule et qu'on ne l'a pas retiré à la main.
+function bienvenueAuto(r, p) {
+  if (typeof r.depuisLe !== "number") return false;
+  if (r.exclus[p.id]) return false;
+  const entree = dateEntreeDe(p);
+  return entree !== null && entree >= r.depuisLe;
 }
 // Même arithmétique que ajouterMois(), mais sur un horodatage : le 31 janvier
 // + 1 mois donne le 28 février, pas le 3 mars.
@@ -7328,17 +7367,19 @@ function bienvenueActif(data) {
 }
 
 // Où en est un partenaire de sa course. Renvoie toujours un objet : `inscrit`
-// dit s'il y a une course du tout.
-function bilanBienvenue(data, partnerId) {
-  const r = reglageBienvenue(data);
+// dit s'il y a une course du tout. Le départ est soit la date d'entrée du
+// partenaire (règle automatique), soit le jour où on l'a coché (inscription
+// manuelle d'un ancien) — l'inscription manuelle l'emporte.
+function calculBienvenue(r, p, siens, actif) {
   const objectif = Math.max(1, Number(r.objectif) || 1);
-  const insc = r.inscrits[partnerId];
-  if (!insc || typeof insc.le !== "number") return { reglage: r, objectif, inscrit: false, actif: bienvenueActif(data) };
-  const debut = insc.le;
+  const insc = r.inscrits[p.id] || {};
+  const manuel = typeof insc.le === "number";
+  const auto = !manuel && bienvenueAuto(r, p);
+  if (!manuel && !auto) return { reglage: r, objectif, inscrit: false, auto: false, actif };
+  const debut = manuel ? insc.le : dateEntreeDe(p);
   const delai = Math.max(0, Number(r.delaiMois) || 0);
   const fin = delai > 0 ? ajouterMoisTs(debut, delai) : null;
-  const siens = (data?.dossiers || []).filter(d => d.partnerId === partnerId);
-  // Gagné = contrat vivant aujourd'hui, gagné après l'inscription et dans le
+  // Gagné = contrat vivant aujourd'hui, gagné après le départ et dans le
   // délai. Un KO ultérieur retire le dossier du compteur rétroactivement.
   const gagnes = siens
     .filter(d => {
@@ -7349,14 +7390,14 @@ function bilanBienvenue(data, partnerId) {
     .sort((a, b) => (dateGain(a) || 0) - (dateGain(b) || 0));
   const n = gagnes.length;
   const atteint = n >= objectif;
-  // En cours : ce qu'il a déposé depuis son inscription et qui n'est ni gagné
-  // ni perdu. Sert à lui expliquer pourquoi son compteur ne bouge pas encore.
+  // En cours : ce qu'il a déposé depuis son départ et qui n'est ni gagné ni
+  // perdu. Sert à lui expliquer pourquoi son compteur ne bouge pas encore.
   const enCours = siens.filter(d =>
     !STATUTS_CONTRAT_VIVANT.includes(d.status) && d.status !== "KO" &&
     (d.createdAt || 0) >= debut).length;
   const encaisse = gagnes.reduce((sum, d) => sum + partEncaissee(d, d.caAmount || 0), 0);
   return {
-    reglage: r, objectif, inscrit: true, actif: bienvenueActif(data),
+    reglage: r, objectif, inscrit: true, auto, actif,
     le: debut, fin, gagnes, n, atteint, enCours, encaisse,
     atteintLe: atteint ? dateGain(gagnes[objectif - 1]) : null,
     restants: Math.max(0, objectif - n),
@@ -7365,14 +7406,30 @@ function bilanBienvenue(data, partnerId) {
     joursRestants: fin === null ? null : Math.max(0, Math.ceil((fin - Date.now()) / 86400000)),
   };
 }
+function bilanBienvenue(data, partnerId) {
+  const r = reglageBienvenue(data);
+  const p = (data?.partners || []).find(x => x.id === partnerId);
+  if (!p) return { reglage: r, objectif: Math.max(1, Number(r.objectif) || 1), inscrit: false, auto: false, actif: bienvenueActif(data) };
+  return calculBienvenue(r, p, (data?.dossiers || []).filter(d => d.partnerId === partnerId), bienvenueActif(data));
+}
+// Le bilan de tout le monde en une passe : à 300 partenaires, relire la liste
+// des dossiers pour chacun coûterait trois cents parcours au lieu d'un.
+function bilansBienvenue(data) {
+  const r = reglageBienvenue(data);
+  const actif = bienvenueActif(data);
+  const parPartenaire = new Map();
+  for (const d of (data?.dossiers || [])) {
+    if (!parPartenaire.has(d.partnerId)) parPartenaire.set(d.partnerId, []);
+    parPartenaire.get(d.partnerId).push(d);
+  }
+  return (data?.partners || []).map(p => ({ p, bi: calculBienvenue(r, p, parPartenaire.get(p.id) || [], actif) }));
+}
 // Les cadeaux à commander : objectif atteint, cadeau pas encore remis. C'est
 // ce que l'Accueil doit rappeler.
 function cadeauxBienvenueDus(data) {
   if (!bienvenueActif(data)) return [];
-  return (data.partners || [])
-    .filter(p => !p.deleted)
-    .map(p => ({ p, bi: bilanBienvenue(data, p.id) }))
-    .filter(x => x.bi.inscrit && x.bi.atteint && !x.bi.remisLe)
+  return bilansBienvenue(data)
+    .filter(x => !x.p.deleted && x.bi.inscrit && x.bi.atteint && !x.bi.remisLe)
     .sort((a, b) => (a.bi.atteintLe || 0) - (b.bi.atteintLe || 0));
 }
 
@@ -7916,6 +7973,146 @@ function CoutChallenges({ data }) {
 }
 
 // =============================================================================
+// PROJECTION D'UN CHALLENGE
+//
+// La question devant laquelle on se trouve avant de lancer une opération est
+// toujours la même : à ce prix de cadeau et à cet objectif, est-ce que je
+// gagne de l'argent, et en combien de temps ? Le tableau y répond en direct,
+// pendant qu'on tape les chiffres, plutôt qu'après coup.
+//
+// Deux colonnes parce que la marge dépend de qui suit le dossier : le gérant
+// garde la part du mandataire, un mandataire la prend. C'est du simple au
+// double, et l'arbitrage n'est pas le même.
+// =============================================================================
+const RYTHMES_PROJECTION = [1, 1.5, 2, 3];
+function projectionChallenge(data, objectif, cout) {
+  const obj = Math.max(1, Number(objectif) || 1);
+  const prix = Math.max(0, Number(cout) || 0);
+  const vivants = (data?.dossiers || []).filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status) && (d.caAmount || 0) > 0);
+  const taux = tauxRetrocession(vivants);
+  // Panier moyen réel du cabinet, quand il y a de quoi le calculer. Il sert
+  // de second scénario : le plancher est prudent, la moyenne est la vie.
+  const caMoyen = vivants.length >= SEUIL_RECUL_CHALLENGE
+    ? vivants.reduce((sum, d) => sum + (d.caAmount || 0), 0) / vivants.length
+    : null;
+  const ligne = (ca, avecMandataire) => {
+    const retro = ca * taux;
+    const mand = avecMandataire ? (ca - retro) * PART_MANDATAIRE : 0;
+    const net = ca - retro - mand;
+    return {
+      ca, retro, mand, net,
+      couvertAu: prix > 0 && net > 0 ? Math.ceil(prix / net) : null,
+      gain: net * obj - prix,
+    };
+  };
+  return {
+    objectif: obj, cout: prix, taux, caMoyen,
+    plancher: CA_MINIMUM_REFERENCE,
+    seul: ligne(CA_MINIMUM_REFERENCE, false),
+    mandataire: ligne(CA_MINIMUM_REFERENCE, true),
+    moyenSeul: caMoyen ? ligne(caMoyen, false) : null,
+    moyenMandataire: caMoyen ? ligne(caMoyen, true) : null,
+    // Temps nécessaire selon le rythme du partenaire, en mois.
+    rythmes: RYTHMES_PROJECTION.map(r => ({ rythme: r, mois: obj / r })),
+  };
+}
+// « 4 mois », « 3 mois et demi », « 18 jours » — on ne sert jamais 3,67 mois.
+function dureeLisible(mois) {
+  if (!isFinite(mois) || mois <= 0) return "—";
+  if (mois < 1) return `${Math.max(1, Math.round(mois * 30.44))} jours`;
+  const entier = Math.floor(mois);
+  const reste = mois - entier;
+  const demi = reste >= 0.25 && reste < 0.75;
+  const arrondi = reste >= 0.75 ? entier + 1 : entier;
+  return `${arrondi}${demi ? " mois et demi" : ` mois`}`.replace("0 mois et demi", "quelques jours");
+}
+
+function ProjectionChallenge({ data, objectif, cout, dureeMois, titre }) {
+  const pr = projectionChallenge(data, objectif, cout);
+  const duree = Number(dureeMois) > 0 ? Number(dureeMois) : null;
+  const Rang = ({ t, v, fort }) => (
+    <div className={`flex items-baseline justify-between gap-3 ${fort ? "font-bold" : ""}`}>
+      <span className="min-w-0">{t}</span>
+      <span className="whitespace-nowrap tabular-nums">{v}</span>
+    </div>
+  );
+
+  const Col = ({ l, label }) => (
+    <div className="min-w-0">
+      <div className="font-bold mb-1">{label}</div>
+      <Rang t="Honoraires du dossier" v={fmtEuro(l.ca)} />
+      <Rang t={`− rétrocession apporteur (${Math.round(pr.taux * 100)} %)`} v={`−${fmtEuro(l.retro)}`} />
+      <Rang t="− part mandataire" v={l.mand > 0 ? `−${fmtEuro(l.mand)}` : "0 €"} />
+      <div className="border-t border-emerald-200 mt-1 pt-1">
+        <Rang t="Net Frangola / dossier" v={fmtEuro(l.net)} fort />
+      </div>
+      {pr.cout > 0 && (
+        <Rang t={`Les ${fmtEuro(pr.cout)} sont récoltés au`}
+          v={l.couvertAu ? `${l.couvertAu}${l.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné` : "—"} />
+      )}
+      <Rang t={`Sur les ${pr.objectif} dossiers`} v={`${l.gain >= 0 ? "+" : ""}${fmtEuro(l.gain)}`} />
+    </div>
+  );
+  return (
+    <div className="mt-2 text-xs rounded-xl px-3 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-900">
+      <div className="font-bold uppercase tracking-wide text-[10px] mb-2 opacity-80">
+        {titre || `Projection — au plancher de ${fmtEuro(pr.plancher)} d'honoraires`}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
+        <Col l={pr.seul} label="Dossier que vous suivez vous-même" />
+        <Col l={pr.mandataire} label="Dossier suivi par un mandataire" />
+      </div>
+
+      {pr.cout > 0 && (
+        <p className="mt-2 leading-relaxed">
+          {pr.seul.couvertAu && pr.seul.gain >= 0
+            ? <>La récompense est payée par le <strong>{pr.seul.couvertAu}{pr.seul.couvertAu > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné</strong>
+                {pr.mandataire.couvertAu !== pr.seul.couvertAu && <> (le <strong>{pr.mandataire.couvertAu}ᵉ</strong> avec un mandataire)</>} :
+                les suivants sont du bénéfice net, <strong>la perte est impossible</strong>.</>
+            : <span className="text-amber-900">Attention : à cet objectif, la récompense coûte plus cher qu'elle ne rapporte. Il faut viser
+                au moins <strong>{pr.mandataire.couvertAu || "—"} dossiers</strong> pour rentrer dans vos frais.</span>}
+          {pr.caMoyen && pr.moyenMandataire && (
+            <> À votre panier moyen réel de <strong>{fmtEuro(pr.caMoyen)}</strong>, le net passe à {fmtEuro(pr.moyenMandataire.net)} par
+              dossier et la récompense est couverte dès le <strong>{pr.moyenMandataire.couvertAu}{pr.moyenMandataire.couvertAu > 1 ? "ᵉ" : "ᵉʳ"}</strong>.</>
+          )}
+          {" "}La commission récurrente s'ajoute par-dessus — elle n'est jamais rétrocédée à l'apporteur.
+        </p>
+      )}
+
+      <div className="mt-2.5 pt-2 border-t border-emerald-200">
+        <div className="font-bold uppercase tracking-wide text-[10px] mb-1 opacity-80">
+          Temps nécessaire pour {pr.objectif} dossier{pr.objectif > 1 ? "s" : ""} gagné{pr.objectif > 1 ? "s" : ""}
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+          {pr.rythmes.map(({ rythme, mois }) => {
+            const tenable = duree === null || mois <= duree + 0.001;
+            return (
+              <div key={rythme} className={`rounded-lg px-2 py-1.5 border ${tenable ? "bg-white/70 border-emerald-200" : "bg-red-50 border-red-200"}`}>
+                <div className="opacity-70 text-[10px]">{String(rythme).replace(".", ",")} dossier{rythme > 1 ? "s" : ""} / mois</div>
+                <div className={`font-bold ${tenable ? "" : "text-red-700"}`}>{dureeLisible(mois)}</div>
+              </div>
+            );
+          })}
+        </div>
+        <p className="mt-1.5 opacity-80">
+          {duree === null
+            ? <>Sans limite de temps, tous les rythmes vont au bout — le délai ne sert qu'à mettre un cadre.</>
+            : (() => {
+                const tenables = pr.rythmes.filter(x => x.mois <= duree + 0.001);
+                if (tenables.length === 0) return <span className="text-red-700">Aucun rythme réaliste ne tient dans {dureeLisible(duree)} : l'objectif est hors de portée, baissez-le ou allongez le délai.</span>;
+                // Le rythme le plus LENT qui tient : c'est le minimum à
+                // demander, pas le plus rapide.
+                const mini = tenables[0].rythme;
+                return <>Dans {dureeLisible(duree)}, il faut tenir <strong>{String(mini).replace(".", ",")} dossier{mini > 1 ? "s" : ""} par mois</strong>.
+                  {tenables.length === pr.rythmes.length ? " Tous les rythmes y arrivent." : ` Les rythmes plus lents n'y arrivent pas.`}</>;
+              })()}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// =============================================================================
 // CHALLENGE DE BIENVENUE — réglage unique + la case à cocher, partenaire par
 // partenaire. Placé au-dessus des challenges ponctuels : c'est le socle, les
 // autres sont les coups d'accélérateur.
@@ -7930,20 +8127,14 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
   const cout = Number(r.coutRecompense) || 0;
   const actif = bienvenueActif(data);
 
-  // Point d'équilibre au plancher d'honoraires, dans les deux cas de figure :
-  // le dossier suivi par le gérant, et celui suivi par un mandataire. C'est la
-  // seule chose à savoir avant de fixer une récompense.
-  const vivantsDossiers = (data.dossiers || []).filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status) && (d.caAmount || 0) > 0);
-  const taux = tauxRetrocession(vivantsDossiers);
-  const netSeul = CA_MINIMUM_REFERENCE * (1 - taux);
-  const netMandataire = netSeul * (1 - PART_MANDATAIRE);
-  const couvSeul = cout > 0 && netSeul > 0 ? Math.ceil(cout / netSeul) : null;
-  const couvMand = cout > 0 && netMandataire > 0 ? Math.ceil(cout / netMandataire) : null;
-
-  const vivants = (data.partners || []).filter(p => !p.deleted && p.active !== false);
-  const lignes = vivants.map(p => ({ p, bi: bilanBienvenue(data, p.id) }));
+  const lignes = bilansBienvenue(data).filter(x => !x.p.deleted && x.p.active !== false);
   const limiteAnciennete = ajouterMoisTs(Date.now(), -BIENVENUE_ANCIENNETE_MOIS);
   const q = (rech || "").trim().toLowerCase();
+  const isoDeTs = (ts) => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const depuisDefaut = ajouterMoisTs(Date.now(), -BIENVENUE_ANCIENNETE_MOIS);
 
   // À offrir d'abord — c'est la seule ligne qui demande une action — puis les
   // courses en cours, de la plus avancée à la moins avancée.
@@ -7959,7 +8150,11 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
   // On ne déroule jamais tout le réseau : au-delà, la recherche est le bon
   // outil. Quatre propositions suffisent à faire le geste, vingt à choisir.
   const proposesVus = toutVoir ? proposes.slice(0, 20) : proposes.slice(0, 4);
+  // À trois cents partenaires, la liste ne se déroule pas : on montre les
+  // courses qui demandent une action, et la recherche fait le reste.
+  const enCourseVus = toutVoir ? enCourse.slice(0, 40) : enCourse.slice(0, 8);
 
+  const nbExclus = Object.keys(r.exclus || {}).length;
   const totalGagnes = enCourse.reduce((sum, x) => sum + x.bi.n, 0);
   const totalRemis = enCourse.filter(x => x.bi.remisLe).length;
   const margeGeneree = enCourse.reduce((sum, x) => sum + x.bi.gagnes.reduce((t, d) =>
@@ -7968,7 +8163,11 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
   const champ = "text-sm border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500";
 
   function ouvrirEdition() {
-    setB({ objectif: r.objectif, recompense: r.recompense || "", coutRecompense: r.coutRecompense || "", delaiMois: r.delaiMois });
+    setB({
+      objectif: r.objectif, recompense: r.recompense || "", coutRecompense: r.coutRecompense || "",
+      delaiMois: r.delaiMois,
+      depuisIso: typeof r.depuisLe === "number" ? isoDeTs(r.depuisLe) : "",
+    });
   }
   function enregistrer() {
     onMajReglage({
@@ -7976,6 +8175,7 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
       recompense: (b.recompense || "").trim(),
       coutRecompense: Number(b.coutRecompense) || 0,
       delaiMois: Math.max(0, Number(b.delaiMois) || 0),
+      depuisLe: b.depuisIso ? new Date(b.depuisIso + "T00:00:00").getTime() : null,
     });
     setB(null);
   }
@@ -7996,7 +8196,9 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
     ) : bi.inscrit && !bi.expire && bi.restants <= 3 && bi.n > 0 ? (
       <span className="text-[11px] font-bold px-2 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200 whitespace-nowrap">Plus que {bi.restants}</span>
     ) : bi.inscrit ? (
-      <span className="text-[11px] text-gray-400 whitespace-nowrap">Inscrit le {fmtDate(bi.le)}</span>
+      <span className="text-[11px] text-gray-400 whitespace-nowrap">
+        {bi.auto ? "Inscrit d'office" : `Inscrit le ${fmtDate(bi.le)}`}
+      </span>
     ) : null;
 
     const action = aOffrir && canEdit ? (
@@ -8019,14 +8221,22 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
             : bi.joursRestants !== null ? <> · il reste {bi.joursRestants} j</> : <> · sans limite</>}
       </div>
     </>) : (
-      <div className="text-[11px] text-gray-400">Cochez pour démarrer</div>
+      <div className="text-[11px] text-gray-400">
+        {r.exclus[p.id] ? "Retiré à la main — cochez pour le remettre" : "Cochez pour démarrer"}
+      </div>
     );
 
     return (
       <div className={`border-t border-gray-100 py-2.5 sm:flex sm:items-center sm:gap-3 ${bi.inscrit ? "" : "opacity-60"}`}>
         <div className="flex items-center gap-3 sm:flex-1 sm:min-w-0">
           <button
-            onClick={() => canEdit && onMajInscrit(p.id, bi.inscrit ? null : { le: Date.now() })}
+            onClick={() => {
+              if (!canEdit) return;
+              if (bi.inscrit) return onMajInscrit(p.id, null);
+              // Un partenaire qui relève de la règle automatique y retourne —
+              // sa course repart de sa date d'entrée, pas d'aujourd'hui.
+              return onMajInscrit(p.id, bienvenueAuto({ ...r, exclus: {} }, p) ? { auto: true } : { le: Date.now() });
+            }}
             disabled={!canEdit}
             title={bi.inscrit ? "Retirer du challenge" : "Inscrire au challenge"}
             className={`w-[19px] h-[19px] rounded-md border-2 shrink-0 flex items-center justify-center text-[11px] font-bold text-white transition
@@ -8063,7 +8273,11 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
             {actif ? `Actif · ${enCourse.filter(x => !x.bi.remisLe && !x.bi.expire).length} en course` : "Inactif"}
           </span>
           {canEdit && (
-            <button onClick={() => onMajReglage({ actif: !r.actif })} className="text-xs fa-teal-text hover:underline">
+            <button
+              onClick={() => onMajReglage(r.actif
+                ? { actif: false }
+                : { actif: true, depuisLe: typeof r.depuisLe === "number" ? r.depuisLe : depuisDefaut })}
+              className="text-xs fa-teal-text hover:underline">
               {r.actif ? "Désactiver" : "Activer"}
             </button>
           )}
@@ -8071,8 +8285,9 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
       </div>
       <p className="text-sm text-gray-500 mb-3">
         Le seul challenge permanent : pas de dates communes, chaque partenaire a sa propre course,
-        qui démarre le jour où vous cochez sa case. On compte les dossiers <strong className="fa-navy">gagnés</strong> —
-        un dossier passé KO sort du compteur tout seul.
+        qui démarre à son arrivée. On compte les dossiers <strong className="fa-navy">gagnés</strong> —
+        un dossier passé KO sort du compteur tout seul. Le jour où vous ne voulez plus de ce cadeau,
+        vous désactivez : il disparaît de l'espace de tous les partenaires.
       </p>
 
       {/* ---------------------------------------------------------- réglage */}
@@ -8119,6 +8334,14 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
               className={champ + " w-16 text-center"} />
             <span>mois</span>
           </div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+            <span className="font-semibold fa-navy">Inscription automatique</span>
+            <span>de tout partenaire entré à partir du</span>
+            <input type="date" value={b.depuisIso}
+              onChange={e => setB(x => ({ ...x, depuisIso: e.target.value }))}
+              className={champ} />
+            <span className="text-gray-400">— laissez vide pour n'inscrire personne automatiquement.</span>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <button onClick={enregistrer} disabled={!b.recompense?.trim()}
               className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Enregistrer</button>
@@ -8127,16 +8350,24 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
         </div>
       )}
 
-      {/* ------------------------------------------------- point d'équilibre */}
-      {cout > 0 && couvSeul !== null && (
-        <div className="mt-2 text-xs rounded-xl px-3 py-2 bg-emerald-50 border border-emerald-200 text-emerald-900">
-          Au plancher de {fmtEuro(CA_MINIMUM_REFERENCE)} d'honoraires, il vous reste {fmtEuro(netSeul)} par dossier
-          que vous suivez vous-même, {fmtEuro(netMandataire)} s'il est suivi par un mandataire :
-          la récompense est payée par le <strong>{couvSeul}{couvSeul > 1 ? "ᵉ" : "ᵉʳ"} dossier gagné</strong>
-          {couvMand !== couvSeul ? <> (le <strong>{couvMand}ᵉ</strong> avec un mandataire)</> : null}.
-          Les {Math.max(0, objectif - (couvMand || couvSeul))} suivants sont du bénéfice net — la perte est impossible.
+      {/* ------------------------------------------- règle d'inscription auto */}
+      {b === null && (
+        <div className="mt-2 text-xs rounded-xl px-3 py-2 bg-sky-50 border border-sky-200 text-sky-900 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <strong>Inscription automatique</strong>
+          {typeof r.depuisLe === "number"
+            ? <>— tout partenaire entré à partir du <strong>{fmtDate(r.depuisLe)}</strong> court sans que vous ayez rien à faire.</>
+            : <>— à activer : fixez la date à partir de laquelle un nouveau partenaire est inscrit tout seul.</>}
+          {nbExclus > 0 && <span className="text-sky-700">{nbExclus} retiré{nbExclus > 1 ? "s" : ""} à la main.</span>}
         </div>
       )}
+
+      {/* ----------------------------------------------------- la projection */}
+      {/* Branchée sur le brouillon quand on édite : les chiffres bougent en
+          même temps que les champs, c'est là que l'arbitrage se fait. */}
+      <ProjectionChallenge data={data}
+        objectif={b ? b.objectif : objectif}
+        cout={b ? b.coutRecompense : cout}
+        dureeMois={b ? b.delaiMois : r.delaiMois} />
 
       {/* --------------------------------------------------------- la liste */}
       <input value={rech} onChange={e => setRech(e.target.value)}
@@ -8149,7 +8380,12 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
             Aucun partenaire en course. Cochez un nouveau venu pour lancer la sienne.
           </div>
         ) : (<>
-          {enCourse.map(({ p, bi }) => <Ligne key={p.id} p={p} bi={bi} />)}
+          {enCourseVus.map(({ p, bi }) => <Ligne key={p.id} p={p} bi={bi} />)}
+          {enCourse.length > enCourseVus.length && (
+            <button onClick={() => setToutVoir(true)} className="text-xs fa-teal-text hover:underline my-1.5 block">
+              Voir les {enCourse.length - enCourseVus.length} autres courses en cours →
+            </button>
+          )}
           {proposesVus.map(({ p, bi }) => <Ligne key={p.id} p={p} bi={bi} />)}
           {proposes.length > proposesVus.length && (
             <button onClick={() => setToutVoir(true)} disabled={toutVoir}
@@ -8165,7 +8401,7 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
       <p className="text-[11px] text-gray-400 mt-2">
         {q
           ? "Recherche sur tous les partenaires — vous restez libre d'en inscrire un plus ancien."
-          : `Sont proposés les partenaires entrés il y a moins de ${BIENVENUE_ANCIENNETE_MOIS} mois. La recherche donne accès aux autres.`}
+          : `Les nouveaux entrent d'eux-mêmes. Sont aussi proposés ici les partenaires entrés il y a moins de ${BIENVENUE_ANCIENNETE_MOIS} mois qui ne courent pas, et la recherche donne accès aux autres.`}
       </p>
 
       {enCourse.length > 0 && (
@@ -8493,6 +8729,24 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
           </div>
         )}
 
+        {/* La même projection que pour le challenge de bienvenue : à ce prix
+            de cadeau et à cet objectif, qu'est-ce que ça rapporte, et en
+            combien de temps. La fenêtre du challenge sert de délai. */}
+        {!boost && (Number(b.coutRecompense) || 0) > 0 && (() => {
+          const bo = bornesChallenge(b);
+          const dureeMois = bo.valide ? (bo.fin - bo.debut) / (30.44 * 86400000) : null;
+          // Pour un challenge ciblé, chacun a son objectif : on projette sur
+          // la moyenne, qui est ce que l'opération demande en moyenne.
+          const objMoyen = cible === "selection" && choisis.length > 0
+            ? choisis.reduce((sum, id) => sum + Math.max(1, Number(participants[id]) || 1), 0) / choisis.length
+            : Number(b.objectif) || 1;
+          return <ProjectionChallenge data={data} objectif={Math.max(1, Math.round(objMoyen))}
+            cout={b.coutRecompense} dureeMois={dureeMois}
+            titre={cible === "selection"
+              ? `Projection par partenaire — objectif moyen de ${Math.max(1, Math.round(objMoyen))} dossiers, au plancher de ${fmtEuro(CA_MINIMUM_REFERENCE)}`
+              : undefined} />;
+        })()}
+
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <label className="text-xs text-gray-500 flex items-center gap-1.5">
             Du <input type="date" value={b.debut} onChange={e => setB(x => ({ ...x, debut: e.target.value }))} className={champ} />
@@ -8716,10 +8970,15 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
 // suis fixée — 10 jours, un mois, trois, six, ou des dates sur mesure. Par
 // défaut, le mois civil en cours, comme avant.
 //
-// Les objectifs mensuels (settings.challenge) ne bougent pas : ils servent de
-// base. La période (settings.periodeProduction) en déduit ses propres
-// objectifs au prorata, corrigeables à la main. Les périodes remplacées ou
-// terminées sont archivées dans settings.periodesProduction.
+// L'unité de compte est LA SEMAINE (settings.objectifsSemaine) : on fixe une
+// fois ce qu'on veut faire en sept jours, et changer de durée ne fait que
+// multiplier — un mois vaut quatre semaines, trois mois douze, six mois
+// vingt-quatre. Rien n'est écrasé au passage : corriger un chiffre sur « 1
+// mois » corrige la semaine d'autant, et le reste suit.
+//
+// Les objectifs mensuels (settings.challenge) restent la référence du Tableau
+// des objectifs, qui raisonne par commercial et par mois. Les périodes
+// remplacées ou terminées sont archivées dans settings.periodesProduction.
 // =============================================================================
 const DUREES_PRODUCTION = [
   { id: "1s", label: "1 semaine" },
@@ -8749,20 +9008,46 @@ function debutParDefaut(duree) {
   if (duree === "1s") return isoDe(new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7)));
   return duree === "perso" ? isoDe(now) : isoDe(new Date(now.getFullYear(), now.getMonth(), 1));
 }
-// Nombre de « mois » que représente une période, pour le prorata des objectifs.
-function facteurPeriode(duree, debutIso, finIso) {
-  if (duree === "1m") return 1;
-  if (duree === "3m") return 3;
-  if (duree === "6m") return 6;
+// Combien de semaines vaut une durée. Les valeurs rondes sont voulues : un
+// mois compte quatre semaines, pas 4,35 — on veut un multiplicateur qu'on
+// retrouve de tête, pas une exactitude calendaire.
+const SEMAINES_PAR_DUREE = { "1s": 1, "1m": 4, "3m": 12, "6m": 24 };
+function semainesPeriode(duree, debutIso, finIso) {
+  const fixe = SEMAINES_PAR_DUREE[duree];
+  if (fixe) return fixe;
   const jours = Math.round((debutJour(finIso) - debutJour(debutIso)) / 86400000) + 1;
-  return Math.max(1, jours) / 30.4375;
+  return Math.max(1, jours) / 7;
 }
-function objectifsProrata(mensuels, facteur) {
+// La base hebdomadaire est toujours un chiffre rond : sans quoi « ×4 » ne
+// tomberait pas juste à l'écran (10,5 par semaine s'affiche 11 mais donne 42
+// sur le mois, et on ne comprend plus rien). On arrondit donc à la saisie, et
+// tout ce qui s'affiche ensuite est un vrai multiple de la semaine.
+function arrondirBaseSemaine(k, v) {
+  const n = Number(v) || 0;
+  if (n <= 0) return 0;
+  if (k === "ca") return Math.round(n / 50) * 50;
+  if (k === "recurrence") return Math.round(n / 5) * 5;
+  return Math.round(n);
+}
+// Les objectifs d'une durée : la base hebdomadaire, multipliée.
+function objectifsPourSemaines(base, semaines) {
   const r = {};
   for (const [k] of CHAMPS_OBJECTIFS) {
-    const v = Number(mensuels?.[k]) || 0;
-    r[k] = k === "ca" ? Math.round(v * facteur / 50) * 50 : Math.round(v * facteur);
+    const v = Number(base?.[k]) || 0;
+    r[k] = k === "ca" ? Math.round(v * semaines / 50) * 50 : Math.round(v * semaines);
   }
+  return r;
+}
+// Base hebdomadaire. Tant qu'elle n'a pas été fixée, on la déduit des
+// objectifs mensuels déjà saisis en les divisant par quatre, au chiffre rond
+// le plus proche : on retrouve donc l'ordre de grandeur d'avant, arrondi à la
+// semaine entière (30 dossiers par mois donnent 8 par semaine, soit 32).
+function baseSemaine(data) {
+  const enregistree = data?.settings?.objectifsSemaine;
+  if (enregistree && CHAMPS_OBJECTIFS.some(([k]) => Number(enregistree[k]) > 0)) return enregistree;
+  const mensuels = data?.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
+  const r = {};
+  for (const [k] of CHAMPS_OBJECTIFS) r[k] = arrondirBaseSemaine(k, (Number(mensuels[k]) || 0) / 4);
   return r;
 }
 function libellePeriode(per) {
@@ -8781,7 +9066,7 @@ function periodeCourante(data) {
   return { duree: "1m", debut, fin: finPourDuree("1m", debut), objectifs: null, enregistree: false };
 }
 function objectifsDePeriode(data, per) {
-  return per.objectifs || objectifsProrata(data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 }, facteurPeriode(per.duree, per.debut, per.fin));
+  return per.objectifs || objectifsPourSemaines(baseSemaine(data), semainesPeriode(per.duree, per.debut, per.fin));
 }
 function periodesTerminees(data) {
   const auj = isoDe(Date.now());
@@ -8846,6 +9131,7 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit
   const [voirHisto, setVoirHisto] = useState(false);
 
   const mensuels = data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
+  const base = baseSemaine(data);
   const per = periodeCourante(data);
   const objectifs = objectifsDePeriode(data, per);
   const debut = debutJour(per.debut);
@@ -8857,14 +9143,22 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit
   const terminees = periodesTerminees(data);
   const auMois = per.duree === "1m" && !per.enregistree;
 
-  // Ouvre l'édition, éventuellement sur une durée choisie d'un clic.
+  // Le brouillon ne transporte QUE la base hebdomadaire : les objectifs
+  // affichés en sont la multiplication. Changer de durée ne touche donc à
+  // rien — c'est tout l'objet de la manœuvre.
   function ouvrir(duree) {
     const d = duree || per.duree;
     const deb = duree && duree !== per.duree ? debutParDefaut(d) : per.debut;
     const fi = duree && duree !== per.duree ? finPourDuree(d === "perso" ? "1s" : d, deb) : per.fin;
-    const auto = !per.objectifs || (duree && duree !== per.duree);
-    const b = { duree: d, debut: deb, fin: fi, auto, objectifs: auto ? objectifsProrata(mensuels, facteurPeriode(d, deb, fi)) : { ...per.objectifs } };
-    setBrouillon(b);
+    // Une période déjà enregistrée avec ses propres chiffres redonne sa base :
+    // on repart de ce qui est à l'écran, pas d'un calcul théorique.
+    let b0 = base;
+    if (per.objectifs && (!duree || duree === per.duree)) {
+      const sem = semainesPeriode(per.duree, per.debut, per.fin);
+      b0 = {};
+      for (const [k] of CHAMPS_OBJECTIFS) b0[k] = arrondirBaseSemaine(k, (Number(per.objectifs[k]) || 0) / sem);
+    }
+    setBrouillon({ duree: d, debut: deb, fin: fi, base: { ...b0 } });
     setEdition(true);
   }
   function maj(ch) {
@@ -8873,15 +9167,22 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit
       if (ch.duree && ch.duree !== "perso") { n.debut = ch.debut || debutParDefaut(ch.duree); n.fin = finPourDuree(ch.duree, n.debut); }
       if (ch.debut && n.duree !== "perso") n.fin = finPourDuree(n.duree, ch.debut);
       if (n.fin < n.debut) n.fin = n.debut;
-      if (n.auto) n.objectifs = objectifsProrata(mensuels, facteurPeriode(n.duree, n.debut, n.fin));
       return n;
     });
   }
+  // Corriger un chiffre sur la durée affichée revient à corriger la semaine
+  // d'autant : saisir 92 dossiers sur « 1 mois », c'est 23 par semaine.
+  function majObjectif(k, valeur, semaines) {
+    const v = Number(valeur);
+    setBrouillon(b => ({ ...b, base: { ...b.base, [k]: !isNaN(v) && v >= 0 ? arrondirBaseSemaine(k, v / semaines) : 0 } }));
+  }
   function enregistrer() {
     const b = brouillon;
-    const objs = {};
-    for (const [k] of CHAMPS_OBJECTIFS) { const v = Number(b.objectifs[k]); objs[k] = !isNaN(v) && v >= 0 ? v : 0; }
-    onSetPeriode?.({ duree: b.duree, debut: b.debut, fin: b.fin, objectifs: b.auto ? null : objs, enregistreLe: Date.now() });
+    const sem = semainesPeriode(b.duree, b.debut, b.fin);
+    const objs = objectifsPourSemaines(b.base, sem);
+    const baseNette = {};
+    for (const [k] of CHAMPS_OBJECTIFS) baseNette[k] = arrondirBaseSemaine(k, b.base[k]);
+    onSetPeriode?.({ duree: b.duree, debut: b.debut, fin: b.fin, objectifs: objs, enregistreLe: Date.now() }, baseNette);
     setEdition(false);
   }
 
@@ -8975,17 +9276,22 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit
         </span>
       </div>
 
-      {edition ? (
+      {edition ? (() => {
+        const sem = semainesPeriode(brouillon.duree, brouillon.debut, brouillon.fin);
+        const semLisible = sem.toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+        const affiches = objectifsPourSemaines(brouillon.base, sem);
+        const parSemaine = (k) => (Number(brouillon.base[k]) || 0).toLocaleString("fr-FR");
+        return (
         <div className="mb-4">
           <div className="flex flex-wrap items-end gap-2">
             {CHAMPS_OBJECTIFS.map(([k, lib]) => (
               <label key={k} className="text-xs text-gray-500">
                 <span className="block mb-1">{lib}</span>
-                <input type="number" onFocus={selectionTotale} min="0" value={brouillon.objectifs[k] ?? ""}
-                  onChange={e => setBrouillon(b => ({ ...b, auto: false, objectifs: { ...b.objectifs, [k]: e.target.value } }))}
+                <input type="number" onFocus={selectionTotale} min="0" value={affiches[k] ?? ""}
+                  onChange={e => majObjectif(k, e.target.value, sem)}
                   className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1.5 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <span className="block text-[11px] text-gray-400 mt-0.5 text-center">
-                  {Number(mensuels[k] || 0).toLocaleString("fr-FR")} / mois{brouillon.duree === "1m" ? "" : ` × ${brouillon.duree === "3m" ? 3 : brouillon.duree === "6m" ? 6 : (facteurPeriode(brouillon.duree, brouillon.debut, brouillon.fin)).toLocaleString("fr-FR", { maximumFractionDigits: 2 })}`}
+                  {parSemaine(k)} / semaine{sem === 1 ? "" : ` × ${semLisible}`}
                 </span>
               </label>
             ))}
@@ -8994,15 +9300,15 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit
               <button onClick={() => setEdition(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
             </span>
           </div>
-          <label className="fa-tap flex items-center gap-2 text-xs text-gray-600 mt-1 cursor-pointer">
-            <input type="checkbox" checked={brouillon.auto}
-              onChange={e => setBrouillon(b => ({ ...b, auto: e.target.checked, objectifs: e.target.checked ? objectifsProrata(mensuels, facteurPeriode(b.duree, b.debut, b.fin)) : b.objectifs }))}
-              className="rounded border-gray-300" />
-            Calculer les objectifs à partir de mes objectifs mensuels (tu peux toujours les modifier à la main)
-          </label>
+          <p className="text-xs text-gray-500 mt-1">
+            Vos objectifs sont comptés <strong className="fa-navy">à la semaine</strong> : un mois vaut 4 semaines,
+            trois mois 12, six mois 24. Changer de durée ne fait que multiplier — vos chiffres ne sont jamais
+            écrasés. Corriger une case ici corrige la semaine d'autant.
+          </p>
           <MensuelsEditables mensuels={mensuels} onSetGoals={onSetGoals} />
         </div>
-      ) : (
+        );
+      })() : (
         <p className="text-sm text-gray-500 mb-4">
           Le trait sombre marque où vous devriez en être aujourd'hui. Chaque couleur est un commercial.
         </p>
@@ -9103,11 +9409,11 @@ function MensuelsEditables({ mensuels, onSetGoals }) {
     <div className="mt-2">
       {!ouvert ? (
         <button onClick={() => { setB({ ...mensuels }); setOuvert(true); }} className="text-[11px] text-gray-400 hover:fa-teal-text">
-          Modifier mes objectifs mensuels de référence
+          Modifier mes objectifs mensuels (Tableau des objectifs, par commercial)
         </button>
       ) : (
         <div className="flex flex-wrap items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg p-2">
-          <span className="text-[11px] text-gray-500">Objectifs mensuels :</span>
+          <span className="text-[11px] text-gray-500">Objectifs mensuels du Tableau des objectifs (sans effet sur la période) :</span>
           {CHAMPS_OBJECTIFS.map(([k, lib]) => (
             <label key={k} className="text-[11px] text-gray-500 flex items-center gap-1">
               {lib}
