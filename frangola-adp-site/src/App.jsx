@@ -966,7 +966,7 @@ function genererJeuDemo(base) {
         id: "demo-d-" + dossiers.length, partnerId: p.id,
         clientFirstName: choix(DEMO_PRENOMS), clientLastName: choix(DEMO_NOMS),
         clientPhone: "06" + String(rnd(10000000, 99999999)),
-        status, createdAt, updatedAt: createdAt + rnd(1, 20) * JOUR,
+        status, createdAt, updatedAt: Math.min(maintenant, createdAt + rnd(1, 20) * JOUR),
         clientInformeLe: createdAt,
         hasCoEmprunteur: chance(0.38),
         coClientLastName: "", coClientFirstName: "", coClientPhone: "",
@@ -1021,6 +1021,34 @@ function genererJeuDemo(base) {
         d.history.push({ status: d.status, at: d.updatedAt });
         d.backOffice = backOfficeDemo(d, maintenant, dossiers.length);
       }
+      // Un vrai dossier ne saute pas du dépôt à la souscription : il passe
+      // par la vérification puis le devis. Sans ces étapes, le bloc « Où le
+      // temps se perd » n'aurait rien à mesurer en démonstration — et la
+      // démonstration mentirait sur le fonctionnement de l'outil.
+      (function retracerLeParcours() {
+        const final = d.status;
+        if (final === "Déposé") return;
+        const ordre = ["En vérification", "Devis en cours", "Souscrit", "Bordereau émis", "Payé"];
+        const rangFinal = final === "KO" ? rnd(0, 2) : ordre.indexOf(final);
+        if (rangFinal < 0) return;
+        const fin = Math.max(d.updatedAt, createdAt + JOUR);
+        const traversees = ordre.slice(0, rangFinal + 1);
+        const jalons = [];
+        let precedent = createdAt;
+        for (let i = 0; i < traversees.length; i++) {
+          // Les étapes se répartissent entre le dépôt et la date de fin, avec
+          // un peu de désordre : toutes les instructions ne vont pas au même
+          // rythme.
+          const part = (i + 1) / (traversees.length + (final === "KO" ? 1 : 0));
+          const t = Math.min(fin, precedent + Math.max(JOUR / 2, (fin - createdAt) * part * (0.7 + r() * 0.6)));
+          jalons.push({ status: traversees[i], at: Math.round(t) });
+          precedent = t;
+        }
+        d.history = [{ status: "Déposé", at: createdAt }, ...jalons];
+        if (final === "KO") d.history.push({ status: "KO", at: Math.round(fin) });
+        else d.history[d.history.length - 1] = { status: final, at: Math.round(fin) };
+        d.status = final;
+      })();
       dossiers.push(d);
     }
   }
@@ -1900,6 +1928,98 @@ export default function App() {
       console.error("Sauvegarde automatique impossible :", e);
     }
   }
+  // ───────────────────────────────────────────────────────────────────
+  // SORTIE DE SECOURS
+  //
+  // Les sauvegardes quotidiennes vivent dans la même table Supabase que les
+  // données : elles protègent d'une fausse manœuvre, pas de la perte du
+  // projet Supabase lui-même. D'où ces deux fonctions — un export qui sort
+  // VRAIMENT de l'outil, pièces jointes comprises, et une restauration qui
+  // sait le relire. Sans la seconde, la première n'est qu'un fichier.
+  // ───────────────────────────────────────────────────────────────────
+  const VERSION_EXPORT = 1;
+
+  async function exporterSauvegarde({ avecPieces }) {
+    setBusy(true);
+    try {
+      const paquet = {
+        format: "frangola-adp",
+        version: VERSION_EXPORT,
+        exporteLe: new Date().toISOString(),
+        avecPieces: !!avecPieces,
+        data,
+      };
+      if (avecPieces) {
+        // Les pièces sont stockées à part, une clé par fichier : sans elles,
+        // une restauration rendrait des dossiers sans leurs documents.
+        const res = await storage.list("adp:file:", true);
+        const fichiers = {};
+        for (const cle of (res?.keys || [])) {
+          try {
+            const item = await storage.get(cle, true);
+            if (item?.value) fichiers[cle] = item.value;
+          } catch (e) { /* une pièce illisible ne doit pas faire échouer l'export */ }
+        }
+        paquet.fichiers = fichiers;
+        paquet.nbFichiers = Object.keys(fichiers).length;
+      }
+      const jour = new Date().toISOString().slice(0, 10);
+      downloadJson(`frangola-adp-${avecPieces ? "complet" : "donnees"}-${jour}.json`, paquet);
+      return true;
+    } catch (e) {
+      setGlobalError("Export impossible : " + (e?.message || e));
+      return false;
+    } finally { setBusy(false); }
+  }
+
+  // Vérifie qu'un fichier ressemble à une sauvegarde avant d'y toucher.
+  function verifierSauvegarde(paquet) {
+    if (!paquet || typeof paquet !== "object") return { ok: false, erreur: "Fichier illisible." };
+    // On accepte aussi le JSON téléchargé depuis le panneau des sauvegardes
+    // automatiques, qui contient directement les données.
+    const d = paquet.data && typeof paquet.data === "object" ? paquet.data : paquet;
+    if (!Array.isArray(d.partners) || !Array.isArray(d.dossiers)) {
+      return { ok: false, erreur: "Ce fichier ne contient pas de partenaires et de dossiers : ce n'est pas une sauvegarde Frangola." };
+    }
+    return {
+      ok: true, data: d,
+      fichiers: paquet.fichiers && typeof paquet.fichiers === "object" ? paquet.fichiers : null,
+      resume: {
+        partenaires: d.partners.length,
+        dossiers: d.dossiers.length,
+        mandataires: (d.mandataires || []).length,
+        exporteLe: paquet.exporteLe || null,
+        pieces: paquet.fichiers ? Object.keys(paquet.fichiers).length : 0,
+      },
+    };
+  }
+
+  async function restaurerSauvegarde(paquet) {
+    const v = verifierSauvegarde(paquet);
+    if (!v.ok) { setGlobalError(v.erreur); return false; }
+    setBusy(true);
+    try {
+      // Filet avant le filet : l'état actuel est mis de côté sous une clé
+      // dédiée. Une restauration à tort reste rattrapable.
+      try {
+        await storage.set("adp:avant-restauration", JSON.stringify({ at: Date.now(), data }), true);
+      } catch (e) { /* si l'écriture échoue on continue : le fichier importé prime */ }
+
+      if (v.fichiers) {
+        for (const [cle, contenu] of Object.entries(v.fichiers)) {
+          try { await storage.set(cle, contenu, true); } catch (e) { /* une pièce en échec n'annule pas la restauration */ }
+        }
+      }
+      const restaure = { ...v.data, rev: (data?.rev ?? 0) + 1 };
+      await storage.set("adp:data", JSON.stringify(restaure), true);
+      setData(restaure);
+      return true;
+    } catch (e) {
+      setGlobalError("Restauration impossible : " + (e?.message || e));
+      return false;
+    } finally { setBusy(false); }
+  }
+
   async function updateAdmin(fields) {
     await mutateData(base => ({ ...base, settings: { ...base.settings, admin: { ...base.settings.admin, ...fields } } }));
   }
@@ -2972,6 +3092,9 @@ export default function App() {
                     onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
           onRelancerPartenaire={noterRelance}
+          onExporterSauvegarde={exporterSauvegarde}
+          onRestaurerSauvegarde={restaurerSauvegarde}
+          onVerifierSauvegarde={verifierSauvegarde}
           onFusionnerReseaux={fusionnerReseaux}
           onRefuserFusionReseaux={refuserFusionReseaux}
           onMajBienvenue={majChallengeBienvenue}
@@ -3041,6 +3164,9 @@ export default function App() {
                     onSetPeriodeProduction={setPeriodeProduction}
           onAjouterChallenge={ajouterChallenge}
           onRelancerPartenaire={noterRelance}
+          onExporterSauvegarde={exporterSauvegarde}
+          onRestaurerSauvegarde={restaurerSauvegarde}
+          onVerifierSauvegarde={verifierSauvegarde}
           onFusionnerReseaux={fusionnerReseaux}
           onRefuserFusionReseaux={refuserFusionReseaux}
           onMajBienvenue={majChallengeBienvenue}
@@ -3553,6 +3679,31 @@ async function copierRiche(html, texte) {
   try { await navigator.clipboard.writeText(texte); return true; } catch (e) { return false; }
 }
 
+// Une coordonnée qu'on ne peut pas copier oblige à la retaper, et une adresse
+// retapée finit par comporter une faute. Un clic, elle est dans le
+// presse-papier, prête à coller dans un mail.
+function Copiable({ valeur, manquant, titre, mono }) {
+  const [copie, setCopie] = useState(false);
+  if (!valeur) {
+    return <span className="text-xs text-gray-400 italic">{manquant}</span>;
+  }
+  async function copier() {
+    let ok = false;
+    try { await navigator.clipboard.writeText(valeur); ok = true; } catch (e) { ok = false; }
+    setCopie(ok ? "ok" : "echec");
+    setTimeout(() => setCopie(false), 2000);
+  }
+  return (
+    <button onClick={copier} title={titre || `Copier ${valeur}`}
+      className="fa-tap group inline-flex items-center gap-1.5 text-xs text-gray-600 hover:fa-teal-text transition max-w-full">
+      <span className={`truncate ${mono ? "tracking-wide" : ""}`}>{valeur}</span>
+      <span className={`shrink-0 text-[10px] font-semibold ${copie === "ok" ? "text-emerald-600" : copie === "echec" ? "text-red-600" : "text-gray-300 group-hover:text-teal-600"}`}>
+        {copie === "ok" ? "✓ copié" : copie === "echec" ? "échec" : "copier"}
+      </span>
+    </button>
+  );
+}
+
 // Message pour installer l'espace partenaire sur le téléphone, comme une appli.
 function messageAppliMobile(cible) {
   const prenom = (cible.firstName || "").trim();
@@ -3580,6 +3731,13 @@ function messageAppliMobile(cible) {
       "À très vite,",
     ].join("\n"),
   };
+}
+
+function accrocheBienvenue(cible) {
+  const data = _colorDataRef;
+  if (!data || !bienvenueActif(data)) return null;
+  if (reglageBienvenue(data).exclus?.[cible?.id]) return null;
+  return "Et une surprise vous attend sur votre espace : elle se déclenche à votre premier dossier. Je vous laisse la découvrir.";
 }
 
 function messageInvitation(cible, expediteur, genre, telephone) {
@@ -3638,6 +3796,9 @@ function messageInvitation(cible, expediteur, genre, telephone) {
       "",
       "Une fois connecté, vous pourrez déposer votre premier dossier immédiatement. Nous le prenons en charge sous 24 heures.",
       "",
+      // La curiosité est collée à l'action qu'on veut déclencher : déposer.
+      // Placée en fin de message, elle se serait perdue.
+      ...(accrocheBienvenue(cible) ? [accrocheBienvenue(cible), ""] : []),
       "Une question ? Répondez simplement à ce message, ou appelez-moi.",
       "",
       ...piedDeSignature(expediteur, telephone),
@@ -7821,6 +7982,339 @@ function fusionsProposees(data) {
 }
 
 // =============================================================================
+// OÙ LE TEMPS SE PERD
+//
+// Chaque changement de statut est horodaté dans l'historique du dossier depuis
+// le premier jour. La donnée est là, elle n'a jamais été lue. Or c'est elle
+// qui dit où les clients s'évaporent : un dossier déposé qui attend six jours
+// avant qu'on l'ouvre, c'est un partenaire qui perd confiance et un client qui
+// signe ailleurs, et rien dans l'outil ne le signalait.
+//
+// On retient la MÉDIANE et non la moyenne : un seul dossier oublié six mois
+// dans un coin déplacerait la moyenne de plusieurs jours et ferait croire à un
+// problème général là où il n'y a qu'un cas isolé.
+// =============================================================================
+const ETAPES_PARCOURS = ["Déposé", "En vérification", "Devis en cours", "Souscrit"];
+
+// Premier passage horodaté à une étape. Le dépôt n'est pas toujours dans
+// l'historique : c'est la date de création du dossier.
+function premierPassage(d, statut) {
+  if (statut === "Déposé") return d.createdAt || null;
+  const trouve = (d.history || []).find(e => e.status === statut);
+  return trouve ? trouve.at : null;
+}
+
+function tempsParEtape(data, depuis = null) {
+  const dossiers = (data?.dossiers || []).filter(d => depuis === null || (d.createdAt || 0) >= depuis);
+  const transitions = [];
+  for (let i = 0; i < ETAPES_PARCOURS.length - 1; i++) {
+    const de = ETAPES_PARCOURS[i], vers = ETAPES_PARCOURS[i + 1];
+    const durees = [];
+    for (const d of dossiers) {
+      const t0 = premierPassage(d, de);
+      const t1 = premierPassage(d, vers);
+      // Un dossier qui a sauté une étape (passage direct au devis, par
+      // exemple) n'a pas de durée pour celle-ci : on ne l'invente pas.
+      if (t0 === null || t1 === null || t1 < t0) continue;
+      durees.push((t1 - t0) / JOUR_MS);
+    }
+    durees.sort((a, b) => a - b);
+    // On réutilise la médiane de la maison : sur un nombre pair de mesures,
+    // elle prend la moyenne des deux valeurs centrales plutôt que la plus
+    // haute, qui exagérerait systématiquement le délai.
+    const med = mediane(durees);
+    transitions.push({ de, vers, nb: durees.length, mediane: med,
+      pire: durees.length ? durees[durees.length - 1] : null });
+  }
+  // Ce qui attend en ce moment, étape par étape : le passé explique, le
+  // présent se traite.
+  const enAttente = {};
+  for (const e of ETAPES_PARCOURS.slice(0, -1)) enAttente[e] = [];
+  for (const d of dossiers) {
+    if (d.status === "KO" || STATUTS_CONTRAT_VIVANT.includes(d.status)) continue;
+    if (!enAttente[d.status]) continue;
+    const depuisQuand = premierPassage(d, d.status);
+    if (depuisQuand === null) continue;
+    // Une date d'étape postérieure à aujourd'hui donnerait un nombre de jours
+    // négatif : on plafonne à zéro plutôt que d'afficher « −1 j ».
+    enAttente[d.status].push({ d, jours: Math.max(0, Math.floor((Date.now() - depuisQuand) / JOUR_MS)) });
+  }
+  for (const k of Object.keys(enAttente)) enAttente[k].sort((a, b) => b.jours - a.jours);
+  const total = transitions.filter(t => t.mediane !== null).reduce((sum, t) => sum + t.mediane, 0);
+  return { transitions, enAttente, total, nbDossiers: dossiers.length };
+}
+
+function OuLeTempsSePerd({ data, onOuvrirDossier }) {
+  const [fenetre, setFenetre] = useState("12m");
+  const bornes = { "3m": 3, "6m": 6, "12m": 12, tout: null };
+  const depuis = bornes[fenetre] === null ? null : ajouterMoisTs(Date.now(), -bornes[fenetre]);
+  const t = tempsParEtape(data, depuis);
+  const mesurees = t.transitions.filter(x => x.mediane !== null);
+  const pireEtape = mesurees.length ? mesurees.reduce((a, b) => b.mediane > a.mediane ? b : a) : null;
+  const jours = (v) => v === null ? "—" : v < 1 ? "moins d'un jour" : `${v.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} j`;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-1">
+        <div className="font-display font-semibold fa-navy">Où le temps se perd</div>
+        <div className="flex gap-1.5 flex-wrap">
+          {[["3m", "3 mois"], ["6m", "6 mois"], ["12m", "12 mois"], ["tout", "Tout"]].map(([v, lib]) => (
+            <button key={v} onClick={() => setFenetre(v)}
+              className={`fa-tap text-xs font-semibold px-2.5 py-1 rounded-full transition ${fenetre === v ? "bg-slate-800 text-white" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"}`}>
+              {lib}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="text-sm text-gray-500 mb-3">
+        Temps médian passé à chaque étape, calculé sur l'historique des dossiers. La médiane, pas la moyenne :
+        un dossier oublié dans un coin ne doit pas faire croire à un problème général.
+      </p>
+
+      {mesurees.length === 0 ? (
+        <div className="text-sm rounded-xl px-3 py-2.5 fa-bg-offwhite text-gray-600">
+          Aucune étape intermédiaire enregistrée sur cette période : les dossiers passent directement du dépôt à
+          leur statut final. Le calcul se remplira tout seul à mesure que vous ferez passer les dossiers par
+          <strong className="fa-navy"> En vérification</strong> puis <strong className="fa-navy">Devis en cours</strong>,
+          au lieu de sauter directement à « Souscrit ».
+        </div>
+      ) : (<>
+        <div className="space-y-2">
+          {t.transitions.map(x => {
+            const pire = pireEtape && x.de === pireEtape.de;
+            const largeur = pireEtape && pireEtape.mediane > 0 && x.mediane !== null
+              ? Math.max(3, (x.mediane / pireEtape.mediane) * 100) : 0;
+            return (
+              <div key={x.de}>
+                <div className="flex items-baseline justify-between gap-2 text-[13px]">
+                  <span className="fa-navy font-medium truncate">{x.de} → {x.vers}</span>
+                  <span className="whitespace-nowrap">
+                    <strong className={pire ? "text-amber-700" : "fa-navy"}>{jours(x.mediane)}</strong>
+                    <span className="text-gray-400"> · {masqueNb(x.nb)} dossier{x.nb > 1 ? "s" : ""}</span>
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-gray-100 overflow-hidden mt-1">
+                  <div className={`h-full rounded-full ${pire ? "bg-amber-500" : "fa-bg-teal"}`} style={{ width: `${largeur}%` }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="mt-3 text-xs rounded-xl px-3 py-2 fa-bg-offwhite text-gray-600">
+          Du dépôt à la souscription : <strong className="fa-navy">{jours(t.total)}</strong> au total.
+          {pireEtape && <> L'étape la plus longue est <strong className="fa-navy">{pireEtape.de} → {pireEtape.vers}</strong> —
+            c'est là qu'il y a le plus à gagner.</>}
+        </div>
+
+        {/* Le présent : ce qui patiente en ce moment, du plus vieux au plus
+            récent. Un temps médian se corrige, un dossier qui attend se
+            traite tout de suite. */}
+        {ETAPES_PARCOURS.slice(0, -1).map(etape => {
+          const liste = t.enAttente[etape] || [];
+          if (liste.length === 0) return null;
+          const vieux = liste.filter(x => x.jours >= 7);
+          return (
+            <div key={etape} className="mt-3">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+                En attente à « {etape} » — {masqueNb(liste.length)}
+                {vieux.length > 0 && <span className="text-amber-700"> · {masqueNb(vieux.length)} depuis plus d'une semaine</span>}
+              </div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-x-4">
+                {liste.slice(0, 6).map(({ d, jours: j }) => (
+                  <button key={d.id} onClick={() => onOuvrirDossier?.(d)}
+                    className="text-left py-1 border-t border-gray-100 first:border-0 hover:bg-gray-50 rounded px-1 flex items-baseline justify-between gap-2">
+                    <span className="text-[13px] fa-navy truncate">{clientName(d)}</span>
+                    <span className={`text-[11px] whitespace-nowrap ${j >= 14 ? "text-red-600 font-semibold" : j >= 7 ? "text-amber-700" : "text-gray-400"}`}>
+                      {j} j
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {liste.length > 6 && <div className="text-[11px] text-gray-400 mt-0.5">et {liste.length - 6} autres</div>}
+            </div>
+          );
+        })}
+      </>)}
+    </div>
+  );
+}
+
+// =============================================================================
+// POURQUOI ON PERD
+//
+// Le motif de KO est saisi depuis toujours sur chaque dossier clôturé sans
+// suite, et n'a jamais été regardé ailleurs que sur le dossier lui-même. Or
+// c'est le levier le moins cher de tout l'outil : gagner dix points de
+// transformation, c'est dix dossiers de plus sur cent sans recruter personne.
+//
+// Le comptage se fait sur les dossiers CLÔTURÉS — gagnés ou perdus. Un dossier
+// encore en cours n'est ni l'un ni l'autre, l'inclure ferait baisser le taux
+// de transformation sans raison.
+// =============================================================================
+function analysePertes(data, depuis = null) {
+  const dossiers = (data?.dossiers || []).filter(d => depuis === null || (d.createdAt || 0) >= depuis);
+  const perdus = dossiers.filter(d => d.status === "KO");
+  const gagnes = dossiers.filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status));
+  const clotures = perdus.length + gagnes.length;
+  const motifs = new Map();
+  for (const d of perdus) {
+    const brut = (d.koReason || "").trim();
+    const nom = !brut ? "Motif non renseigné"
+      : (brut === "Autre" && (d.koReasonDetail || "").trim()) ? (d.koReasonDetail || "").trim()
+      : brut;
+    if (!motifs.has(nom)) motifs.set(nom, { nom, nb: 0, dossiers: [] });
+    const g = motifs.get(nom);
+    g.nb += 1; g.dossiers.push(d);
+  }
+  // Manque à gagner : les honoraires d'un dossier perdu sont rarement saisis,
+  // on l'estime donc au panier moyen réellement facturé. C'est une estimation,
+  // elle est annoncée comme telle.
+  const avecMontant = gagnes.filter(d => (d.caAmount || 0) > 0);
+  const panierMoyen = avecMontant.length >= SEUIL_RECUL_CHALLENGE
+    ? avecMontant.reduce((sum, d) => sum + (d.caAmount || 0), 0) / avecMontant.length
+    : null;
+  const liste = [...motifs.values()].sort((a, b) => b.nb - a.nb);
+  return {
+    perdus: perdus.length, gagnes: gagnes.length, clotures,
+    tauxPerte: clotures > 0 ? perdus.length / clotures : null,
+    tauxTransformation: clotures > 0 ? gagnes.length / clotures : null,
+    motifs: liste,
+    sansMotif: motifs.get("Motif non renseigné")?.nb || 0,
+    panierMoyen,
+    manqueAGagner: panierMoyen !== null ? panierMoyen * perdus.length : null,
+  };
+}
+
+const COULEURS_PERTES = ["#DC2626", "#EA580C", "#D97706", "#9333EA", "#0EA5E9", "#64748B"];
+
+function PourquoiOnPerd({ data, onOuvrirDossier }) {
+  const [fenetre, setFenetre] = useState("12m");
+  const [motifOuvert, setMotifOuvert] = useState(null);
+  const bornes = { "3m": 3, "6m": 6, "12m": 12, tout: null };
+  const depuis = bornes[fenetre] === null ? null : ajouterMoisTs(Date.now(), -bornes[fenetre]);
+  const a = analysePertes(data, depuis);
+
+  if (a.clotures === 0) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-2xl p-5">
+        <div className="font-display font-semibold fa-navy">Pourquoi on perd</div>
+        <p className="text-sm text-gray-400 mt-2">Aucun dossier clôturé sur la période : rien à analyser pour l'instant.</p>
+      </div>
+    );
+  }
+
+  const groupe = motifOuvert ? a.motifs.find(m => m.nom === motifOuvert) : null;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-1">
+        <div className="font-display font-semibold fa-navy">Pourquoi on perd</div>
+        <div className="flex gap-1.5 flex-wrap">
+          {[["3m", "3 mois"], ["6m", "6 mois"], ["12m", "12 mois"], ["tout", "Tout"]].map(([v, lib]) => (
+            <button key={v} onClick={() => { setFenetre(v); setMotifOuvert(null); }}
+              className={`fa-tap text-xs font-semibold px-2.5 py-1 rounded-full transition ${fenetre === v ? "bg-slate-800 text-white" : "bg-white border border-gray-200 text-gray-600 hover:border-teal-300"}`}>
+              {lib}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="text-sm text-gray-500 mb-3">
+        Sur les dossiers clôturés — gagnés ou perdus. Ceux encore en cours ne comptent pas.
+      </p>
+
+      <div className="flex gap-2 flex-wrap mb-4">
+        <div className="fa-bg-offwhite rounded-xl px-3 py-2 min-w-[110px]">
+          <div className="font-display text-xl font-bold text-emerald-600 leading-tight">
+            {a.tauxTransformation !== null ? `${Math.round(a.tauxTransformation * 100)} %` : "—"}
+          </div>
+          <div className="text-[11px] text-gray-500">transformés ({masqueNb(a.gagnes)})</div>
+        </div>
+        <div className="fa-bg-offwhite rounded-xl px-3 py-2 min-w-[110px]">
+          <div className="font-display text-xl font-bold text-red-600 leading-tight">
+            {a.tauxPerte !== null ? `${Math.round(a.tauxPerte * 100)} %` : "—"}
+          </div>
+          <div className="text-[11px] text-gray-500">perdus ({masqueNb(a.perdus)})</div>
+        </div>
+        {a.manqueAGagner !== null && (
+          <div className="fa-bg-offwhite rounded-xl px-3 py-2 min-w-[140px]">
+            <div className="font-display text-xl font-bold fa-navy leading-tight">{fmtEuro(a.manqueAGagner)}</div>
+            <div className="text-[11px] text-gray-500">manque à gagner estimé</div>
+          </div>
+        )}
+      </div>
+
+      {a.perdus === 0 ? (
+        <div className="text-sm rounded-xl px-3 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-900">
+          ✅ Aucun dossier perdu sur la période.
+        </div>
+      ) : (<>
+        <div className="space-y-1.5">
+          {a.motifs.map((m, i) => {
+            const part = m.nb / a.perdus;
+            const inconnu = m.nom === "Motif non renseigné";
+            return (
+              <button key={m.nom} onClick={() => setMotifOuvert(motifOuvert === m.nom ? null : m.nom)}
+                className="w-full text-left group">
+                <div className="flex items-baseline justify-between gap-2 text-[13px]">
+                  <span className={`truncate ${inconnu ? "text-gray-400 italic" : "fa-navy font-medium"} group-hover:underline`}>{m.nom}</span>
+                  <span className="text-gray-500 whitespace-nowrap">
+                    <strong className="fa-navy">{Math.round(part * 100)} %</strong> · {masqueNb(m.nb)}
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-gray-100 overflow-hidden mt-1">
+                  <div className="h-full rounded-full" style={{
+                    width: `${Math.max(2, part * 100)}%`,
+                    backgroundColor: inconnu ? "#CBD5E1" : COULEURS_PERTES[i % COULEURS_PERTES.length],
+                  }} />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {groupe && (
+          <div className="mt-3 border border-gray-200 rounded-xl p-3">
+            <div className="flex items-baseline justify-between gap-2 mb-1.5">
+              <span className="text-sm font-bold fa-navy">{groupe.nom} — {masqueNb(groupe.nb)} dossier{groupe.nb > 1 ? "s" : ""}</span>
+              <button onClick={() => setMotifOuvert(null)} className="text-xs text-gray-400 hover:text-gray-700">fermer</button>
+            </div>
+            <div className="grid sm:grid-cols-2 gap-x-4">
+              {groupe.dossiers.slice(0, 16).map(d => (
+                <button key={d.id} onClick={() => onOuvrirDossier?.(d)}
+                  className="text-left py-1 border-t border-gray-100 first:border-0 hover:bg-gray-50 rounded px-1">
+                  <span className="text-[13px] fa-navy block truncate">{clientName(d)}</span>
+                  <span className="text-[11px] text-gray-400">clôturé le {fmtDate(d.updatedAt || d.createdAt)}</span>
+                </button>
+              ))}
+            </div>
+            {groupe.dossiers.length > 16 && (
+              <div className="text-[11px] text-gray-400 mt-1">et {groupe.dossiers.length - 16} autres</div>
+            )}
+          </div>
+        )}
+
+        {a.sansMotif > 0 && (
+          <div className="mt-3 text-xs rounded-xl px-3 py-2 bg-amber-50 border border-amber-200 text-amber-900">
+            <strong>{masqueNb(a.sansMotif)} dossier{a.sansMotif > 1 ? "s" : ""} perdu{a.sansMotif > 1 ? "s" : ""} sans motif</strong> —
+            tant qu'ils ne sont pas renseignés, cette répartition est incomplète. Le motif se choisit sur le dossier,
+            à côté du statut.
+          </div>
+        )}
+
+        {a.panierMoyen !== null && (
+          <p className="text-[11px] text-gray-400 mt-2">
+            Manque à gagner estimé : {masqueNb(a.perdus)} dossiers perdus × {fmtEuro(a.panierMoyen)} de panier moyen
+            réellement facturé. C'est un ordre de grandeur, pas une facture — tous ces dossiers n'auraient pas
+            forcément abouti.
+          </p>
+        )}
+      </>)}
+    </div>
+  );
+}
+
+// =============================================================================
 // GÉOGRAPHIE DU RÉSEAU
 //
 // Une carte de France dessinée à la main plutôt qu'une librairie : le tracé
@@ -11851,12 +12345,16 @@ function FacturesPartenaires({ data, onSetStatut }) {
   );
 }
 
-function SauvegardesPanel() {
+function SauvegardesPanel({ onExporter, onRestaurer, onVerifier, busy }) {
   const [liste, setListe] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [chargement, setChargement] = useState(false);
+  const [avecPieces, setAvecPieces] = useState(true);
+  const [aRestaurer, setARestaurer] = useState(null);   // { resume, paquet }
+  const [confirme, setConfirme] = useState("");
+  const [message, setMessage] = useState(null);
 
   async function charger() {
-    setBusy(true);
+    setChargement(true);
     try {
       const res = await storage.list("adp:backup:", true);
       const cles = (res?.keys || []).sort().reverse();
@@ -11871,7 +12369,7 @@ function SauvegardesPanel() {
       setListe(details);
     } catch (e) {
       setListe([]);
-    } finally { setBusy(false); }
+    } finally { setChargement(false); }
   }
 
   async function telecharger(cle, jour) {
@@ -11882,72 +12380,132 @@ function SauvegardesPanel() {
     } catch (e) { /* ignore */ }
   }
 
+  // Lecture du fichier choisi : on ne touche à rien tant que son contenu
+  // n'a pas été vérifié et montré.
+  function choisirFichier(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setMessage(null);
+    const lecteur = new FileReader();
+    lecteur.onload = () => {
+      try {
+        const paquet = JSON.parse(String(lecteur.result));
+        const v = onVerifier ? onVerifier(paquet) : { ok: false, erreur: "Vérification indisponible." };
+        if (!v.ok) { setMessage({ type: "erreur", texte: v.erreur }); return; }
+        setARestaurer({ paquet, resume: v.resume, nom: file.name });
+        setConfirme("");
+      } catch (err) {
+        setMessage({ type: "erreur", texte: "Ce fichier n'est pas un JSON lisible." });
+      }
+    };
+    lecteur.readAsText(file);
+  }
+
+  async function lancerRestauration() {
+    const ok = await onRestaurer?.(aRestaurer.paquet);
+    setARestaurer(null); setConfirme("");
+    setMessage(ok
+      ? { type: "ok", texte: "Restauration terminée. L'écran affiche désormais les données du fichier." }
+      : { type: "erreur", texte: "La restauration a échoué — rien n'a été modifié." });
+  }
+
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
-      <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
-        <div className="font-display font-semibold fa-navy">Sauvegardes automatiques</div>
-        <button onClick={charger} disabled={busy}
-          className="text-xs fa-teal-text hover:underline disabled:opacity-50">
-          {busy ? "Chargement…" : (liste ? "Rafraîchir" : "Afficher")}
+      <div className="font-display font-semibold fa-navy mb-1">Sauvegarde et restauration</div>
+
+      {/* Le point important, et il n'était écrit nulle part. */}
+      <div className="text-xs rounded-xl px-3 py-2.5 bg-amber-50 border border-amber-200 text-amber-900 mb-3">
+        <strong>Les sauvegardes automatiques sont rangées dans la même base que vos données.</strong> Elles vous
+        protègent d'une fausse manœuvre, pas de la perte de la base elle-même. Pour être vraiment à l'abri, il
+        faut un fichier <strong>hors de l'outil</strong> : téléchargez l'export ci-dessous et rangez-le ailleurs
+        (votre ordinateur, un Drive). Une fois par mois suffit.
+      </div>
+
+      {/* ------------------------------------------------------ l'export */}
+      <div className="fa-bg-offwhite rounded-xl px-3 py-3">
+        <div className="text-sm font-semibold fa-navy mb-1">Exporter hors de l'outil</div>
+        <label className="fa-tap flex items-start gap-2 text-xs text-gray-600 cursor-pointer mb-2">
+          <input type="checkbox" checked={avecPieces} onChange={e => setAvecPieces(e.target.checked)} className="rounded border-gray-300 mt-0.5" />
+          <span>
+            Inclure les pièces jointes (offres de prêt, RIB, contrats)
+            <span className="block text-gray-400">
+              Sans elles le fichier est léger, mais une restauration rendrait les dossiers sans leurs documents.
+              Avec elles, comptez plusieurs dizaines de mégaoctets et un peu de patience.
+            </span>
+          </span>
+        </label>
+        <button onClick={() => onExporter?.({ avecPieces })} disabled={busy}
+          className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition disabled:opacity-50">
+          {busy ? "Préparation…" : `Télécharger la sauvegarde ${avecPieces ? "complète" : "des données"}`}
         </button>
       </div>
-      <p className="text-sm text-gray-500 mb-4">
-        Une copie est déposée à chaque première connexion de la journée. Les 7 dernières sont conservées.
-      </p>
-      {liste === null && <div className="text-sm text-gray-400">Cliquez sur « Afficher » pour voir les sauvegardes disponibles.</div>}
-      {liste !== null && liste.length === 0 && <div className="text-sm text-gray-400">Aucune sauvegarde pour l'instant — la première sera créée à votre prochaine connexion.</div>}
-      {liste !== null && liste.length > 0 && (
-        <div className="space-y-2">
-          {liste.map(s => (
-            <div key={s.cle} className="flex items-center justify-between flex-wrap gap-2 fa-bg-offwhite rounded-lg px-3 py-2.5">
-              <div>
-                <div className="text-sm fa-navy font-bold">{fmtDate(s.at)}</div>
-                <div className="text-xs text-gray-400">{s.partenaires} partenaire{s.partenaires !== 1 ? "s" : ""} · {s.dossiers} dossier{s.dossiers !== 1 ? "s" : ""}</div>
-              </div>
-              <button onClick={() => telecharger(s.cle, s.jour)}
-                className="text-xs font-medium fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition">
-                Télécharger
+
+      {/* ------------------------------------------------- la restauration */}
+      <div className="mt-3 rounded-xl px-3 py-3 border border-red-200 bg-red-50/40">
+        <div className="text-sm font-semibold text-red-800 mb-1">Restaurer une sauvegarde</div>
+        <p className="text-xs text-red-900/80 mb-2">
+          Remplace <strong>toutes</strong> les données actuelles par celles du fichier. L'état d'avant est mis de
+          côté automatiquement, mais cette opération ne se fait pas à la légère.
+        </p>
+        {!aRestaurer ? (
+          <label className="inline-block text-xs font-semibold bg-white border border-red-300 text-red-700 px-3 py-1.5 rounded-lg cursor-pointer hover:bg-red-50">
+            Choisir un fichier de sauvegarde…
+            <input type="file" accept="application/json,.json" onChange={choisirFichier} className="hidden" />
+          </label>
+        ) : (
+          <div className="bg-white border border-red-200 rounded-lg p-3 text-xs">
+            <div className="fa-navy font-semibold mb-1 break-all">{aRestaurer.nom}</div>
+            <div className="text-gray-600 mb-2">
+              {aRestaurer.resume.partenaires} partenaires · {aRestaurer.resume.dossiers} dossiers
+              {aRestaurer.resume.mandataires > 0 && <> · {aRestaurer.resume.mandataires} mandataires</>}
+              {aRestaurer.resume.pieces > 0
+                ? <> · {aRestaurer.resume.pieces} pièces jointes</>
+                : <span className="text-amber-700"> · aucune pièce jointe dans ce fichier</span>}
+              {aRestaurer.resume.exporteLe && <> · exporté le {fmtDate(new Date(aRestaurer.resume.exporteLe).getTime())}</>}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-gray-600">Tapez <strong>RESTAURER</strong> pour confirmer :</span>
+              <input value={confirme} onChange={e => setConfirme(e.target.value)}
+                className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-28 focus:outline-none focus:ring-2 focus:ring-red-300" />
+              <button onClick={lancerRestauration} disabled={confirme.trim().toUpperCase() !== "RESTAURER" || busy}
+                className="text-xs font-bold bg-red-600 text-white px-3 py-1.5 rounded-lg disabled:opacity-40">
+                Restaurer
               </button>
+              <button onClick={() => { setARestaurer(null); setConfirme(""); }} className="text-xs text-gray-500 hover:text-gray-700">Annuler</button>
+            </div>
+          </div>
+        )}
+        {message && (
+          <div className={`text-xs mt-2 ${message.type === "ok" ? "text-emerald-700" : "text-red-700"}`}>{message.texte}</div>
+        )}
+      </div>
+
+      {/* ------------------------------------------ les copies quotidiennes */}
+      <div className="flex items-center justify-between mt-4 mb-1 flex-wrap gap-2">
+        <div className="text-sm font-semibold fa-navy">Copies quotidiennes (7 jours glissants)</div>
+        <button onClick={charger} disabled={chargement}
+          className="text-xs fa-teal-text hover:underline disabled:opacity-50">
+          {chargement ? "Chargement…" : (liste ? "Rafraîchir" : "Afficher")}
+        </button>
+      </div>
+      {liste && (liste.length === 0 ? (
+        <div className="text-xs text-gray-400">Aucune copie pour l'instant — la première se crée à votre prochaine connexion.</div>
+      ) : (
+        <div className="space-y-1">
+          {liste.map(x => (
+            <div key={x.cle} className="flex items-center justify-between gap-2 text-xs border-t border-gray-100 py-1.5">
+              <span className="fa-navy">{x.jour}</span>
+              <span className="text-gray-400">{x.partenaires} partenaires · {x.dossiers} dossiers</span>
+              <button onClick={() => telecharger(x.cle, x.jour)} className="fa-teal-text hover:underline">Télécharger</button>
             </div>
           ))}
         </div>
-      )}
+      ))}
     </div>
   );
 }
 
-// =============================================================================
-// RYTHME DES PARTENAIRES
-//
-// Mesuré depuis la date d'entrée : combien de dossiers, en combien de temps,
-// et dans quel sens ça va. On compte les dossiers DÉPOSÉS — c'est l'activité
-// du partenaire — et on affiche les gagnés à côté.
-// =============================================================================
-const MOIS_MS = 30.44 * 86400000;
-const JOUR_MS = 86400000;
-
-// =============================================================================
-// PARTENAIRES QUI DÉCROCHENT
-//
-// À cinquante partenaires on balaie la liste du regard ; à trois cents, un
-// partenaire qui s'éteint passe inaperçu jusqu'à ce que la production baisse.
-// D'où une détection qui vient vous chercher plutôt que d'attendre qu'on aille
-// la consulter.
-//
-// Le point délicat est le seuil de décrochage. Un seuil unique à trente jours
-// alerterait chaque matin sur des gens qui travaillent normalement — et une
-// liste qui crie au loup tous les jours ne se lit plus au bout de trois. On
-// compare donc chaque partenaire à SA cadence : celui qui dépose tous les
-// quarante-cinq jours n'a rien fait d'anormal au bout de trente.
-// =============================================================================
-const DECROCHAGE = {
-  demarrage: 15,     // jours d'ancienneté avant de s'inquiéter d'un zéro dossier
-  minDecroche: 30,   // plancher, quelle que soit la cadence habituelle
-  silence: 60,       // ni connexion ni dossier : la question devient autre
-  masqueRelance: 15, // après une relance, on laisse le temps de réagir
-  masqueIgnore: 30,  // « ignorer » met de côté sans rien envoyer
-};
-// null = ce partenaire va bien. Sinon, ce qui cloche et depuis quand.
 function etatDecrochage(p, dossiers, maintenant = Date.now()) {
   if (!p || p.deleted || p.active === false) return null;
   const r = rythmePartenaire(p, dossiers, maintenant);
@@ -12193,6 +12751,34 @@ function PartenairesQuiDecrochent({ data, onRelancer, onOuvrirPartenaire, canEdi
     </div>
   );
 }
+
+
+const MOIS_MS = 30.44 * 86400000;
+const JOUR_MS = 86400000;
+
+// =============================================================================
+// PARTENAIRES QUI DÉCROCHENT
+//
+// À cinquante partenaires on balaie la liste du regard ; à trois cents, un
+// partenaire qui s'éteint passe inaperçu jusqu'à ce que la production baisse.
+// D'où une détection qui vient vous chercher plutôt que d'attendre qu'on aille
+// la consulter.
+//
+// Le point délicat est le seuil de décrochage. Un seuil unique à trente jours
+// alerterait chaque matin sur des gens qui travaillent normalement — et une
+// liste qui crie au loup tous les jours ne se lit plus au bout de trois. On
+// compare donc chaque partenaire à SA cadence : celui qui dépose tous les
+// quarante-cinq jours n'a rien fait d'anormal au bout de trente.
+// =============================================================================
+const DECROCHAGE = {
+  demarrage: 15,     // jours d'ancienneté avant de s'inquiéter d'un zéro dossier
+  minDecroche: 30,   // plancher, quelle que soit la cadence habituelle
+  silence: 60,       // ni connexion ni dossier : la question devient autre
+  masqueRelance: 15, // après une relance, on laisse le temps de réagir
+  masqueIgnore: 30,  // « ignorer » met de côté sans rien envoyer
+};
+// null = ce partenaire va bien. Sinon, ce qui cloche et depuis quand.
+
 
 function rythmePartenaire(p, dossiers, maintenant = Date.now()) {
   const entree = dateEntreeDe(p) || maintenant;
@@ -12935,7 +13521,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -12991,6 +13577,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "objectifsCA", label: "Objectifs de C.A.", defaut: "projections", rendu: () => <ObjectifsCA data={data} /> },
     { id: "coutChallenges", label: "Coût des challenges", defaut: "projections", rendu: () => <CoutChallenges data={data} /> },
     { id: "production", label: "Production de la période", defaut: "challenge", rendu: () => <ProductionDuMois data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} onSetPeriode={onSetPeriodeProduction} canEdit={isFullAdmin} /> },
+    { id: "pourquoiOnPerd", label: "Pourquoi on perd", defaut: "analyses", rendu: () => <PourquoiOnPerd data={data} onOuvrirDossier={navAdmin.ouvrirDossier} /> },
+    { id: "tempsPerdu", label: "Où le temps se perd", defaut: "analyses", rendu: () => <OuLeTempsSePerd data={data} onOuvrirDossier={navAdmin.ouvrirDossier} /> },
     { id: "carteReseau", label: "Implantation du réseau (carte)", defaut: "analyses", rendu: () => <CarteReseau data={data} onOuvrirPartenaire={navAdmin.ouvrirPartenaire} /> },
     { id: "partAssureurs", label: "Répartition par assureur", defaut: "analyses", rendu: () => <RepartitionProduction data={data} axe="assureurs" /> },
     { id: "partReseaux", label: "Répartition par réseau", defaut: "analyses", rendu: () => <RepartitionProduction data={data} axe="reseaux" onFusionner={onFusionnerReseaux} onRefuserFusion={onRefuserFusionReseaux} canEdit={isFullAdmin} /> },
@@ -13003,7 +13591,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "productionAssureur", label: "Production par assureur", defaut: "assureurs", fullAdmin: true, rendu: () => <ProductionParAssureur data={data} dossiers={data.dossiers} /> },
     { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
     { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} /> },
-    { id: "sauvegardes", label: "Sauvegarde automatique", defaut: "journal", rendu: () => <SauvegardesPanel /> },
+    { id: "sauvegardes", label: "Sauvegarde et restauration", defaut: "journal", fullAdmin: true, rendu: () => <SauvegardesPanel onExporter={onExporterSauvegarde} onRestaurer={onRestaurerSauvegarde} onVerifier={onVerifierSauvegarde} busy={busy} /> },
     { id: "connexions", label: "Dernières connexions", defaut: "journal", rendu: () => <BlocConnexions data={data} /> },
     { id: "journal", label: "Journal d'activité", defaut: "journal", rendu: () => <BlocJournal data={data} /> },
   ];
@@ -13934,8 +14522,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-2 mb-2">
-              <div className="relative flex-1">
+            <div className="flex items-center flex-wrap gap-2 mb-2">
+              <div className="relative flex-1 min-w-[12rem]">
                 <input value={dossierSearch} onChange={e => setDossierSearch(e.target.value)}
                   placeholder="Rechercher un client par nom ou prénom…"
                   className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
@@ -14961,7 +15549,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   ) : (
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div>
-                        <div className="font-medium fa-navy flex items-center gap-2">
+                        <div className="font-medium fa-navy flex items-center flex-wrap gap-y-1 gap-2">
                           <span className="font-bold">{nomPartenaire(p)}</span>
                           {p.flatFee != null && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">Forfait {p.flatFee}€</span>}
                           {filleulsDe(p.id).length > 0 && (() => {
@@ -15039,9 +15627,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             );
                           })()}
                         </div>
-                        {p.email && <div className="text-xs text-gray-400">{p.email}</div>}
+                        <div className="flex items-center gap-x-4 gap-y-0.5 flex-wrap mt-0.5">
+                          <Copiable valeur={p.email} manquant="email manquant" titre="Copier l'adresse e-mail" />
+                          <Copiable valeur={p.telephone} manquant="téléphone manquant" titre="Copier le numéro" mono />
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center flex-wrap gap-2">
                         <button onClick={() => { setViewingPartnerId(viewingPartnerId === p.id ? null : p.id); setViewingPartnerTab("analytique"); }}
                           className="text-sm fa-navy fa-bg-gold px-3 py-1.5 rounded-lg font-medium transition">
                           {viewingPartnerId === p.id ? "Fermer" : "Voir"}
@@ -15055,7 +15646,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           {p.active === false ? "Réactiver" : "Désactiver"}
                         </button>
                         <span className="text-xs fa-bg-offwhite border border-gray-200 px-3 py-1.5 rounded-lg text-gray-500">
-                          {p.email || "email manquant"} · {(() => {
+                          {(() => {
                             const c = derniereConnexion(p.lastLoginAt);
                             return <span className={c.teinte} title={c.jamais ? "" : c.long}>{c.jamais ? "jamais connecté" : `dernière connexion ${fmtDate(p.lastLoginAt)} à ${new Date(p.lastLoginAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })} (${c.court})`}</span>;
                           })()}
