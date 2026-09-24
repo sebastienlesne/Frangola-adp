@@ -32,7 +32,27 @@ function dossierVerrouille(dossier) {
   return !STATUTS_MODIFIABLES.includes(dossier?.status);
 }
 
-const DOC_LABELS = { offre: "Offre de prêt", tableau: "Tableau d'amortissement", cni: "Carte d'identité" };
+const DOC_LABELS = {
+  offre: "Offre de prêt",
+  tableau: "Tableau d'amortissement",
+  cni: "Carte d'identité",
+  cniCo: "Carte d'identité du co-emprunteur",
+};
+
+// La pièce d'identité du co-emprunteur n'a de sens que s'il y en a un. On la
+// garde affichée sur un dossier qui la porte déjà, même si la case a été
+// décochée depuis : une pièce déposée ne doit jamais disparaître de l'écran
+// sans qu'on l'ait retirée soi-même.
+function docsAttendus(d) {
+  return Object.keys(DOC_LABELS)
+    .filter(k => k !== "cniCo" || !!d?.hasCoEmprunteur || !!d?.docs?.cniCo);
+}
+
+// Avec deux emprunteurs, « Carte d'identité » tout court ne dit plus de qui.
+function libelleDoc(k, d) {
+  if (k === "cni" && (d?.hasCoEmprunteur || d?.docs?.cniCo)) return "Carte d'identité de l'emprunteur";
+  return DOC_LABELS[k];
+}
 const MAX_FILE_BYTES = 3.5 * 1024 * 1024;
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -1341,6 +1361,22 @@ async function previewStoredFile(key) {
   const url = URL.createObjectURL(blob);
   window.open(url, "_blank");
   setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+// Cliquer sur le nom d'un document l'ouvre pour le lire ; c'est l'icône à côté
+// qui le télécharge. Avant, tout clic déclenchait un téléchargement : on se
+// retrouvait avec dix PDF dans le dossier Téléchargements pour avoir
+// simplement voulu vérifier une pièce à l'écran.
+function BoutonTelecharger({ fichier, taille = 11, className = "" }) {
+  if (!fichier?.key) return null;
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); downloadStoredFile(fichier.key, fichier.name); }}
+      title={`Télécharger ${fichier.name || "le document"}`}
+      className={`fa-tap shrink-0 text-gray-400 hover:fa-teal-text transition ${className}`}>
+      <Download size={taille} />
+    </button>
+  );
 }
 
 function csvEscape(val) {
@@ -3927,9 +3963,13 @@ function AcceptationContrat({ partner, contrat, onAccepter, onLogout }) {
         </p>
 
         <button
-          onClick={() => { downloadStoredFile(contrat.key, contrat.name); setTelecharge(true); }}
-          className="w-full flex items-center justify-center gap-2 text-sm font-medium fa-navy fa-bg-gold px-4 py-3 rounded-lg transition mb-5">
-          <Download size={16} /> Lire le contrat — {contrat.name}
+          onClick={() => { previewStoredFile(contrat.key); setTelecharge(true); }}
+          className="w-full flex items-center justify-center gap-2 text-sm font-medium fa-navy fa-bg-gold px-4 py-3 rounded-lg transition mb-2">
+          <FileText size={16} /> Lire le contrat — {contrat.name}
+        </button>
+        <button onClick={() => downloadStoredFile(contrat.key, contrat.name)}
+          className="fa-tap w-full flex items-center justify-center gap-1.5 text-xs text-gray-500 hover:fa-teal-text transition mb-5">
+          <Download size={13} /> En garder une copie
         </button>
 
         <label className="flex items-start gap-2.5 text-sm text-gray-600 mb-5 cursor-pointer select-none">
@@ -4434,7 +4474,7 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
   const [coClientFirstName, setCoClientFirstName] = useState("");
   const [coClientLastName, setCoClientLastName] = useState("");
   const [coClientPhone, setCoClientPhone] = useState("");
-  const [files, setFiles] = useState({ offre: null, tableau: null, cni: null });
+  const [files, setFiles] = useState({ offre: null, tableau: null, cni: null, cniCo: null });
   // Déclaration du partenaire : le client sait que ses pièces nous sont
   // transmises. L'accord se noue entre eux ; ici on l'enregistre, daté.
   const [clientInforme, setClientInforme] = useState(false);
@@ -4450,7 +4490,7 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
       true
     );
     if (ok) {
-      setShowForm(false); setClientFirstName(""); setClientLastName(""); setClientPhone(""); setFiles({ offre: null, tableau: null, cni: null });
+      setShowForm(false); setClientFirstName(""); setClientLastName(""); setClientPhone(""); setFiles({ offre: null, tableau: null, cni: null, cniCo: null });
       setHasCoEmprunteur(false); setCoClientFirstName(""); setCoClientLastName(""); setCoClientPhone("");
       setClientInforme(false);
     }
@@ -4700,7 +4740,13 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-gray-600 mb-4">
-              <input type="checkbox" checked={hasCoEmprunteur} onChange={e => setHasCoEmprunteur(e.target.checked)}
+              <input type="checkbox" checked={hasCoEmprunteur}
+                onChange={e => {
+                  setHasCoEmprunteur(e.target.checked);
+                  // Décocher retire la pièce déjà sélectionnée : sinon elle
+                  // partirait au dépôt sans que personne ne la voie à l'écran.
+                  if (!e.target.checked) setFiles(s => ({ ...s, cniCo: null }));
+                }}
                 className="rounded border-gray-300" />
               Co-emprunteur
             </label>
@@ -4731,7 +4777,12 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
             <div className="grid sm:grid-cols-3 gap-4 mb-5">
               <FileDrop label="Offre de prêt" file={files.offre} onChange={f => setFiles(s => ({ ...s, offre: f }))} />
               <FileDrop label="Tableau d'amortissement" file={files.tableau} onChange={f => setFiles(s => ({ ...s, tableau: f }))} />
-              <FileDrop label="Carte d'identité" file={files.cni} onChange={f => setFiles(s => ({ ...s, cni: f }))} />
+              <FileDrop label={hasCoEmprunteur ? "Carte d'identité de l'emprunteur" : "Carte d'identité"}
+                file={files.cni} onChange={f => setFiles(s => ({ ...s, cni: f }))} />
+              {hasCoEmprunteur && (
+                <FileDrop label="Carte d'identité du co-emprunteur"
+                  file={files.cniCo} onChange={f => setFiles(s => ({ ...s, cniCo: f }))} />
+              )}
             </div>
             <label className="flex items-start gap-2.5 text-sm text-gray-600 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2.5 mb-4 cursor-pointer select-none">
               <input type="checkbox" checked={clientInforme} onChange={e => setClientInforme(e.target.checked)}
@@ -4849,11 +4900,13 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
               <Stepper status={d.status} />
               <SuiviBanquePartenaire dossier={d} />
               <div className="flex flex-wrap gap-2 mt-4">
-                {Object.keys(DOC_LABELS).map(k => d.docs[k] && (
+                {docsAttendus(d).map(k => d.docs[k] && (
                   <span key={k} className="text-xs fa-bg-offwhite border border-gray-200 text-gray-600 px-2.5 py-1 rounded-full flex items-center gap-1">
-                    <button onClick={() => previewStoredFile(d.docs[k].key)} className="flex items-center gap-1 hover:fa-teal-text transition">
-                      <FileText size={12} /> {DOC_LABELS[k]}
+                    <button onClick={() => previewStoredFile(d.docs[k].key)} title="Ouvrir le document"
+                      className="flex items-center gap-1 hover:fa-teal-text transition">
+                      <FileText size={12} /> {libelleDoc(k, d)}
                     </button>
+                    <BoutonTelecharger fichier={d.docs[k]} />
                     {!dossierVerrouille(d) && (
                       <button onClick={() => onRemoveDoc(d.id, k)} className="fa-tap text-gray-400 hover:text-red-600 ml-0.5" title="Retirer ce document">
                         <X size={12} />
@@ -4863,9 +4916,11 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                 ))}
                 {(d.extraDocs || []).map((ed, i) => (
                   <span key={i} className="text-xs bg-teal-50 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1">
-                    <button onClick={() => previewStoredFile(ed.key)} className="flex items-center gap-1 hover:underline">
+                    <button onClick={() => previewStoredFile(ed.key)} title="Ouvrir le document"
+                      className="flex items-center gap-1 hover:underline">
                       <FileText size={12} /> {ed.label}
                     </button>
+                    <BoutonTelecharger fichier={ed} className="text-teal-500" />
                     {!dossierVerrouille(d) && (
                       <button onClick={() => onRemoveExtraDoc(d.id, i)} className="fa-tap text-teal-500 hover:text-red-600 ml-0.5" title="Retirer ce document">
                         <X size={12} />
@@ -4890,8 +4945,8 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                     <div className="flex flex-wrap gap-2 items-center">
                       <select value={extraDocType} onChange={e => setExtraDocType(e.target.value)}
                         className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500">
-                        {Object.keys(DOC_LABELS).map(k => (
-                          <option key={k} value={k} disabled={!!d.docs?.[k]}>{DOC_LABELS[k]}{d.docs?.[k] ? " (déjà déposée)" : ""}</option>
+                        {docsAttendus(d).map(k => (
+                          <option key={k} value={k} disabled={!!d.docs?.[k]}>{libelleDoc(k, d)}{d.docs?.[k] ? " (déjà déposée)" : ""}</option>
                         ))}
                         <option value="autre">Autre pièce</option>
                       </select>
@@ -5405,8 +5460,11 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                       {factures.map(f => (
                         <div key={f.id} className="fa-bg-offwhite rounded-lg px-3 py-2.5">
                           <div className="flex items-center justify-between flex-wrap gap-2">
-                            <button onClick={() => downloadStoredFile(f.key, f.name)}
-                              className="text-sm fa-navy font-bold hover:underline text-left">{f.name}</button>
+                            <span className="flex items-center gap-2 min-w-0">
+                              <button onClick={() => previewStoredFile(f.key)} title="Ouvrir la facture"
+                                className="text-sm fa-navy font-bold hover:underline text-left truncate">{f.name}</button>
+                              <BoutonTelecharger fichier={f} taille={13} />
+                            </span>
                             <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${couleurStatut(f.statut)}`}>{f.statut}</span>
                           </div>
                           <div className="text-xs text-gray-400 mt-0.5">
@@ -5466,8 +5524,11 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
               {partner.ribFile && (
                 <div className="flex items-center justify-between flex-wrap gap-2 bg-teal-50 border border-teal-200 rounded-lg px-4 py-3 mb-4">
                   <span className="text-sm fa-navy">✅ RIB fourni le {fmtDate(partner.ribFile.uploadedAt)}</span>
-                  <button onClick={() => downloadStoredFile(partner.ribFile.key, partner.ribFile.name)}
-                    className="text-xs fa-teal-text hover:underline font-medium">Voir le fichier</button>
+                  <span className="flex items-center gap-1.5">
+                    <button onClick={() => previewStoredFile(partner.ribFile.key)}
+                      className="text-xs fa-teal-text hover:underline font-medium">Voir le fichier</button>
+                    <BoutonTelecharger fichier={partner.ribFile} taille={12} />
+                  </span>
                 </div>
               )}
 
@@ -7318,6 +7379,74 @@ function projectionRecurrence(dossiers, nouveauxParMois, r1, r2, annees = 5) {
 
 // Ce que rapportera le portefeuille actuel sur une année donnée, sans un
 // dossier de plus : année 1 = les douze prochains mois.
+// La récurrence, ventilée par commercial. Un point compte plus que tous les
+// autres : la part mandataire ne se prélève QUE sur les contrats d'un
+// mandataire. Les dossiers suivis par le gérant reviennent à Frangola en
+// entier — appliquer 50 % à l'ensemble reviendrait à se verser une commission
+// à soi-même, et à sous-estimer d'autant le revenu réel de la maison.
+function recurrenceParMandataire(data, nomGerant = "Sébastien") {
+  const parPartenaire = new Map((data?.partners || []).map(x => [x.id, x]));
+  const lignes = new Map();
+  const ligne = (nom) => {
+    if (!lignes.has(nom)) {
+      lignes.set(nom, {
+        nom, estMandataire: nom !== nomGerant,
+        contrats: 0, mensuel: 0, croisiere: 0, cumul: 0,
+      });
+    }
+    return lignes.get(nom);
+  };
+  // On amorce avec tout le monde : un mandataire sans contrat doit apparaître
+  // à zéro plutôt que de disparaître du tableau.
+  ligne(nomGerant);
+  for (const m of (data?.mandataires || [])) if (!m.deleted) ligne(m.name);
+
+  for (const d of (data?.dossiers || [])) {
+    const mensuel = recurrenceMensuelle(d);
+    const cumul = recurrenceCumulee(d);
+    if (mensuel <= 0 && cumul <= 0) continue;
+    // Un partenaire sans commercial connu revient à la maison : c'est le cas
+    // du Pot commun, et c'est le bon défaut.
+    const nom = parPartenaire.get(d.partnerId)?.commercial || nomGerant;
+    const l = ligne(nom);
+    if (contratEnCours(d)) {
+      l.contrats += 1;
+      l.mensuel += mensuel;
+      l.croisiere += recurrenceCroisiere(d);
+    }
+    l.cumul += cumul;
+  }
+
+  const out = [...lignes.values()].map(l => {
+    const taux = l.estMandataire ? PART_MANDATAIRE : 0;
+    return {
+      ...l, taux,
+      partMandataire: l.mensuel * taux,
+      partFrangola: l.mensuel * (1 - taux),
+      croisiereMandataire: l.croisiere * taux,
+      croisiereFrangola: l.croisiere * (1 - taux),
+      cumulMandataire: l.cumul * taux,
+      cumulFrangola: l.cumul * (1 - taux),
+    };
+  }).sort((a, b) => (b.mensuel - a.mensuel) || (b.cumul - a.cumul));
+
+  const somme = (k) => out.reduce((sum, x) => sum + (x[k] || 0), 0);
+  const mensuel = somme("mensuel");
+  return {
+    lignes: out,
+    totaux: {
+      contrats: somme("contrats"), mensuel, croisiere: somme("croisiere"), cumul: somme("cumul"),
+      partMandataire: somme("partMandataire"), partFrangola: somme("partFrangola"),
+      croisiereMandataire: somme("croisiereMandataire"), croisiereFrangola: somme("croisiereFrangola"),
+      cumulMandataire: somme("cumulMandataire"), cumulFrangola: somme("cumulFrangola"),
+    },
+    // Part réellement prélevée par les mandataires sur l'ensemble du
+    // portefeuille. Elle sert à projeter les années à venir sans supposer que
+    // toute la production future passera par un mandataire.
+    tauxObserve: mensuel > 0 ? somme("partMandataire") / mensuel : 0,
+  };
+}
+
 function recurrenceAnnee(dossiers, annee) {
   let total = 0;
   for (let m = 1; m <= 12; m++) total += mrrDansNMois(dossiers, (annee - 1) * 12 + m);
@@ -9432,6 +9561,166 @@ function projectionChallenge(data, objectif, cout) {
     })(),
   };
 }
+// Un boost ne se juge pas comme un cadeau. Il n'a pas d'objectif : il coûte
+// sur CHAQUE dossier, y compris ceux qui seraient tombés de toute façon. La
+// seule question qui vaille est donc : combien de dossiers en plus doit-il
+// déclencher pour se payer tout seul ?
+function projectionBoost(data, ch, base = "plancher") {
+  const pr = projectionChallenge(data, 1, 0);
+  const surMoyenne = base === "moyenne" && pr.caMoyen !== null;
+  const ca = surMoyenne ? pr.caMoyen : pr.plancher;
+  const bornes = bornesChallenge(ch);
+  const dureeMois = bornes.valide ? (bornes.fin - bornes.debut) / (30.44 * 86400000) : null;
+
+  // Le bonus sur un dossier type, calculé avec le mode choisi (% de commission,
+  // points de taux, ou euros fixes) : les trois ne coûtent pas la même chose.
+  const dossierType = { caAmount: ca, commissionAmount: ca * pr.taux };
+  const bonus = bonusDossier(ch, dossierType);
+
+  // Volume attendu : le rythme des 30 derniers jours chez les partenaires
+  // visés, projeté sur la fenêtre. C'est le volume qui viendra sans le boost.
+  const refDebut = Date.now() - 30 * 86400000;
+  const recents = (data?.dossiers || []).filter(d => {
+    if (d.status === "KO") return false;
+    const t = dateGain(d);
+    if (t === null || t < refDebut) return false;
+    return challengeConcerne(ch, d.partnerId, data);
+  });
+  const parMois = recents.length;
+  const attendus = dureeMois ? parMois * dureeMois : parMois;
+  const bonusReel = recents.length
+    ? recents.reduce((sum, d) => sum + bonusDossier(ch, d), 0) / recents.length
+    : bonus;
+  const coutEstime = attendus * bonusReel;
+
+  const ligne = (l) => {
+    const netApres = l.net - bonus;
+    // Le coût de l'opération se calcule sur les dossiers réels — leur bonus
+    // moyen, pas celui d'un dossier type. Utiliser deux bases différentes
+    // dans le même bloc donnerait deux réponses à la même question.
+    return {
+      ...l, bonus, netApres, cout: coutEstime,
+      // Dossiers supplémentaires qu'il faut déclencher pour rembourser ce que
+      // le boost coûte sur le volume habituel.
+      supp: netApres > 0 ? coutEstime / netApres : null,
+      pctSupp: netApres > 0 && attendus > 0 ? (coutEstime / netApres) / attendus : null,
+    };
+  };
+
+  return {
+    base, ca, taux: pr.taux, caMoyen: pr.caMoyen, plancher: pr.plancher,
+    nbVivants: pr.nbVivants, seuilMoyenne: pr.seuilMoyenne,
+    dureeMois, parMois, attendus, mesure: recents.length > 0, bonus, bonusReel, coutEstime,
+    seul: ligne(surMoyenne ? pr.moyenSeul : pr.seul),
+    mandataire: ligne(surMoyenne ? pr.moyenMandataire : pr.mandataire),
+  };
+}
+
+// Ce qu'un challenge engage, ramené à quatre nombres comparables d'un
+// challenge à l'autre : les dossiers demandés, le coût, la marge que ces
+// dossiers rapportent, et le solde. C'est ce qui permet de les additionner.
+function engagementChallenge(data, ch, base = "plancher") {
+  const pr = projectionChallenge(data, 1, 0);
+  const surMoyenne = base === "moyenne" && pr.caMoyen !== null;
+  // On projette avec mandataire : c'est l'hypothèse la plus défavorable, donc
+  // la seule qui protège d'une mauvaise surprise.
+  const net = (surMoyenne ? pr.moyenMandataire : pr.mandataire).net;
+  const bornes = bornesChallenge(ch);
+  const dureeMois = bornes.valide ? (bornes.fin - bornes.debut) / (30.44 * 86400000) : null;
+  const commun = {
+    id: ch.id, titre: (ch.titre || "").trim() || "Sans intitulé",
+    etat: etatChallenge(ch), publie: !!ch.publie, boost: estBoost(ch), bornes, dureeMois, net,
+  };
+
+  if (estBoost(ch)) {
+    const pb = projectionBoost(data, ch, base);
+    return {
+      ...commun, detail: pb,
+      nbVises: (data?.partners || []).filter(p => !p.deleted && challengeConcerne(ch, p.id, data)).length,
+      dossiers: pb.attendus, cout: pb.coutEstime,
+      marge: pb.attendus * net, solde: pb.attendus * net - pb.coutEstime,
+    };
+  }
+
+  const vises = (data?.partners || []).filter(p =>
+    !p.deleted && p.active !== false && challengeConcerne(ch, p.id, data));
+  const prix = Math.max(0, Number(ch.coutRecompense) || 0);
+  const dossiers = vises.reduce((sum, p) => sum + objectifChallenge(ch, p.id), 0);
+
+  // Tout le monde ne gagnera pas. On regarde qui a déjà le rythme : sa cadence
+  // des 90 derniers jours, projetée sur la fenêtre de l'opération.
+  const T90 = Date.now() - 90 * 86400000;
+  const cadence = new Map();
+  for (const d of (data?.dossiers || [])) {
+    if (d.status === "KO") continue;
+    const t = dateGain(d);
+    if (t === null || t < T90) continue;
+    cadence.set(d.partnerId, (cadence.get(d.partnerId) || 0) + 1);
+  }
+  const probables = dureeMois
+    ? vises.filter(p => ((cadence.get(p.id) || 0) / 3) * dureeMois >= objectifChallenge(ch, p.id))
+    : [];
+  const dossiersProbables = probables.reduce((sum, p) => sum + objectifChallenge(ch, p.id), 0);
+
+  return {
+    ...commun, prix, nbVises: vises.length, dossiers,
+    cout: prix * vises.length, marge: dossiers * net, solde: dossiers * net - prix * vises.length,
+    nbProbables: probables.length, coutProbable: prix * probables.length,
+    dossiersProbables, soldeProbable: dossiersProbables * net - prix * probables.length,
+    objectifMoyen: vises.length ? dossiers / vises.length : Math.max(1, Number(ch.objectif) || 1),
+  };
+}
+
+// Le challenge de bienvenue est un engagement comme un autre : il a un coût à
+// financer et des dossiers à recevoir en échange. Il entre donc dans le total.
+function engagementBienvenue(data, base = "plancher") {
+  if (!bienvenueActif(data)) return null;
+  const pr = projectionChallenge(data, 1, 0);
+  const surMoyenne = base === "moyenne" && pr.caMoyen !== null;
+  const net = (surMoyenne ? pr.moyenMandataire : pr.mandataire).net;
+  const paliers = paliersBienvenue(reglageBienvenue(data));
+  const dernier = paliers[paliers.length - 1];
+  let cout = 0, dossiers = 0, enCourse = 0, dus = 0, coutDus = 0;
+  for (const { p, bi } of bilansBienvenue(data)) {
+    if (p.deleted || !bi.inscrit) continue;
+    // Un cadeau atteint et pas encore remis est un coût déjà dû, pas une
+    // projection : il sort de la poche que la course aille au bout ou non.
+    if (bi.aOffrir) { dus++; coutDus += bi.aOffrir.coutRecompense; }
+    if (bi.termine || bi.expire) continue;
+    enCourse++;
+    for (const x of paliers) if (bi.n < x.objectif) cout += x.coutRecompense;
+    dossiers += Math.max(0, dernier.objectif - bi.n);
+  }
+  return {
+    id: "bienvenue", titre: "Challenge de bienvenue", bienvenue: true, boost: false,
+    etat: "encours", publie: true, net, enCourse, dus, coutDus,
+    cout, dossiers, marge: dossiers * net, solde: dossiers * net - cout,
+  };
+}
+
+// Tous les engagements en cours, additionnés. Un challenge pris isolément peut
+// être rentable pendant que les trois réunis coûtent plus qu'ils ne rapportent.
+function engagementTotal(data, { base = "plancher", inclureBrouillons = false } = {}) {
+  const lignes = [];
+  const bv = engagementBienvenue(data, base);
+  if (bv && (bv.cout > 0 || bv.coutDus > 0 || bv.enCourse > 0)) lignes.push(bv);
+  for (const ch of challengesDe(data)) {
+    const etat = etatChallenge(ch);
+    if (etat === "termine") continue;
+    if (!inclureBrouillons && etat !== "encours" && etat !== "programme") continue;
+    lignes.push(engagementChallenge(data, ch, base));
+  }
+  const somme = (k) => lignes.reduce((sum, x) => sum + (Number(x[k]) || 0), 0);
+  const pr = projectionChallenge(data, 1, 0);
+  return {
+    base, lignes,
+    cout: somme("cout"), coutDus: somme("coutDus"), dossiers: somme("dossiers"),
+    marge: somme("marge"), solde: somme("marge") - somme("cout"),
+    caMoyen: pr.caMoyen, plancher: pr.plancher, taux: pr.taux,
+    nbVivants: pr.nbVivants, seuilMoyenne: pr.seuilMoyenne,
+  };
+}
+
 // « 4 mois », « 3 mois et demi », « 18 jours » — on ne sert jamais 3,67 mois.
 function dureeLisible(mois) {
   if (!isFinite(mois) || mois <= 0) return "—";
@@ -9952,12 +10241,209 @@ function ChallengeBienvenue({ data, onMajReglage, onMajInscrit, onOuvrirPartenai
   );
 }
 
+// La projection d'un boost. Elle ne pose pas la même question que celle d'un
+// challenge à objectif : un cadeau se rembourse sur un nombre de dossiers, un
+// boost se rembourse sur des dossiers EN PLUS de ceux qui seraient venus seuls.
+function ProjectionBoost({ data, ch, titre }) {
+  const [base, setBase] = useState("plancher");
+  const pb = projectionBoost(data, ch, base);
+  const moyenneDispo = pb.caMoyen !== null;
+  const surMoyenne = base === "moyenne" && moyenneDispo;
+  const colSeul = pb.seul, colMand = pb.mandataire;
+  const perdant = colMand.netApres <= 0;
+
+  const Rang = ({ t, v, fort, rouge }) => (
+    <div className={`flex items-baseline justify-between gap-3 ${fort ? "font-bold" : ""} ${rouge ? "text-red-700" : ""}`}>
+      <span className="min-w-0">{t}</span>
+      <span className={`whitespace-nowrap tabular-nums ${rouge ? "font-bold" : ""}`}>{v}</span>
+    </div>
+  );
+  const Col = ({ l, label }) => (
+    <div className="min-w-0">
+      <div className="font-bold mb-1">{label}</div>
+      <Rang t="Honoraires du dossier" v={fmtEuro(l.ca)} />
+      <Rang t={`− rétrocession apporteur (${Math.round(pb.taux * 100)} %)`} v={`−${fmtEuro(l.retro)}`} fort />
+      <Rang t="− part mandataire" v={l.mand > 0 ? `−${fmtEuro(l.mand)}` : "0 €"} fort />
+      <div className="border-t border-violet-200 mt-1 pt-1">
+        <Rang t="Net Frangola avant boost" v={fmtEuro(l.net)} fort />
+      </div>
+      <Rang t={`− bonus du boost (${libelleBonus(ch)})`} v={`−${fmtEuroPrecis(l.bonus)}`} rouge />
+      <Rang t="Net Frangola pendant l'opération" v={fmtEuro(l.netApres)} rouge={l.netApres <= 0} fort />
+    </div>
+  );
+
+  return (
+    <div className="mt-2 text-xs rounded-xl px-3 py-2.5 border bg-violet-50 border-violet-200 text-violet-950">
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
+        <div className="font-bold uppercase tracking-wide text-[10px] opacity-80">
+          {titre || "Projection du boost"}
+          {" — "}{surMoyenne ? `à votre panier moyen de ${fmtEuro(pb.caMoyen)}` : `au plancher de ${fmtEuro(pb.plancher)} d'honoraires`}
+        </div>
+        <div className="flex gap-1 shrink-0">
+          {[["plancher", `Plancher ${fmtEuro(pb.plancher)}`, true],
+            ["moyenne", moyenneDispo ? `Panier moyen ${fmtEuro(pb.caMoyen)}` : "Panier moyen", moyenneDispo]].map(([v, lib, dispo]) => (
+            <button key={v} onClick={() => dispo && setBase(v)} disabled={!dispo}
+              title={dispo ? undefined : `Disponible à partir de ${pb.seuilMoyenne} dossiers gagnés avec un montant — vous en avez ${pb.nbVivants}.`}
+              className={`text-[10.5px] font-bold px-2 py-1 rounded-full border transition disabled:opacity-40 disabled:cursor-default
+                ${base === v && dispo ? "bg-slate-800 text-white border-transparent" : "bg-white/70 border-current/20 text-current hover:border-current/50"}`}>
+              {lib}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
+        <Col l={colSeul} label="Dossier que vous suivez vous-même" />
+        <Col l={colMand} label="Dossier suivi par un mandataire" />
+      </div>
+
+      <div className="mt-2.5 pt-2 border-t border-violet-200">
+        <div className="font-bold uppercase tracking-wide text-[10px] mb-1 opacity-80">
+          Ce que l'opération coûte, et ce qu'elle doit rapporter
+          <span className="font-normal normal-case tracking-normal opacity-70">
+            {pb.mesure
+              ? ` — ${pb.parMois} dossier${pb.parMois > 1 ? "s" : ""} gagné${pb.parMois > 1 ? "s" : ""} les 30 derniers jours chez les partenaires visés`
+              : " — aucun dossier gagné les 30 derniers jours : volume estimé sur un dossier type"}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+          {[["Dossiers attendus", pb.attendus >= 1 ? Math.round(pb.attendus) : "—", null],
+            [pb.mesure ? "Bonus moyen constaté" : "Bonus sur un dossier type", fmtEuroPrecis(pb.bonusReel), null],
+            ["Coût de l'opération", fmtEuro(pb.coutEstime), pb.coutEstime > 0],
+            ["Dossiers en plus à faire", colMand.supp !== null ? Math.ceil(colMand.supp) : "—", colMand.supp === null]]
+            .map(([lib, val, alerte], i) => (
+            <div key={i} className={`rounded-lg px-2 py-1.5 border ${alerte ? "bg-white/70 border-violet-200" : "bg-white/70 border-violet-200"}`}>
+              <div className="opacity-70 text-[10px]">{lib}</div>
+              <div className="font-bold">{val}</div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-1.5 leading-relaxed">
+          {perdant
+            ? <span className="text-red-700 font-semibold">À ce niveau de bonus, il ne vous reste rien sur un dossier au
+                {surMoyenne ? " panier moyen" : " plancher"} suivi par un mandataire : l'opération vous coûte de l'argent
+                sur chaque dossier, quel qu'en soit le nombre.</span>
+            : colMand.supp === null || pb.attendus < 1
+              ? <>Sans volume de référence sur les 30 derniers jours, le coût ne peut pas être projeté. Le calcul ci-dessus
+                  reste valable dossier par dossier : {fmtEuroPrecis(colMand.bonus)} de bonus sur {fmtEuro(colMand.net)} de net.</>
+              : <>Le boost coûte <strong>{fmtEuro(pb.coutEstime)}</strong> sur les dossiers qui seraient tombés de toute
+                  façon. Pour qu'il se paie tout seul, il doit en déclencher <strong>{Math.ceil(colMand.supp)} de plus</strong>
+                  {pb.pctSupp !== null && colMand.pctSupp !== null && <> — soit <strong>{Math.round(colMand.pctSupp * 100)} % de production en plus</strong></>} sur
+                  la période. En dessous, vous avez payé plus cher une production que vous aviez déjà.</>}
+          {" "}La commission récurrente s'ajoute par-dessus — elle n'est jamais rétrocédée à l'apporteur.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Tous les engagements en cours mis bout à bout. Un challenge pris seul peut
+// être rentable pendant que les trois réunis coûtent plus qu'ils ne rapportent :
+// c'est exactement ce que ce tableau rend visible.
+function ProjectionTotale({ data }) {
+  const [base, setBase] = useState("plancher");
+  const [brouillons, setBrouillons] = useState(false);
+  const [ouvert, setOuvert] = useState(false);
+  const t = engagementTotal(data, { base, inclureBrouillons: brouillons });
+  const moyenneDispo = t.caMoyen !== null;
+  const surMoyenne = base === "moyenne" && moyenneDispo;
+  if (t.lignes.length === 0) return null;
+  const gagnant = t.solde >= 0;
+
+  return (
+    <div className={`mb-3 rounded-xl border px-3 py-2.5 text-xs ${gagnant ? "bg-emerald-50 border-emerald-200 text-emerald-900" : "bg-red-50 border-red-200 text-red-900"}`}>
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
+        <div className="font-bold uppercase tracking-wide text-[10px] opacity-80">
+          Projection totale — {t.lignes.length} opération{t.lignes.length > 1 ? "s" : ""} en cours
+          {" · "}{surMoyenne ? `panier moyen ${fmtEuro(t.caMoyen)}` : `plancher ${fmtEuro(t.plancher)}`}
+        </div>
+        {/* Pas de shrink-0 ici : à trois boutons, la rangée doit pouvoir se
+            replier, sinon elle pousse la page hors de l'écran sur un mobile. */}
+        <div className="flex gap-1 flex-wrap min-w-0">
+          {[["plancher", `Plancher ${fmtEuro(t.plancher)}`, true],
+            ["moyenne", moyenneDispo ? `Panier moyen ${fmtEuro(t.caMoyen)}` : "Panier moyen", moyenneDispo]].map(([v, lib, dispo]) => (
+            <button key={v} onClick={() => dispo && setBase(v)} disabled={!dispo}
+              title={dispo ? undefined : `Disponible à partir de ${t.seuilMoyenne} dossiers gagnés avec un montant — vous en avez ${t.nbVivants}.`}
+              className={`text-[10.5px] font-bold px-2 py-1 rounded-full border transition disabled:opacity-40 disabled:cursor-default
+                ${base === v && dispo ? "bg-slate-800 text-white border-transparent" : "bg-white/70 border-current/20 text-current hover:border-current/50"}`}>
+              {lib}
+            </button>
+          ))}
+          <button onClick={() => setBrouillons(v => !v)}
+            title="Inclure les challenges pas encore publiés, pour voir ce que donnerait l'ensemble si vous les lanciez"
+            className={`text-[10.5px] font-bold px-2 py-1 rounded-full border transition
+              ${brouillons ? "bg-slate-800 text-white border-transparent" : "bg-white/70 border-current/20 text-current hover:border-current/50"}`}>
+            + brouillons
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mb-2">
+        {[["Dossiers demandés", Math.round(t.dossiers), false],
+          ["Marge nette attendue", fmtEuro(t.marge), false],
+          ["Coût des récompenses", fmtEuro(t.cout), t.cout > 0],
+          ["Solde", `${t.solde >= 0 ? "+" : ""}${fmtEuro(t.solde)}`, t.solde < 0]].map(([lib, val, rouge], i) => (
+          <div key={i} className="rounded-lg px-2 py-1.5 border bg-white/70 border-current/15">
+            <div className="opacity-70 text-[10px]">{lib}</div>
+            <div className={`font-bold ${rouge ? "text-red-700" : ""}`}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      <button onClick={() => setOuvert(v => !v)} className="font-semibold hover:underline">
+        {ouvert ? "Masquer le détail par opération" : `Voir le détail des ${t.lignes.length} opération${t.lignes.length > 1 ? "s" : ""} →`}
+      </button>
+
+      {ouvert && (
+        <div className="mt-2 space-y-1">
+          <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 text-[10px] uppercase tracking-wide opacity-60 font-bold pb-1 border-b border-current/15">
+            <span>Opération</span><span className="text-right">Dossiers</span>
+            <span className="text-right">Coût</span><span className="text-right">Solde</span>
+          </div>
+          {t.lignes.map(l => (
+            <div key={l.id} className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 items-baseline tabular-nums py-0.5">
+              <span className="min-w-0 truncate">
+                {l.titre}
+                <span className="opacity-60">
+                  {l.bienvenue ? ` · ${l.enCourse} en course` : l.boost ? " · boost" : ` · ${l.nbVises} visé${l.nbVises > 1 ? "s" : ""}`}
+                  {l.etat === "programme" ? " · programmé" : l.etat === "brouillon" ? " · brouillon" : ""}
+                </span>
+              </span>
+              <span className="text-right">{Math.round(l.dossiers)}</span>
+              <span className="text-right">{fmtEuro(l.cout)}</span>
+              <span className={`text-right font-semibold ${l.solde < 0 ? "text-red-700" : ""}`}>
+                {l.solde >= 0 ? "+" : ""}{fmtEuro(l.solde)}
+              </span>
+            </div>
+          ))}
+          {t.coutDus > 0 && (
+            <div className="pt-1.5 mt-1 border-t border-current/15 opacity-80">
+              Dont <strong>{fmtEuro(t.coutDus)}</strong> de cadeaux déjà gagnés et pas encore remis — celui-là est dû, quoi qu'il arrive.
+            </div>
+          )}
+        </div>
+      )}
+
+      <p className="mt-2 leading-relaxed">
+        {gagnant
+          ? <>Si toutes les opérations vont au bout, elles demandent <strong>{Math.round(t.dossiers)} dossiers</strong> et
+              vous laissent <strong>{fmtEuro(t.solde)}</strong> une fois les récompenses payées.</>
+          : <span className="font-semibold">Réunies, ces opérations coûtent <strong>{fmtEuro(t.cout)}</strong> pour
+              une marge attendue de {fmtEuro(t.marge)} : l'ensemble est perdant de {fmtEuro(Math.abs(t.solde))}.
+              Prise isolément chacune peut tenir — c'est leur addition qui ne tient pas.</span>}
+        {" "}Le coût est compté au maximum : toutes les personnes visées gagnent. C'est l'engagement, pas la prévision.
+      </p>
+    </div>
+  );
+}
+
 function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) {
   const liste = challengesDe(data);
   const [edition, setEdition] = useState(null);      // id en cours d'édition, ou "nouveau"
   const [b, setB] = useState({});
   const [aSupprimer, setASupprimer] = useState(null);
   const [deplie, setDeplie] = useState(null);
+  const [projOuverte, setProjOuverte] = useState(null);
   const [rechPart, setRechPart] = useState("");
 
   const now = new Date();
@@ -10128,6 +10614,12 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                     ce boost vous coûterait <strong>{fmtEuro(coutBoost)}</strong> sur une période équivalente.</>
                 : <>Aucun dossier gagné ces 30 derniers jours : impossible d'estimer le coût du boost.</>}
             </div>
+            {/* Un boost a droit à sa projection lui aussi : la question n'est
+                pas « à partir de combien de dossiers c'est remboursé » mais
+                « combien de dossiers EN PLUS faut-il que ça déclenche ». */}
+            {(Number(b.bonusValeur) || 0) > 0 && (
+              <ProjectionBoost data={data} ch={{ ...b, type: TYPE_BOOST, participants }} />
+            )}
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
@@ -10349,6 +10841,10 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
         pendant sa période.
       </p>
 
+      {/* Ce que l'ensemble des opérations engage. Un challenge s'arbitre seul ;
+          trois qui se chevauchent s'arbitrent ensemble. */}
+      <ProjectionTotale data={data} />
+
       {edition === "nouveau" && formulaire()}
 
       {ordonnee.length === 0 && edition !== "nouveau" ? (
@@ -10462,6 +10958,28 @@ function ChallengePartenaires({ data, onAjouter, onMaj, onSupprimer, canEdit }) 
                           )}
                         </div>
                       )
+                    )}
+
+                    {/* La même projection que dans le formulaire, mais sur le
+                        challenge tel qu'il est enregistré : on doit pouvoir la
+                        relire sans repasser par « Modifier ». */}
+                    {edition === null && (bornes.valide || boostC) && (
+                      <div className="mt-2">
+                        <button onClick={() => setProjOuverte(v => v === c.id ? null : c.id)}
+                          className="text-xs fa-teal-text hover:underline">
+                          {projOuverte === c.id ? "Masquer la projection" : "Voir la projection"}
+                        </button>
+                        {projOuverte === c.id && (boostC
+                          ? <ProjectionBoost data={data} ch={c} />
+                          : <ProjectionChallenge data={data}
+                              objectif={Math.max(1, Math.round(
+                                vise && nbVises > 0
+                                  ? Object.values(c.participants || {}).reduce((sum, x) => sum + Math.max(1, Number(x) || 1), 0) / nbVises
+                                  : objectif))}
+                              cout={c.coutRecompense}
+                              dureeMois={bornes.valide ? (bornes.fin - bornes.debut) / (30.44 * 86400000) : null}
+                              titre={vise ? "Projection par partenaire visé" : undefined} />)}
+                      </div>
                     )}
 
                     {!boostC && gagnants.length > 0 && (
@@ -11650,6 +12168,8 @@ function Vision360({ data, vue = "tout" }) {
         const mrr = recurrenceMensuelleTotale(data.dossiers);
         const cumul = recurrenceCumuleeTotale(data.dossiers);
         const contrats = data.dossiers.filter(contratEnCours);
+        // Qui apporte quoi, et qui touche quoi.
+        const rpm = recurrenceParMandataire(data, data.settings?.admin?.firstName || "Sébastien");
         const sansRecurrence = gagnes.filter(d => recurrenceMensuelle(d) <= 0).length;
         // Affiché même à zéro : une récurrence invisible est une récurrence
         // qu'on oublie de renseigner, et donc du chiffre d'affaires perdu.
@@ -11758,8 +12278,11 @@ function Vision360({ data, vue = "tout" }) {
                                   <tr key={l.annee} className={l.annee % 2 === 0 ? "bg-white/50" : ""}>
                                     <td className="py-1 fa-navy">Année {l.annee}</td>
                                     <td className="py-1 text-right text-violet-700 font-medium">{fmtEuroPrecis(montant)}</td>
-                                    <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * PART_MANDATAIRE)}</td>
-                                    <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * (1 - PART_MANDATAIRE))}</td>
+                                    {/* Au taux réellement prélevé sur le portefeuille, pas à 50 % :
+                                        une partie des contrats est suivie par la maison et ne paie
+                                        aucune part mandataire. */}
+                                    <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * rpm.tauxObserve)}</td>
+                                    <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(montant * (1 - rpm.tauxObserve))}</td>
                                     <td className="py-1 text-right fa-navy font-bold">{fmtEuroPrecis(cumul + cumul2)}</td>
                                     {/* Le revenu mensuel moyen de l'année : le chiffre
                                         qu'on a en tête quand on pense « ça me rapporte
@@ -11787,10 +12310,80 @@ function Vision360({ data, vue = "tout" }) {
                 </>
               );
             })()}
-            <div className="text-xs text-gray-600 mt-3 pt-3 border-t border-violet-200">
-              Répartition mensuelle : <strong className="fa-navy">{fmtEuroPrecis(mrr * PART_MANDATAIRE)}</strong> pour les
-              mandataires, <strong className="fa-navy">{fmtEuroPrecis(mrr * (1 - PART_MANDATAIRE))}</strong> pour Frangola.
-              Rien pour les apporteurs : la récurrence n'est pas rétrocédée.
+            {/* Qui produit la récurrence, et comment elle se partage. La part
+                mandataire ne porte que sur les contrats d'un mandataire : les
+                dossiers de la maison reviennent à Frangola en entier. */}
+            <div className="mt-3 pt-3 border-t border-violet-200">
+              <div className="flex items-baseline justify-between flex-wrap gap-2 mb-1.5">
+                <span className="text-xs font-semibold fa-navy">Qui la produit, et qui la touche</span>
+                {/* On compte ici les contrats qui portent réellement une
+                    récurrence, pas tous les contrats en cours : sinon l'écart
+                    avec le compteur du haut passerait pour une erreur. */}
+                <span className="text-[11px] text-gray-400">
+                  par mois, sur les {rpm.totaux.contrats} contrat{rpm.totaux.contrats > 1 ? "s" : ""} qui portent une récurrence
+                  {contrats.length > rpm.totaux.contrats && <> — {contrats.length - rpm.totaux.contrats} en cours n'en portent aucune</>}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-400 text-left">
+                      <th className="font-medium py-1">Commercial</th>
+                      <th className="font-medium py-1 text-right">Contrats</th>
+                      <th className="font-medium py-1 text-right">Part mandataire</th>
+                      <th className="font-medium py-1 text-right">Part Frangola</th>
+                      <th className="font-medium py-1 text-right">Total / mois</th>
+                      <th className="font-medium py-1 text-right">Déjà perçu</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rpm.lignes.map((l, i) => (
+                      <tr key={l.nom} className={i % 2 === 0 ? "bg-white/50" : ""}>
+                        <td className="py-1">
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: COMMERCIAL_COLORS[l.nom] || "#999" }} />
+                            <span className="fa-navy font-medium">{commercialLabel(l.nom) || l.nom}</span>
+                            {!l.estMandataire && <span className="text-gray-400">· la maison</span>}
+                          </span>
+                        </td>
+                        <td className="py-1 text-right text-gray-500">{l.contrats}</td>
+                        <td className="py-1 text-right text-gray-500">
+                          {l.estMandataire ? fmtEuroPrecis(l.partMandataire) : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="py-1 text-right text-gray-500">{fmtEuroPrecis(l.partFrangola)}</td>
+                        <td className="py-1 text-right text-violet-700 font-semibold">{fmtEuroPrecis(l.mensuel)}</td>
+                        <td className="py-1 text-right fa-navy">{fmtEuroPrecis(l.cumul)}</td>
+                      </tr>
+                    ))}
+                    <tr className="border-t border-violet-200">
+                      <td className="py-1.5 fa-navy font-bold">Total</td>
+                      <td className="py-1.5 text-right fa-navy font-bold">{rpm.totaux.contrats}</td>
+                      <td className="py-1.5 text-right fa-navy font-bold">{fmtEuroPrecis(rpm.totaux.partMandataire)}</td>
+                      <td className="py-1.5 text-right fa-navy font-bold">{fmtEuroPrecis(rpm.totaux.partFrangola)}</td>
+                      <td className="py-1.5 text-right text-violet-700 font-bold">{fmtEuroPrecis(rpm.totaux.mensuel)}</td>
+                      <td className="py-1.5 text-right fa-navy font-bold">{fmtEuroPrecis(rpm.totaux.cumul)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-gray-600 mt-2">
+                Sur les <strong className="text-violet-700">{fmtEuroPrecis(rpm.totaux.mensuel)}</strong> mensuels,
+                {" "}<strong className="fa-navy">{fmtEuroPrecis(rpm.totaux.partMandataire)}</strong> reviennent aux mandataires
+                et <strong className="fa-navy">{fmtEuroPrecis(rpm.totaux.partFrangola)}</strong> à Frangola
+                {rpm.totaux.mensuel > 0 && <> — soit {Math.round(rpm.tauxObserve * 100)} % / {Math.round((1 - rpm.tauxObserve) * 100)} %</>}.
+                {" "}Rien pour les apporteurs : la récurrence n'est pas rétrocédée.
+                <span className="block text-gray-400 mt-0.5">
+                  La part mandataire ne se prélève que sur les contrats d'un mandataire. Les dossiers suivis par
+                  la maison reviennent à Frangola en entier, c'est pourquoi le partage n'est pas à moitié-moitié.
+                </span>
+              </p>
+              {rpm.totaux.cumul > 0 && (
+                <p className="text-xs text-gray-500 mt-1.5">
+                  Depuis le début : <strong className="fa-navy">{fmtEuroPrecis(rpm.totaux.cumulMandataire)}</strong> versés
+                  aux mandataires, <strong className="fa-navy">{fmtEuroPrecis(rpm.totaux.cumulFrangola)}</strong> gardés
+                  par Frangola, pour <strong className="text-violet-700">{fmtEuroPrecis(rpm.totaux.cumul)}</strong> encaissés au total.
+                </p>
+              )}
             </div>
             {sansRecurrence > 0 && (
               <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
@@ -12299,10 +12892,13 @@ function FacturesPartenaires({ data, onSetStatut }) {
                   Déposée le {fmtDate(f.at)}{f.montant != null ? ` · ${fmtEuro(f.montant)}` : " · montant non précisé"}
                 </div>
               </div>
-              <button onClick={() => downloadStoredFile(f.key, f.name)}
-                className="flex items-center gap-1.5 text-xs font-medium fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition">
-                <Download size={14} /> {f.name}
-              </button>
+              <span className="flex items-center gap-1.5 min-w-0">
+                <button onClick={() => previewStoredFile(f.key)} title="Ouvrir la facture"
+                  className="flex items-center gap-1.5 text-xs font-medium fa-navy fa-bg-gold px-3 py-1.5 rounded-lg transition min-w-0">
+                  <FileText size={14} className="shrink-0" /> <span className="truncate">{f.name}</span>
+                </button>
+                <BoutonTelecharger fichier={f} taille={13} />
+              </span>
             </div>
             {corrigeId === f.id ? (
               <div className="space-y-2 mt-2">
@@ -13856,28 +14452,31 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     return (
       <>
         <div className="flex flex-wrap gap-2 mt-3">
-          {Object.keys(DOC_LABELS).map(k => d.docs[k] ? (
+          {docsAttendus(d).map(k => d.docs[k] ? (
             <span key={k} className="text-xs bg-white border border-gray-200 hover:border-teal-300 text-gray-600 px-2.5 py-1 rounded-full flex items-center gap-1">
-              <button onClick={() => downloadStoredFile(d.docs[k].key, d.docs[k].name)}
+              <button onClick={() => previewStoredFile(d.docs[k].key)} title="Ouvrir le document"
                 className="flex items-center gap-1 hover:text-teal-700 transition">
-                <FileText size={12} /> {DOC_LABELS[k]} <Download size={11} />
+                <FileText size={12} /> {libelleDoc(k, d)}
               </button>
+              <BoutonTelecharger fichier={d.docs[k]} />
               <button onClick={() => onRemoveDoc(d.id, k)} className="fa-tap text-gray-400 hover:text-red-600 ml-0.5" title="Retirer ce document">
                 <X size={12} />
               </button>
             </span>
           ) : (
             <label key={k} className="fa-tap text-xs bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-700 px-2.5 py-1 rounded-full flex items-center gap-1 transition cursor-pointer">
-              <Upload size={12} /> Ajouter "{DOC_LABELS[k]}" (reçu par email)
+              <Upload size={12} /> Ajouter "{libelleDoc(k, d)}" (reçu par email)
               <input type="file" accept="application/pdf,image/*" className="hidden"
                 onChange={e => e.target.files?.[0] && onAdminUploadDoc(d.id, k, e.target.files[0])} />
             </label>
           ))}
           {(d.extraDocs || []).map((ed, i) => (
             <span key={i} className="text-xs bg-teal-50 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1">
-              <button onClick={() => downloadStoredFile(ed.key, ed.name)} className="flex items-center gap-1 hover:underline">
-                <FileText size={12} /> {ed.label} <Download size={11} />
+              <button onClick={() => previewStoredFile(ed.key)} title="Ouvrir le document"
+                className="flex items-center gap-1 hover:underline">
+                <FileText size={12} /> {ed.label}
               </button>
+              <BoutonTelecharger fichier={ed} className="text-teal-500" />
               <button onClick={() => onRemoveExtraDoc(d.id, i)} className="fa-tap text-teal-500 hover:text-red-600 ml-0.5" title="Retirer ce document">
                 <X size={12} />
               </button>
@@ -15832,11 +16431,14 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                       <div className="space-y-1.5">
                                         {contrats.map(c => (
                                           <div key={c.id} className="flex items-center justify-between flex-wrap gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-                                            <button onClick={() => downloadStoredFile(c.key, c.name)}
-                                              className="text-left">
-                                              <span className="text-xs fa-navy font-semibold block">📄 {c.libelle}</span>
-                                              <span className="text-[11px] text-gray-400">{c.name} — déposé le {fmtDate(c.uploadedAt)}</span>
-                                            </button>
+                                            <span className="flex items-center gap-2 min-w-0">
+                                              <button onClick={() => previewStoredFile(c.key)} title="Ouvrir le document"
+                                                className="text-left min-w-0">
+                                                <span className="text-xs fa-navy font-semibold block">📄 {c.libelle}</span>
+                                                <span className="text-[11px] text-gray-400">{c.name} — déposé le {fmtDate(c.uploadedAt)}</span>
+                                              </button>
+                                              <BoutonTelecharger fichier={c} taille={13} />
+                                            </span>
                                             {contratASupprimer === c.id ? (
                                               <span className="flex items-center gap-2 shrink-0 text-xs">
                                                 <span className="text-red-700">Retirer ce document ?</span>
@@ -15878,10 +16480,13 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                             <div className="fa-bg-offwhite rounded-xl p-4">
                               <div className="text-sm font-semibold fa-navy mb-2">RIB</div>
                               {p.ribFile ? (
-                                <button onClick={() => downloadStoredFile(p.ribFile.key, p.ribFile.name)}
-                                  className="text-xs fa-teal-text hover:underline font-medium">
-                                  🏦 {p.ribFile.name} — fourni le {fmtDate(p.ribFile.uploadedAt)}
-                                </button>
+                                <span className="flex items-center gap-1.5 min-w-0">
+                                  <button onClick={() => previewStoredFile(p.ribFile.key)} title="Ouvrir le RIB"
+                                    className="text-xs fa-teal-text hover:underline font-medium truncate">
+                                    🏦 {p.ribFile.name} — fourni le {fmtDate(p.ribFile.uploadedAt)}
+                                  </button>
+                                  <BoutonTelecharger fichier={p.ribFile} taille={12} />
+                                </span>
                               ) : (
                                 <div className="text-xs text-gray-400">Ce partenaire n'a pas encore déposé son RIB.</div>
                               )}
