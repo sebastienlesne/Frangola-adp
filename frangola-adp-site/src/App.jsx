@@ -6903,10 +6903,15 @@ function BackOfficeARelancer({ dossiers, nomDuPartenaire, onOuvrir }) {
 
 function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
   const [ouvert, setOuvert] = useState(false);
-  const mensuelle = recurrenceMensuelle(dossier);
+  // On affiche ce qui est saisi, même avant la souscription : c'est le seul
+  // moyen de relire ce qu'on a tapé. Ce qui est saisi d'avance n'entre dans
+  // aucun total tant que le dossier n'est pas gagné — recurrenceMensuelle()
+  // s'en charge, et le bandeau ci-dessous le dit.
+  const mensuelle = recurrenceMensuelleTheorique(dossier);
   const mois = mensualitesEcoulees(dossier);
   const cumul = recurrenceCumulee(dossier);
   const court = contratEnCours(dossier);
+  const gagne = STATUTS_CONTRAT_VIVANT.includes(dossier?.status);
   const petitChamp = "text-xs border border-gray-300 rounded-lg px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-teal-500";
 
   return (
@@ -6918,7 +6923,10 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
         {mensuelle > 0 ? (
           <span className="font-normal text-gray-500">
             — {fmtEuroPrecis(mensuelle)}/mois
-            {court ? <> · {mois} versée{mois > 1 ? "s" : ""} · {fmtEuroPrecis(cumul)} perçus</> : (dossier.resilieLe ? " · résilié" : " · en attente de date d'effet")}
+            {!gagne
+              ? <span className="text-amber-700"> · pas encore comptée</span>
+              : court ? <> · {mois} versée{mois > 1 ? "s" : ""} · {fmtEuroPrecis(cumul)} perçus</>
+              : (dossier.resilieLe ? " · résilié" : " · en attente de date d'effet")}
           </span>
         ) : (
           <span className="font-normal text-amber-700">— à renseigner</span>
@@ -6931,6 +6939,16 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
           <div className="text-[11px] text-violet-800 font-semibold">
             Non rétrocédé — invisible pour le partenaire.
           </div>
+          {/* Saisir tôt sert à ne pas courir après l'information le jour de la
+              souscription. Mais un chiffre visible que l'on croit compté fait
+              plus de dégâts qu'un champ vide : on le dit noir sur blanc. */}
+          {!gagne && (
+            <div className="text-[11px] rounded-lg px-2.5 py-2 bg-amber-50 border border-amber-200 text-amber-900">
+              Vous pouvez renseigner ces montants dès maintenant. Ils <strong>n'entrent dans aucun total</strong> tant
+              que le dossier n'est pas passé en <strong>Souscrit</strong> — ni dans le revenu récurrent, ni dans les
+              projections, ni dans la répartition par mandataire. Le jour de la souscription, tout est déjà là.
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-3">
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
               Assureur
@@ -7251,10 +7269,25 @@ function montantMensualite(dossier, numero) {
   return (cotisation * taux) / 100;
 }
 
-// Ce que rapporte le contrat CE MOIS-CI, au taux qui s'applique aujourd'hui.
-function recurrenceMensuelle(dossier) {
+// Ce que le contrat rapporterait ce mois-ci d'après ce qui est saisi, sans
+// regarder où en est le dossier. Sert à AFFICHER le montant sur la fiche : on
+// renseigne la cotisation dès le devis, bien avant la souscription, et le
+// chiffre doit être relisible tout de suite.
+function recurrenceMensuelleTheorique(dossier) {
   const n = mensualitesEcoulees(dossier);
   return montantMensualite(dossier, Math.max(1, n + (n === 0 ? 1 : 0)));
+}
+
+// Ce que rapporte le contrat CE MOIS-CI, au taux qui s'applique aujourd'hui.
+//
+// Le verrou est ici, et nulle part ailleurs : tant que le dossier n'est pas
+// souscrit, il ne rapporte rien, quoi qu'on ait saisi. Le mettre au niveau du
+// calcul plutôt que dans chaque écran garantit qu'aucun total ne pourra
+// compter une récurrence qui n'existe pas encore — y compris les écrans qu'on
+// écrira plus tard.
+function recurrenceMensuelle(dossier) {
+  if (!STATUTS_CONTRAT_VIVANT.includes(dossier?.status)) return 0;
+  return recurrenceMensuelleTheorique(dossier);
 }
 
 // Ce qu'il rapportera une fois la première année passée — le régime de
@@ -7402,6 +7435,9 @@ function recurrenceParMandataire(data, nomGerant = "Sébastien") {
   for (const m of (data?.mandataires || [])) if (!m.deleted) ligne(m.name);
 
   for (const d of (data?.dossiers || [])) {
+    // Un dossier pas encore souscrit peut porter une cotisation saisie
+    // d'avance : elle ne compte pas tant qu'il n'est pas gagné.
+    if (!STATUTS_CONTRAT_VIVANT.includes(d.status)) continue;
     const mensuel = recurrenceMensuelle(d);
     const cumul = recurrenceCumulee(d);
     if (mensuel <= 0 && cumul <= 0) continue;
@@ -13102,6 +13138,107 @@ function SauvegardesPanel({ onExporter, onRestaurer, onVerifier, busy }) {
   );
 }
 
+// ─── La séquence d'activation ────────────────────────────────────────────
+// Un « oui » a une durée de vie courte : trois semaines, au-delà on n'est plus
+// qu'un mail dans une boîte. On ne relance donc pas « quand on y pense », on
+// suit un plan — et surtout on s'arrête franchement au bout. Un partenaire qui
+// a répondu par son silence à trois sollicitations a répondu ; insister
+// abîmerait la relation pour rien.
+//
+// Les trois pas ne se valent pas et ne passent pas par le même canal : le SMS
+// va là où le mail meurt, l'appel est le seul qui convertit, le dernier mail
+// ne sert qu'à fermer proprement la porte.
+const SEQUENCE_ACTIVATION = [
+  { rang: 1, jour: 2, canal: "sms", libelle: "SMS",
+    quoi: "Le premier mail est peut-être en spam. On le dit, et on enchaîne sur la seule question qui compte : a-t-il un compromis en cours ?" },
+  { rang: 2, jour: 7, canal: "appel", libelle: "Appel",
+    quoi: "On appelle. Pas pour relancer l'inscription : pour demander s'il a un client, et proposer de saisir le dossier à sa place." },
+  { rang: 3, jour: 21, canal: "mail", libelle: "Dernier mail",
+    quoi: "On ferme proprement : on ne relance plus, l'accès reste ouvert. Certains reviennent des mois plus tard sur cette phrase-là." },
+];
+// Jamais deux relances le même jour, même si le calendrier théorique le dit :
+// un pas fait en retard décale les suivants d'autant.
+const ECART_MIN_RELANCE = 2;
+const codeActivation = (rang) => `activation${rang}`;
+
+// Combien de pas de la séquence ont déjà été faits. On lit le code de la
+// dernière relance plutôt que le compteur brut : celui-ci mélange les relances
+// d'activation et celles d'un partenaire qui a décroché après avoir produit.
+function etapeFaiteActivation(p) {
+  const m = /^activation([123])$/.exec(p?.relanceCode || "");
+  return m ? Number(m[1]) : 0;
+}
+
+// Où en est ce partenaire, et qu'est-ce qui est dû aujourd'hui.
+function etapeActivation(p, maintenant = Date.now()) {
+  const entree = dateEntreeDe(p);
+  if (entree === null) return null;
+  const faites = etapeFaiteActivation(p);
+  const etape = SEQUENCE_ACTIVATION[faites] || null;
+  if (!etape) {
+    return { faites, etape: null, terminee: true, due: false, quand: null, dansJours: null,
+             finieLe: p?.relanceLe || null };
+  }
+  const quand = Math.max(
+    entree + etape.jour * JOUR_MS,
+    (Number(p?.relanceLe) || 0) + ECART_MIN_RELANCE * JOUR_MS,
+  );
+  return {
+    faites, etape, terminee: false, quand,
+    due: maintenant >= quand,
+    dansJours: Math.max(0, Math.ceil((quand - maintenant) / JOUR_MS)),
+  };
+}
+
+// Le texte du pas en cours. L'appel n'a pas de message : il a un script, parce
+// qu'on ne colle pas un texte dans un téléphone.
+function messageActivation(p, rang) {
+  const prenom = (p?.firstName || "").trim();
+  const bonjour = prenom ? `Bonjour ${prenom},` : "Bonjour,";
+  const moi = (_colorDataRef?.settings?.admin?.firstName || "Sébastien").trim();
+
+  if (rang === 1) {
+    return {
+      canal: "sms", sujet: "",
+      corps: [
+        `Bonjour ${prenom || ""}`.trim() + `, ${moi} de Frangola.`,
+        "Je vous ai envoyé vos accès à votre espace partenaire il y a quelques jours — pensez à regarder vos spams.",
+        "Et au fait : vous avez un compromis en cours en ce moment ? Un nom et un numéro me suffisent, je m'occupe du reste.",
+      ].join(" "),
+    };
+  }
+
+  if (rang === 2) {
+    return {
+      canal: "appel", sujet: "",
+      corps: [
+        `${bonjour} ${moi} de Frangola. Je ne vous appelle pas pour vous relancer sur votre inscription.`,
+        "",
+        "Je voulais juste savoir : vous avez un client qui signe en ce moment ?",
+        "",
+        "— Si oui : « Ne vous embêtez pas avec l'espace. Donnez-moi son nom et son numéro, je crée le dossier moi-même et je vous envoie le lien pour le suivre. »",
+        "— Si non : « Pas de souci. Je vous rappelle dans six semaines, et d'ici là gardez-moi en tête dès qu'un compromis se signe. »",
+        "",
+        "Ne repartez jamais de cet appel sans un nom, ou une date de rappel.",
+      ].join("\n"),
+    };
+  }
+
+  return {
+    canal: "mail",
+    sujet: "Je vous laisse tranquille",
+    corps: [
+      bonjour, "",
+      "Je ne vous relancerai plus — vous avez sûrement d'autres priorités, et c'est bien normal.",
+      "",
+      "Votre accès reste ouvert, sans limite de temps et sans engagement. Le jour où un de vos clients signe un prêt, un simple message avec son nom et son numéro suffit : je m'occupe de son assurance, et vous touchez la moitié des honoraires sans rien avoir à faire de plus.",
+      "",
+      "Bonne continuation, et à une prochaine fois peut-être.",
+      "", "À très vite,",
+    ].join("\n"),
+  };
+}
+
 function etatDecrochage(p, dossiers, maintenant = Date.now()) {
   if (!p || p.deleted || p.active === false) return null;
   const r = rythmePartenaire(p, dossiers, maintenant);
@@ -13111,14 +13248,18 @@ function etatDecrochage(p, dossiers, maintenant = Date.now()) {
 
   // Jamais rien déposé. Deux situations très différentes derrière le même zéro.
   if (r.n === 0) {
-    if (anciennete < DECROCHAGE.demarrage) return null;
     if (connexionJ === null) {
+      // Celui-là entre dans la séquence d'activation, qui démarre au bout de
+      // deux jours : c'est le moment où son « oui » est encore chaud. Attendre
+      // quinze jours comme pour les autres, c'est arriver après la bataille.
+      if (anciennete < SEQUENCE_ACTIVATION[0].jour) return null;
       return {
         code: "jamais_connecte", rang: 0, depuis: r.entree, jours: anciennete,
         groupe: "Jamais démarré · jamais connecté",
         detail: `Accès créé il y a ${anciennete} j, jamais ouvert · 0 dossier`,
       };
     }
+    if (anciennete < DECROCHAGE.demarrage) return null;
     const nb = Number(p.connexions) || 1;
     return {
       code: "sans_dossier", rang: 1, depuis: r.entree, jours: anciennete,
@@ -13184,6 +13325,9 @@ function partenairesQuiDecrochent(data, maintenant = Date.now()) {
     });
 }
 const LIBELLE_DECROCHAGE = {
+  activation1: "séquence d'activation · SMS",
+  activation2: "séquence d'activation · appel",
+  activation3: "séquence d'activation · dernier mail",
   jamais_connecte: "accès jamais activé",
   sans_dossier: "connecté mais aucun dossier",
   decroche: "production arrêtée",
@@ -13239,13 +13383,194 @@ function messageRelance(p, code) {
   };
 }
 
+// ─── La recherche globale ────────────────────────────────────────────────
+// À trois cents partenaires et mille dossiers, se rappeler dans quel onglet
+// chercher coûte plus de temps que la recherche elle-même. Une seule barre,
+// qui cherche partout : le nom d'un client, celui d'un partenaire, sa ville,
+// son téléphone, son réseau, ou un mandataire.
+const RECHERCHE_MAX = 8;
+
+function resultatsRecherche(data, texte) {
+  const q = cleComparaison(texte);
+  if (q.length < 2) return [];
+  const out = [];
+
+  // On cherche dans plusieurs champs à la fois : on tape ce qu'on a en tête,
+  // pas ce que la base a rangé dans telle colonne.
+  const colle = (...morceaux) => cleComparaison(morceaux.filter(Boolean).join(" "));
+  // Un nom dont UN MOT commence par ce qu'on tape passe devant : « mar » doit
+  // sortir MARTIN avant DUMARSAIS. On teste chaque mot, pas la chaîne entière,
+  // sinon un prénom en tête ferait rater le nom de famille.
+  const rang = (...morceaux) => morceaux
+    .filter(Boolean)
+    .flatMap(x => String(x).split(/[\s'’-]+/))
+    .some(mot => cleComparaison(mot).startsWith(q)) ? 0 : 1;
+
+  for (const p of (data?.partners || [])) {
+    if (p.deleted) continue;
+    const cle = colle(p.firstName, p.name, p.company, p.ville, p.postalCode, p.email, p.telephone);
+    if (!cle.includes(q)) continue;
+    out.push({
+      type: "partenaire", id: p.id, objet: p,
+      titre: nomPartenaire(p),
+      detail: [p.company, p.ville, p.active === false ? "inactif" : null].filter(Boolean).join(" · ") || "partenaire",
+      // Le tri ne regarde que le nom de la personne : une ville qui contient
+      // « mar » ne doit pas passer devant un MARTIN. Elle reste trouvable,
+      // simplement plus bas.
+      rang: rang(p.firstName, p.name),
+    });
+  }
+
+  for (const d of (data?.dossiers || [])) {
+    const cle = colle(d.clientFirstName, d.clientLastName, d.coClientFirstName, d.coClientLastName,
+      d.clientPhone, d.coClientPhone);
+    if (!cle.includes(q)) continue;
+    const sien = (data?.partners || []).find(x => x.id === d.partnerId);
+    out.push({
+      type: "client", id: d.id, objet: d,
+      titre: clientName(d),
+      detail: [d.status, sien ? nomPartenaire(sien) : null].filter(Boolean).join(" · "),
+      rang: rang(d.clientFirstName, d.clientLastName, d.coClientFirstName, d.coClientLastName),
+    });
+  }
+
+  for (const m of (data?.mandataires || [])) {
+    if (m.deleted) continue;
+    const cle = colle(m.firstName, m.name, m.email);
+    if (!cle.includes(q)) continue;
+    out.push({
+      type: "mandataire", id: m.id, objet: m,
+      titre: m.firstName || m.name,
+      detail: m.role === "manager" ? "mandataire · manager" : "mandataire",
+      rang: rang(m.firstName, m.name),
+    });
+  }
+
+  // Les mandataires sont peu nombreux et se cherchent rarement : ils passent
+  // en dernier à pertinence égale, pour ne pas occuper la liste.
+  const poids = { partenaire: 0, client: 1, mandataire: 2 };
+  out.sort((a, b) => a.rang - b.rang || poids[a.type] - poids[b.type] || a.titre.localeCompare(b.titre, "fr"));
+  return out;
+}
+
+function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
+  const [q, setQ] = useState("");
+  const [ouvert, setOuvert] = useState(false);
+  const [actif, setActif] = useState(0);
+  const resultats = ouvert ? resultatsRecherche(data, q) : [];
+  const vus = resultats.slice(0, RECHERCHE_MAX);
+
+  function aller(r) {
+    if (!r) return;
+    if (r.type === "partenaire") onPartenaire?.(r.objet);
+    else if (r.type === "client") onDossier?.(r.objet);
+    else onMandataire?.(r.objet);
+    setQ(""); setOuvert(false); setActif(0);
+  }
+
+  function clavier(e) {
+    if (e.key === "Escape") { setQ(""); setOuvert(false); e.currentTarget.blur(); return; }
+    if (!vus.length) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); setActif(i => (i + 1) % vus.length); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActif(i => (i - 1 + vus.length) % vus.length); }
+    else if (e.key === "Enter") { e.preventDefault(); aller(vus[Math.min(actif, vus.length - 1)]); }
+  }
+
+  const TEINTE = {
+    partenaire: "bg-teal-50 text-teal-700 border-teal-200",
+    client: "bg-sky-50 text-sky-800 border-sky-200",
+    mandataire: "bg-violet-50 text-violet-700 border-violet-200",
+  };
+
+  return (
+    <div className="relative w-full sm:w-80 shrink-0">
+      <input
+        value={q}
+        onChange={e => { setQ(e.target.value); setOuvert(true); setActif(0); }}
+        onFocus={() => setOuvert(true)}
+        /* Un clic sur un résultat passe par le blur : on laisse le temps au
+           clic d'arriver avant de fermer la liste. */
+        onBlur={() => setTimeout(() => setOuvert(false), 160)}
+        onKeyDown={clavier}
+        placeholder="Chercher un partenaire, un client, un mandataire…"
+        aria-label="Recherche"
+        className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">⌕</span>
+      {q && (
+        <button onMouseDown={e => e.preventDefault()} onClick={() => { setQ(""); setOuvert(false); }}
+          title="Effacer" className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
+          <X size={15} />
+        </button>
+      )}
+
+      {ouvert && cleComparaison(q).length >= 2 && (
+        <div className="absolute z-30 mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
+          {vus.length === 0 ? (
+            <div className="px-3 py-2.5 text-xs text-gray-400">Rien trouvé pour « {q} ».</div>
+          ) : (<>
+            {vus.map((r, i) => (
+              <button key={`${r.type}-${r.id}`}
+                onMouseDown={e => e.preventDefault()}
+                onMouseEnter={() => setActif(i)}
+                onClick={() => aller(r)}
+                className={`w-full text-left px-3 py-2 flex items-center gap-2 transition ${i === actif ? "fa-bg-offwhite" : "bg-white"}`}>
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border shrink-0 ${TEINTE[r.type]}`}>
+                  {r.type === "partenaire" ? "partenaire" : r.type === "client" ? "client" : "mandataire"}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm fa-navy font-medium truncate">{r.titre}</span>
+                  <span className="block text-[11px] text-gray-400 truncate">{r.detail}</span>
+                </span>
+              </button>
+            ))}
+            {resultats.length > vus.length && (
+              <div className="px-3 py-1.5 text-[11px] text-gray-400 border-t border-gray-100">
+                {resultats.length - vus.length} autre{resultats.length - vus.length > 1 ? "s" : ""} — précisez votre recherche.
+              </div>
+            )}
+          </>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PartenairesQuiDecrochent({ data, onRelancer, onOuvrirPartenaire, canEdit }) {
   const [copie, setCopie] = useState(null);
   const [tout, setTout] = useState(false);
+  const [scriptOuvert, setScriptOuvert] = useState(null);
+  const [finiesVues, setFiniesVues] = useState(false);
   const lignes = partenairesQuiDecrochent(data);
-  const actifs = lignes.filter(x => !x.veille || x.veille.type !== "ignore");
-  const misDeCote = lignes.length - actifs.length;
-  const aTraiter = actifs.filter(x => !x.veille).length;
+  const misDeCote = lignes.filter(x => x.veille && x.veille.type === "ignore").length;
+
+  // Ceux qui n'ont jamais ouvert leur accès suivent la séquence d'activation :
+  // ce n'est pas la veille générique de quinze jours qui décide s'ils sont à
+  // traiter aujourd'hui, c'est le calendrier de leurs trois pas.
+  const enSequence = [];
+  const autres = [];
+  for (const x of lignes) {
+    if (x.veille && x.veille.type === "ignore") continue;
+    if (x.etat.code === "jamais_connecte") {
+      const seq = etapeActivation(x.p);
+      if (seq) { enSequence.push({ ...x, seq }); continue; }
+    }
+    if (!x.veille || x.veille.type !== "ignore") autres.push(x);
+  }
+  // Le plus urgent d'abord : ce qui est dû aujourd'hui, puis ce qui vient.
+  enSequence.sort((a, b) => {
+    if (a.seq.terminee !== b.seq.terminee) return a.seq.terminee ? 1 : -1;
+    if (a.seq.due !== b.seq.due) return a.seq.due ? -1 : 1;
+    // Une séquence déjà commencée passe avant une nouvelle : la personne est
+    // tiède, elle a eu un SMS ou un appel, et un plan qu'on abandonne au
+    // milieu ne vaut pas mieux que pas de plan du tout.
+    if (a.seq.faites !== b.seq.faites) return b.seq.faites - a.seq.faites;
+    return (a.seq.quand || 0) - (b.seq.quand || 0);
+  });
+  const sequenceDues = enSequence.filter(x => x.seq.due && !x.seq.terminee);
+  const sequenceAVenir = enSequence.filter(x => !x.seq.due && !x.seq.terminee);
+  const sequenceFinies = enSequence.filter(x => x.seq.terminee);
+  const actifs = autres;
+  const aTraiter = actifs.filter(x => !x.veille).length + sequenceDues.length;
 
   async function relancer(p, code) {
     const { corps } = messageRelance(p, code);
@@ -13256,6 +13581,77 @@ function PartenairesQuiDecrochent({ data, onRelancer, onOuvrirPartenaire, canEdi
     // relance, et la ligne se met en veille quinze jours.
     if (ok) onRelancer?.(p.id, code);
   }
+
+  // Un pas de la séquence. Le SMS et le mail se copient ; l'appel se coche,
+  // parce qu'on ne colle pas un texte dans un téléphone.
+  async function faireEtape(p, seq) {
+    const rang = seq.etape.rang;
+    const code = codeActivation(rang);
+    if (seq.etape.canal === "appel") {
+      onRelancer?.(p.id, code);
+      setScriptOuvert(null);
+      return;
+    }
+    const { corps } = messageActivation(p, rang);
+    const ok = seq.etape.canal === "sms"
+      ? await copierRiche(corps.replace(/\n/g, " "), corps)
+      : await copierRiche(messageEnHtml(corps), corps);
+    setCopie(ok ? p.id : "echec");
+    setTimeout(() => setCopie(null), 3500);
+    if (ok) onRelancer?.(p.id, code);
+  }
+
+  const LigneSequence = ({ p, seq, grise }) => {
+    const e = seq.etape;
+    return (
+      <div className={`border rounded-xl px-3 py-2 mb-1.5 ${grise ? "border-dashed border-gray-200 opacity-70" : seq.due ? "border-amber-300 bg-amber-50/40" : "border-gray-200"}`}>
+        <div className="flex items-start sm:items-center gap-2.5 flex-wrap">
+          <span className={`w-2 h-2 rounded-full shrink-0 mt-1.5 sm:mt-0 ${seq.due ? "bg-amber-500" : seq.terminee ? "bg-gray-300" : "bg-gray-300"}`} />
+          <span className="flex-1 min-w-[150px]">
+            <button onClick={() => onOuvrirPartenaire?.(p)} className="block fa-navy font-bold text-sm truncate max-w-full hover:underline text-left">
+              {nomPartenaire(p)}
+            </button>
+            <span className="block text-[11px] text-gray-500">
+              {seq.terminee
+                ? <>Séquence terminée{seq.finieLe ? ` le ${fmtDate(seq.finieLe)}` : ""} — accès laissé ouvert, on ne relance plus.</>
+                : <>
+                    <strong className={seq.due ? "text-amber-800" : "fa-navy"}>Étape {e.rang}/3 · {e.libelle}</strong>
+                    {" — "}{seq.due ? "à faire aujourd'hui" : `dans ${seq.dansJours} j`}
+                    {seq.faites > 0 && <span className="text-gray-400"> · {seq.faites} pas déjà fait{seq.faites > 1 ? "s" : ""}</span>}
+                  </>}
+            </span>
+          </span>
+          {!seq.terminee && e.canal === "appel" && (
+            <span className="text-[11px] shrink-0">
+              <Copiable valeur={p.telephone} manquant="pas de téléphone" titre="Copier le numéro" mono />
+            </span>
+          )}
+          {canEdit && !seq.terminee && (
+            <div className="flex items-center gap-2 shrink-0">
+              {e.canal === "appel" && (
+                <button onClick={() => setScriptOuvert(v => v === p.id ? null : p.id)}
+                  className="text-[11px] fa-teal-text hover:underline">
+                  {scriptOuvert === p.id ? "masquer" : "script"}
+                </button>
+              )}
+              <button onClick={() => faireEtape(p, seq)}
+                className={`text-[11px] font-bold px-2.5 py-1.5 rounded-lg transition ${seq.due ? "fa-bg-gold" : "bg-white border border-gray-200 text-gray-600"}`}>
+                {copie === p.id ? "✓ Copié"
+                  : e.canal === "sms" ? "Copier le SMS"
+                  : e.canal === "appel" ? "Appel fait"
+                  : "Copier le mail"}
+              </button>
+            </div>
+          )}
+        </div>
+        {scriptOuvert === p.id && !seq.terminee && e.canal === "appel" && (
+          <pre className="mt-2 text-[11px] text-gray-600 whitespace-pre-wrap font-sans fa-bg-offwhite rounded-lg px-3 py-2">
+            {messageActivation(p, e.rang).corps}
+          </pre>
+        )}
+      </div>
+    );
+  };
 
   // Le quota est PAR groupe, pas global : avec quarante « jamais connectés »,
   // un quota global ferait disparaître les trois autres catégories de l'écran.
@@ -13292,12 +13688,68 @@ function PartenairesQuiDecrochent({ data, onRelancer, onOuvrirPartenaire, canEdi
         {misDeCote > 0 && <span className="text-gray-400"> · {misDeCote} mis de côté</span>}
       </p>
 
-      {actifs.length === 0 ? (
+      {/* ─── La séquence d'activation ─────────────────────────────────────
+          Ceux qui ont dit oui et n'ont jamais ouvert leur accès. Ils ne
+          décrochent pas : ils n'ont jamais démarré, et ça se traite avec un
+          calendrier, pas au fil de l'eau. */}
+      {enSequence.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-baseline justify-between gap-2 flex-wrap mb-1.5">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-gray-400">
+              Séquence d'activation ({enSequence.length})
+            </span>
+            <span className={`text-[11px] font-semibold ${sequenceDues.length ? "text-amber-800" : "text-gray-400"}`}>
+              {sequenceDues.length > 0
+                ? `${sequenceDues.length} à relancer aujourd'hui`
+                : "rien à faire aujourd'hui"}
+            </span>
+          </div>
+
+          {/* Une liste de cinquante relances ne se traite pas : on en montre
+              une poignée, et on y revient demain. Le compteur au-dessus dit
+              combien il en reste. */}
+          {sequenceDues.slice(0, tout ? 60 : 6).map(({ p: part, seq }) =>
+            <LigneSequence key={part.id} p={part} seq={seq} />)}
+          {!tout && sequenceDues.length > 6 && (
+            <button onClick={() => setTout(true)} className="text-xs fa-teal-text hover:underline mb-1.5">
+              Voir les {sequenceDues.length - 6} autres à relancer →
+            </button>
+          )}
+
+          {sequenceAVenir.slice(0, tout ? 30 : 3).map(({ p: part, seq }) =>
+            <LigneSequence key={part.id} p={part} seq={seq} grise />)}
+          {!tout && sequenceAVenir.length > 3 && (
+            <button onClick={() => setTout(true)} className="text-xs fa-teal-text hover:underline mb-1.5">
+              Voir les {sequenceAVenir.length - 3} autres en attente →
+            </button>
+          )}
+
+          {sequenceFinies.length > 0 && (
+            <div className="mt-1">
+              <button onClick={() => setFiniesVues(v => !v)} className="text-xs text-gray-400 hover:text-gray-700">
+                {finiesVues ? "Masquer" : `${sequenceFinies.length} séquence${sequenceFinies.length > 1 ? "s" : ""} terminée${sequenceFinies.length > 1 ? "s" : ""}`}
+                {finiesVues ? "" : " — plus relancés"}
+              </button>
+              {finiesVues && sequenceFinies.slice(0, 20).map(({ p: part, seq }) =>
+                <LigneSequence key={part.id} p={part} seq={seq} grise />)}
+            </div>
+          )}
+
+          <p className="text-[11px] text-gray-400 mt-1.5">
+            {SEQUENCE_ACTIVATION.map(e => `J+${e.jour} ${e.libelle.toLowerCase()}`).join(" · ")}, puis on s'arrête.
+            Un partenaire qui n'a pas répondu à trois sollicitations a répondu : son accès reste ouvert,
+            mais on ne l'appelle plus. L'appel ne sert pas à relancer l'inscription — il sert à demander
+            s'il a un client, et à proposer de saisir le dossier à sa place.
+          </p>
+        </div>
+      )}
+
+      {actifs.length === 0 && enSequence.length === 0 ? (
         <div className="text-sm rounded-xl px-3 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-900">
           ✅ Personne ne décroche. Tous vos partenaires actifs ont envoyé un dossier dans leur rythme habituel.
         </div>
       ) : (<>
-        {groupes.map(g => (
+        {actifs.length > 0 && groupes.map(g => (
           <div key={g.titre} className="mt-3 first:mt-0">
             <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">
               {g.titre} ({g.total})
@@ -14152,6 +14604,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
       setTab("dossiers");
       try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { /* ignore */ }
     },
+    // Les mandataires sont peu nombreux : ouvrir leur écran suffit, il n'y a
+    // pas de liste à filtrer pour les retrouver.
+    ouvrirMandataire: () => {
+      setTab("mandataires");
+      try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { /* ignore */ }
+    },
   };
 
   // Ordre personnalisé des onglets et mode discret : deux réglages de confort,
@@ -14937,9 +15395,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
           return (
             <div className="space-y-6">
-              <div>
-                <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
-                <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="min-w-0">
+                  <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
+                  <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
+                </div>
+                <RechercheGlobale data={data}
+                  onPartenaire={(pa) => { navAdmin.ouvrirPartenaire(pa); setViewingPartnerId(pa.id); setViewingPartnerTab("analytique"); }}
+                  onDossier={navAdmin.ouvrirDossier}
+                  onMandataire={navAdmin.ouvrirMandataire} />
               </div>
 
               {/* Bloc héros : le seul élément sombre de l'écran, celui sur
@@ -15440,8 +15904,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         <>
                                           <SuiviBackOffice dossier={d} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} />
                                           <EcheancierDossier dossier={d} onUpdate={onUpdateDossierClient} />
-                                          <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} assureurs={listeAssureurs(data)} />
                                         </>
+                                      )}
+
+                                      {/* La récurrence se renseigne dès le devis : l'assureur, la
+                                          cotisation et le taux sont connus bien avant la signature,
+                                          et les retrouver trois semaines plus tard coûte un appel.
+                                          Le montant n'est compté qu'à la souscription. */}
+                                      {d.status !== "KO" && (
+                                        <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} assureurs={listeAssureurs(data)} />
                                       )}
 
                                       <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100">
