@@ -102,6 +102,34 @@ function uid() {
 // renouvelle lui-même. L'ancienne session maison, stockée en clair dans le
 // navigateur, est effacée au démarrage pour ne laisser aucune trace.
 const SESSION_KEY = "adp:session";
+
+// Une session absente n'est pas toujours une déconnexion. Un ordinateur qui se
+// réveille, un Wi-Fi qui change, un tunnel : le renouvellement du jeton échoue,
+// Supabase annonce SIGNED_OUT, et l'application renvoyait aussitôt à l'écran de
+// connexion — en pleine saisie, sans un mot d'explication.
+//
+// On revérifie donc avant de mettre quelqu'un dehors : plusieurs tentatives
+// espacées, le temps qu'une coupure passagère se répare. Rend l'utilisateur si
+// la session tient toujours, null si elle a vraiment disparu.
+const RECUP_SESSION_ESSAIS = 3;
+const RECUP_SESSION_PAUSE = 900;
+async function recupererSession(auth, {
+  essais = RECUP_SESSION_ESSAIS,
+  pause = RECUP_SESSION_PAUSE,
+  attendre = (ms) => new Promise(r => setTimeout(r, ms)),
+} = {}) {
+  for (let i = 0; i < essais; i++) {
+    try {
+      const { data } = await auth.getSession();
+      if (data?.session?.user) return data.session.user;
+    } catch (e) { /* réseau indisponible : on retente */ }
+    // Pauses croissantes : une coupure de quelques secondes doit être
+    // absorbée, mais on ne fait pas attendre une minute quelqu'un qui est
+    // réellement déconnecté.
+    if (i < essais - 1) await attendre(pause * (i + 1));
+  }
+  return null;
+}
 function purgeAncienneSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
 }
@@ -1712,17 +1740,34 @@ export default function App() {
   // ==========================================================================
   const [authUser, setAuthUser] = useState(null);
   const [authPret, setAuthPret] = useState(false);
+  const [logoutReason, setLogoutReason] = useState(null);
+  // Vrai uniquement quand c'est NOUS qui fermons la session. Sans ce drapeau,
+  // impossible de distinguer « il a cliqué sur Se déconnecter » de « le réseau
+  // a hoqueté » : les deux arrivent ici sous la forme d'une session absente.
+  const deconnexionVoulue = useRef(false);
 
   useEffect(() => {
     purgeAncienneSession();
     let vivant = true;
+
     supabase.auth.getSession().then(({ data: s }) => {
       if (!vivant) return;
       setAuthUser(s?.session?.user || null);
       setAuthPret(true);
     }).catch(() => { if (vivant) setAuthPret(true); });
+
     const { data: abo } = supabase.auth.onAuthStateChange((_evt, session) => {
-      setAuthUser(session?.user || null);
+      if (!vivant) return;
+      if (session?.user) { setAuthUser(session.user); return; }
+      // Sortie demandée : on obéit sans discuter.
+      if (deconnexionVoulue.current) { setAuthUser(null); return; }
+      // Sinon, on vérifie avant de conclure — et si la session a vraiment
+      // disparu, on le dit, au lieu de laisser un écran de connexion nu.
+      recupererSession(supabase.auth).then(u => {
+        if (!vivant) return;
+        if (u) setAuthUser(u);
+        else { setLogoutReason("session"); setAuthUser(null); }
+      });
     });
     return () => { vivant = false; abo?.subscription?.unsubscribe?.(); };
   }, []);
@@ -1905,11 +1950,13 @@ export default function App() {
     return { ...nextData, activityLog: [entry, ...base].slice(0, 300) };
   }
 
-  const [logoutReason, setLogoutReason] = useState(null);
   // Ferme la session côté Supabase ET côté application. Tant que la session
   // Supabase n'est pas fermée, un rechargement de page reconnecterait la
   // personne : c'est elle qui fait foi maintenant, plus l'état React.
   async function deconnexion(reason) {
+    // On prévient l'écoute de session : ce qui suit est voulu, il ne faut pas
+    // chercher à récupérer la session.
+    deconnexionVoulue.current = true;
     roleResolu.current = null;
     setPendingAuth(null);
     setCurrentPartner(null); setCurrentAdmin(null); setCurrentMandataire(null);
@@ -1920,10 +1967,16 @@ export default function App() {
     ecrirePorte(null);
     purgeAncienneSession();
     try { await supabase.auth.signOut(); } catch (e) { /* session déjà close */ }
+    // La prochaine disparition de session sera de nouveau suspecte.
+    deconnexionVoulue.current = false;
   }
   function logout(reason) { deconnexion(reason); }
 
-  const INACTIVITY_LIMIT_MS = 60 * 60 * 1000; // 1 heure
+  // Deux heures plutôt qu'une : l'outil reste ouvert toute la journée sur le
+  // poste, et une déconnexion en milieu d'après-midi coûte plus qu'elle ne
+  // protège. Il garde des pièces d'identité de clients, donc on ne va pas
+  // au-delà — un poste laissé sans surveillance finit par se refermer.
+  const INACTIVITY_LIMIT_MS = 2 * 60 * 60 * 1000; // 2 heures
   const lastActivityRef = useRef(Date.now());
   const isLoggedIn = !!(currentAdmin || currentMandataire || currentPartner);
   useEffect(() => {
@@ -1932,11 +1985,21 @@ export default function App() {
     const markActive = () => { lastActivityRef.current = Date.now(); };
     const events = ["mousemove", "mousedown", "keydown", "scroll", "touchstart"];
     events.forEach(ev => window.addEventListener(ev, markActive, { passive: true }));
+    // Un onglet en arrière-plan ne reçoit aucun de ces signaux : on travaillait
+    // ailleurs sur la même machine, et on revenait déconnecté. Revenir sur
+    // l'onglet EST un signe de présence — quelqu'un est bien devant l'écran —
+    // et le compteur repart de là. Le minuteur continue de tourner pendant que
+    // l'onglet est caché : un poste abandonné se referme quand même.
+    const retour = () => { if (!document.hidden) markActive(); };
+    document.addEventListener("visibilitychange", retour);
+    window.addEventListener("focus", markActive);
     const interval = setInterval(() => {
       if (Date.now() - lastActivityRef.current > INACTIVITY_LIMIT_MS) logout("inactivity");
     }, 30000);
     return () => {
       events.forEach(ev => window.removeEventListener(ev, markActive));
+      document.removeEventListener("visibilitychange", retour);
+      window.removeEventListener("focus", markActive);
       clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3253,7 +3316,12 @@ function Landing({ onSelect, logoutReason }) {
     <div className="min-h-screen flex flex-col">
       {logoutReason === "inactivity" && (
         <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
-          Vous avez été déconnecté après 1h d'inactivité, par sécurité.
+          Vous avez été déconnecté après 2 h sans activité, par sécurité.
+        </div>
+      )}
+      {logoutReason === "session" && (
+        <div className="fa-bg-gold fa-navy text-sm font-medium text-center py-2.5 px-4">
+          Votre session a expiré — reconnectez-vous. Rien n'est perdu : tout ce qui était enregistré l'est resté.
         </div>
       )}
       {logoutReason === "desactive" && (
