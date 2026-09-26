@@ -1257,12 +1257,15 @@ function calendrierRetrocession(partner, dossiers) {
     let m = mois.find(x => x.cle === cle);
     if (!m) {
       m = {
-        cle, montant: 0, bonus: 0, nb: 0, recus: 0,
+        cle, montant: 0, bonus: 0, nb: 0, recus: 0, lignes: [],
         libelle: new Date(l.datePrevue + "T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }),
       };
       mois.push(m);
     }
     m.montant += l.montant; m.bonus += (l.bonus || 0); m.nb += 1; if (l.recu) m.recus += 1;
+    // On garde les échéances qui composent le mois : c'est ce qui permet de
+    // déplier le détail client par client au moment de facturer.
+    m.lignes.push(l);
   }
   for (const m of mois) {
     // Tolérance de lecture : les versements enregistrés avant le renommage
@@ -1275,6 +1278,42 @@ function calendrierRetrocession(partner, dossiers) {
   mois.sort((a, b) => a.cle.localeCompare(b.cle));
   const sansDate = lignes.filter(l => !l.datePrevue).length;
   return { mois, sansDate };
+}
+
+// Le détail d'un mois, client par client. Un partenaire qui facture dix-huit
+// dossiers d'un coup doit pouvoir cocher chaque ligne : on trie du plus gros
+// au plus petit, et la somme des parts vaut exactement le montant du mois.
+function detailMois(m) {
+  return (m?.lignes || [])
+    .map(l => ({
+      cle: l.cle,
+      nom: clientName(l.dossier),
+      numero: l.numero,
+      total: l.total,
+      part: l.montant + (l.bonus || 0),
+      bonus: l.bonus || 0,
+      recu: !!l.recu,
+    }))
+    .sort((a, b) => b.part - a.part || a.nom.localeCompare(b.nom, "fr"));
+}
+function totalDetail(lignes) {
+  return (lignes || []).reduce((t, c) => t + c.part, 0);
+}
+function detailEnTexte(titre, lignes) {
+  const l = ["Client\tÉchéance\tMontant"];
+  for (const c of lignes) l.push(c.nom + "\t" + c.numero + "/" + c.total + "\t" + fmtEuroPrecis(c.part));
+  l.push("Total (" + lignes.length + ")\t\t" + fmtEuroPrecis(totalDetail(lignes)));
+  return titre + "\n" + l.join("\n");
+}
+function detailEnHtml(titre, lignes) {
+  const e = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const corps = lignes.map(c =>
+    "<tr><td>" + e(c.nom) + "</td><td>" + c.numero + "/" + c.total + "</td>" +
+    "<td align=\"right\">" + e(fmtEuroPrecis(c.part)) + "</td></tr>").join("");
+  return "<p><strong>" + e(titre) + "</strong></p><table border=\"1\" cellpadding=\"4\" cellspacing=\"0\">" +
+    "<tr><th>Client</th><th>Échéance</th><th>Montant</th></tr>" + corps +
+    "<tr><td><strong>Total (" + lignes.length + ")</strong></td><td></td>" +
+    "<td align=\"right\"><strong>" + e(fmtEuroPrecis(totalDetail(lignes))) + "</strong></td></tr></table>";
 }
 
 // ─── Pot commun ─────────────────────────────────────────────────────────────
@@ -3808,6 +3847,79 @@ function Copiable({ valeur, manquant, titre, mono }) {
   );
 }
 
+// Le détail d'un mois de rétrocession, déplié sous la ligne du mois. La
+// ligne de total est le point de contrôle : c'est elle qui doit correspondre
+// au montant facturé.
+function DetailRetrocession({ mois, titre }) {
+  const [copie, setCopie] = useState(false);
+  const clients = detailMois(mois);
+  if (clients.length === 0) return null;
+  const intitule = titre || ((mois.libelle || "").charAt(0).toUpperCase() + (mois.libelle || "").slice(1));
+
+  async function copier() {
+    const ok = await copierRiche(detailEnHtml(intitule, clients), detailEnTexte(intitule, clients));
+    setCopie(ok ? "ok" : "echec");
+    setTimeout(() => setCopie(false), 2000);
+  }
+
+  return (
+    <div className="mt-1.5 rounded-lg border border-gray-200 bg-white overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border-b border-gray-200 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+        <span className="flex-1 min-w-0">Client</span>
+        <span className="hidden sm:block w-14 text-center shrink-0">Échéance</span>
+        <span className="w-20 text-right shrink-0">Votre part</span>
+      </div>
+      <div className="max-h-[232px] overflow-y-auto">
+        {clients.map(c => (
+          <div key={c.cle} className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-100 last:border-b-0">
+            <span className="flex-1 min-w-0 leading-tight">
+              <span className="block truncate text-xs font-semibold fa-navy">{c.nom}</span>
+              {/* Sur téléphone la colonne échéance mangerait le nom : on la
+                  replie sous le nom, où elle tient sans rien serrer. */}
+              <span className="sm:hidden block text-[10px] text-gray-400">échéance {c.numero}/{c.total}</span>
+            </span>
+            <span className="hidden sm:block w-14 text-center shrink-0 text-[11px] text-gray-400">{c.numero}/{c.total}</span>
+            <span className="w-20 text-right shrink-0 leading-tight">
+              <span className="block text-xs font-bold fa-navy">{fmtEuroPrecis(c.part)}</span>
+              {c.bonus > 0.005 && (
+                <span className="block text-[10px] font-semibold text-violet-700">⚡ dont {fmtEuroPrecis(c.bonus)}</span>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-t border-gray-200">
+        <span className="flex-1 min-w-0 text-[11px] font-bold fa-navy">
+          Total — {clients.length} client{clients.length > 1 ? "s" : ""}
+        </span>
+        <span className="text-sm font-extrabold fa-navy">{fmtEuroPrecis(totalDetail(clients))}</span>
+      </div>
+      <div className="px-3 py-2 border-t border-gray-100">
+        <button onClick={copier}
+          className="fa-tap w-full inline-flex items-center justify-center gap-1.5 text-xs font-semibold fa-navy fa-bg-gold rounded-lg py-2 hover:brightness-95 transition">
+          {copie === "ok" ? <Check size={13} /> : <Copy size={13} />}
+          {copie === "ok" ? "Détail copié" : copie === "echec" ? "Copie impossible" : "Copier le détail"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// La pastille qui ouvre le détail. Elle se place à gauche du montant : la
+// ligne du mois reste une ligne, pas un bouton — elle contient déjà le lien
+// vers l'ordre de virement, et on n'imbrique pas deux boutons.
+function PastilleDetail({ nb, ouvert, onClick }) {
+  if (!nb) return null;
+  return (
+    <button onClick={onClick} aria-expanded={ouvert}
+      title={ouvert ? "Masquer le détail" : "Voir le détail client par client"}
+      className="fa-tap inline-flex items-center gap-1 text-[11px] font-bold text-gray-600 hover:fa-teal-text bg-white/70 border border-black/10 rounded-full px-2 py-0.5 transition">
+      <ChevronDown size={11} className={`transition-transform ${ouvert ? "rotate-180" : ""}`} />
+      {nb} client{nb > 1 ? "s" : ""}
+    </button>
+  );
+}
+
 // Message pour installer l'espace partenaire sur le téléphone, comme une appli.
 function messageAppliMobile(cible) {
   const prenom = (cible.firstName || "").trim();
@@ -4535,6 +4647,10 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
   const [filtrePaiement, setFiltrePaiement] = useState("tous");
+  // Le mois de rétrocession déplié dans « Mes rétrocessions ». Un seul à la
+  // fois : on compare rarement deux mois, et deux listes ouvertes noient
+  // l'écran du téléphone.
+  const [detailOuvert, setDetailOuvert] = useState(null);
   const [clientFirstName, setClientFirstName] = useState("");
   const [clientLastName, setClientLastName] = useState("");
   const [clientPhone, setClientPhone] = useState("");
@@ -5415,10 +5531,11 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                         </div>
                         {lignesVue.map(m => (
                           <div key={m.cle}
-                            className={`flex items-center justify-between gap-2 flex-wrap rounded-lg px-3 py-2 border ${
+                            className={`rounded-lg px-3 py-2 border ${
                               m.etat === "regle" ? "bg-emerald-50 border-emerald-200"
                               : m.etat === "a_regler" ? "fa-bg-gold border-amber-300"
                               : "fa-bg-offwhite border-transparent"}`}>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
                             <span className={`text-sm fa-navy font-medium ${auForfait ? "" : "capitalize"}`}>{m.libelle}</span>
                             <span className="text-xs text-gray-500">
                               {m.etat === "regle"
@@ -5436,6 +5553,10 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                                   <Download size={12} /> {m.versement.mode === "Carte cadeau" ? "carte cadeau" : "ordre de virement"}
                                 </button>
                               )}
+                              {!auForfait && (
+                                <PastilleDetail nb={(m.lignes || []).length} ouvert={detailOuvert === m.cle}
+                                  onClick={() => setDetailOuvert(detailOuvert === m.cle ? null : m.cle)} />
+                              )}
                               {(m.bonus || 0) > 0.005 && m.etat !== "regle" ? (
                                 <span className="flex flex-col items-end leading-tight">
                                   <span className="text-[11px] text-gray-500">rétrocession {fmtEuroPrecis(m.montant)}</span>
@@ -5450,6 +5571,8 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                                 </span>
                               )}
                             </span>
+                            </div>
+                            {!auForfait && detailOuvert === m.cle && <DetailRetrocession mois={m} />}
                           </div>
                         ))}
                       </div>
@@ -12555,6 +12678,9 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
   // La liste peut compter des dizaines de lignes : on doit pouvoir la replier
   // pour retrouver le reste de l'onglet sans faire défiler tout l'écran.
   const [replie, setReplie] = useState(false);
+  // Avant de payer, on veut pouvoir vérifier de quels clients se compose la
+  // somme. Un seul détail ouvert à la fois.
+  const [detailId, setDetailId] = useState(null);   // "partnerId|mois"
   const champ = useRef(null);
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
@@ -12579,7 +12705,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
         }))
       : calendrierRetrocession(p, siens).mois.map(m => ({
           cle: m.cle, libelle: m.libelle, montant: m.montant + (m.bonus || 0), bonus: m.bonus || 0,
-          etat: m.etat, versement: m.versement, detail: null,
+          etat: m.etat, versement: m.versement, detail: null, lignes: m.lignes,
         }));
     for (const it of items) {
       if (arrete && it.etat !== "regle") continue;
@@ -12625,7 +12751,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
         <div className="text-sm text-gray-400 mb-3">Rien à régler pour l'instant.</div>
       ) : (
         <div className="space-y-1.5">
-          {lignes.map(({ p, m }) => {
+          {lignes.map(({ p, m, forfait }) => {
             const cle = p.id + "|" + m.cle;
             const ouvert = ouvertId === cle;
             return (
@@ -12641,7 +12767,13 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
                       dont ⚡ {fmtEuroPrecis(m.bonus)} de prime
                     </span>
                   )}
-                  <span className="text-sm font-bold fa-navy ml-auto">{fmtEuroPrecis(m.montant)}</span>
+                  {!forfait && (
+                    <span className="ml-auto">
+                      <PastilleDetail nb={(m.lignes || []).length} ouvert={detailId === cle}
+                        onClick={() => setDetailId(detailId === cle ? null : cle)} />
+                    </span>
+                  )}
+                  <span className={`text-sm font-bold fa-navy ${forfait ? "ml-auto" : ""}`}>{fmtEuroPrecis(m.montant)}</span>
                   {!ouvert && (
                     <button onClick={() => { setOuvertId(cle); setDate(aujourdhui()); setFichier(null); setMode(modeParDefaut(p)); }}
                       className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">
@@ -12673,6 +12805,9 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
                     <button onClick={() => { setOuvertId(null); setFichier(null); }}
                       className="text-xs text-teal-900/60 hover:text-teal-900 px-2">Annuler</button>
                   </div>
+                )}
+                {!forfait && detailId === cle && (
+                  <DetailRetrocession mois={m} titre={nomDe(p) + " — " + m.libelle} />
                 )}
               </div>
             );
@@ -13521,7 +13656,7 @@ function resultatsRecherche(data, texte) {
   return out;
 }
 
-function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
+function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire, invite }) {
   const [q, setQ] = useState("");
   const [ouvert, setOuvert] = useState(false);
   const [actif, setActif] = useState(0);
@@ -13551,7 +13686,7 @@ function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
   };
 
   return (
-    <div className="relative w-full sm:w-80 shrink-0">
+    <div className="relative w-full">
       <input
         value={q}
         onChange={e => { setQ(e.target.value); setOuvert(true); setActif(0); }}
@@ -13560,7 +13695,7 @@ function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
            clic d'arriver avant de fermer la liste. */
         onBlur={() => setTimeout(() => setOuvert(false), 160)}
         onKeyDown={clavier}
-        placeholder="Chercher un partenaire, un client, un mandataire…"
+        placeholder={invite || "Partenaire, client, mandataire…"}
         aria-label="Recherche"
         className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">⌕</span>
@@ -13572,7 +13707,7 @@ function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
       )}
 
       {ouvert && cleComparaison(q).length >= 2 && (
-        <div className="absolute z-30 mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
+        <div className="absolute z-30 mt-1 left-0 right-0 lg:left-auto lg:w-[22rem] bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
           {vus.length === 0 ? (
             <div className="px-3 py-2.5 text-xs text-gray-400">Rien trouvé pour « {q} ».</div>
           ) : (<>
@@ -15215,6 +15350,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           };
           const feuillets = feuilletsVisibles(active, isFullAdmin);
 
+          const champRecherche = (invite) => (
+            <RechercheGlobale data={data} invite={invite}
+              onPartenaire={(pa) => { navAdmin.ouvrirPartenaire(pa); setViewingPartnerId(pa.id); setViewingPartnerTab("analytique"); }}
+              onDossier={navAdmin.ouvrirDossier}
+              onMandataire={navAdmin.ouvrirMandataire} />
+          );
+          const rechercheCourte = champRecherche("Partenaire, client…");
+          const recherche = champRecherche();
+
           const puce = "text-xs font-bold rounded-full min-w-[19px] h-[19px] px-1.5 flex items-center justify-center";
           // Compteurs d'alerte, remontés au niveau de la famille : on doit voir
           // qu'il y a quelque chose à traiter sans avoir à ouvrir l'onglet.
@@ -15249,7 +15393,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
           return (
             <div className="mb-7">
-              <div className="flex gap-1 items-center border-b border-gray-200 overflow-x-auto -mx-1 px-1">
+              {/* La recherche vit avec les onglets, pas dans l'accueil : elle
+                  est présente sur tous les écrans, à portée à tout moment. La
+                  bande d'onglets défile de son côté — la liste de résultats
+                  serait rognée si elle était dedans. */}
+              <div className="flex items-end gap-2 border-b border-gray-200">
+              <div className="flex gap-1 items-center overflow-x-auto flex-1 min-w-0 -mx-1 px-1">
                 {familles.map((c, i) => {
                   const Icone = c.icone ? ICONES_ONGLETS[c.icone] : null;
                   const ici = active.id === c.id;
@@ -15276,7 +15425,11 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     </div>
                   );
                 })}
-                <div className="flex items-center gap-1 shrink-0 ml-auto pb-1">
+              </div>
+                <div className="flex items-center gap-1.5 shrink-0 pb-1">
+                  <span className="hidden lg:block w-56">
+                    {rechercheCourte}
+                  </span>
                   <button onClick={() => {
                       if (!modeDemo && discret) basculerDiscret();
                       onBasculerDemo();
@@ -15297,6 +15450,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   </button>
                 </div>
               </div>
+              {/* Sur téléphone, la recherche passe sous les onglets : à côté
+                  d'eux elle ne laisserait la place à aucun libellé. */}
+              <div className="lg:hidden mt-2">{recherche}</div>
 
               {/* Les écrans de la famille active. Masqués quand il n'y en a
                   qu'un : afficher « Pilotage » tout seul n'apprend rien. */}
@@ -15463,15 +15619,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
           return (
             <div className="space-y-6">
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div className="min-w-0">
-                  <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
-                  <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
-                </div>
-                <RechercheGlobale data={data}
-                  onPartenaire={(pa) => { navAdmin.ouvrirPartenaire(pa); setViewingPartnerId(pa.id); setViewingPartnerTab("analytique"); }}
-                  onDossier={navAdmin.ouvrirDossier}
-                  onMandataire={navAdmin.ouvrirMandataire} />
+              <div className="min-w-0">
+                <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
+                <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
               </div>
 
               {/* Bloc héros : le seul élément sombre de l'écran, celui sur
