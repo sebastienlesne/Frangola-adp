@@ -8042,6 +8042,70 @@ function motifManquant(d) {
   return ca != null && ca !== "" && Number(ca) < HONORAIRES_SEUIL_MOTIF && !d?.motifHonorairesReduits;
 }
 
+// Honoraires réellement ENCAISSÉS depuis une date : on somme les échéances
+// reçues, pas les dossiers souscrits. Un dossier réglé en douze fois ne
+// compte que pour ce qui est tombé. Même lecture que l'encaissé du mois sur
+// l'écran d'accueil — un seul calcul pour les deux.
+function caEncaisseDepuis(dossiers, depuis) {
+  return (dossiers || []).filter(d => d.status !== "KO").reduce((s, d) => {
+    const ech = echeancesDe(d);
+    const parts = repartir(d.caAmount || 0, ech.length);
+    return s + ech.reduce((s2, e, i) => {
+      const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
+        : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
+      return s2 + (quand !== null && quand >= depuis ? parts[i] : 0);
+    }, 0);
+  }, 0);
+}
+
+// L'année civile en cours : son début, ce qui est écoulé, ce qui reste. Les
+// deux sont des fractions et leur somme fait douze — le 27 septembre, il ne
+// reste pas quatre mois pleins, il en reste 3,1. Compter septembre en entier
+// sous-estimerait le rythme à tenir d'un tiers.
+// `restantsAffiches` arrondit pour la phrase, jamais pour le calcul ; il ne
+// descend pas sous 1 pour que la dernière semaine de décembre ne demande pas
+// un rythme infini.
+function anneeEnCours(maintenant = Date.now()) {
+  const d = new Date(maintenant);
+  const an = d.getFullYear();
+  const debut = new Date(an, 0, 1).getTime();
+  const joursDuMois = new Date(an, d.getMonth() + 1, 0).getDate();
+  const ecoules = d.getMonth() + (d.getDate() - 1) / joursDuMois;
+  const restants = Math.max(1 / 30, 12 - ecoules);
+  return {
+    an, debut,
+    ecoules: Math.max(1 / 30, ecoules),
+    restants,
+    restantsAffiches: Math.max(1, Math.round(restants)),
+  };
+}
+
+// Le calcul à l'envers. Tout part de ce qui RESTE à faire et des mois qui
+// restent : en septembre, tenir 100 000 € ne demande pas le rythme d'une
+// année pleine, il demande celui d'un trimestre.
+function besoinsObjectif({ reste, ca, transfo, prod, activation, mois, inscrits = 0 }) {
+  const ok = ca > 0 && transfo > 0 && prod > 0 && activation > 0 && mois > 0;
+  if (!ok) return null;
+  if (reste <= 0) {
+    return { atteint: true, gagnes: 0, deposes: 0, parMois: 0, actifs: 0, total: 0, manque: 0 };
+  }
+  const ceil = (n) => Math.ceil(n - 0.0001);
+  const gagnes = reste / ca;
+  const deposes = gagnes / transfo;
+  const parMois = deposes / mois;
+  const actifs = parMois / prod;
+  const total = actifs / activation;
+  return {
+    atteint: false,
+    gagnes: ceil(gagnes), deposes: ceil(deposes),
+    parMois: Math.round(parMois * 10) / 10,
+    actifs: ceil(actifs), total: ceil(total),
+    manque: Math.max(0, ceil(total) - inscrits),
+  };
+}
+
+const PALIERS_OBJECTIF = [50000, 100000, 200000, 300000, 500000];
+
 function tauxRetrocession(dossiers) {
   const ca = dossiers.reduce((s, d) => s + (d.caAmount || 0), 0);
   if (ca <= 0) return TAUX_RETROCESSION_DEFAUT;
@@ -11986,151 +12050,219 @@ function ObjectifsCA({ data }) {
   const tous = data.dossiers;
   const gagnes = tous.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
   const ko = tous.filter(d => d.status === "KO");
-  const actifs = vivants.filter(p => tous.some(d => d.partnerId === p.id));
+  const actifsAujourdhui = vivants.filter(p => tous.some(d => d.partnerId === p.id));
 
+  // Les quatre hypothèses sortent de ce que le CRM observe déjà. On ne les
+  // demande pas : on les montre, et on ne les ouvre que pour en essayer d'autres.
   const avecMontant = gagnes.filter(d => (d.caAmount || 0) > 0);
-  const caMoyenObserve = avecMontant.length > 0
+  const caObserve = avecMontant.length > 0
     ? Math.round(avecMontant.reduce((s, d) => s + (d.caAmount || 0), 0) / avecMontant.length)
-    : 500;
+    : CA_MINIMUM_REFERENCE;
   const arbitres = gagnes.length + ko.length;
   const transfoObservee = arbitres > 0 ? Math.round((gagnes.length / arbitres) * 100) : 60;
-  const activationObservee = vivants.length > 0 ? Math.round((actifs.length / vivants.length) * 100) : 40;
+  const activationObservee = vivants.length > 0 ? Math.round((actifsAujourdhui.length / vivants.length) * 100) : 40;
 
-  const [caMoyen, setCaMoyen] = useState(null);
+  const annee = anneeEnCours();
+  const encaisse = caEncaisseDepuis(tous, annee.debut);
+
+  const [cible, setCible] = useState(100000);
+  const [libre, setLibre] = useState("");
+  const [ouvert, setOuvert] = useState(false);
+  const [ca, setCa] = useState(null);
   const [transfo, setTransfo] = useState(null);
-  const [prod, setProd] = useState(1);          // 12 dossiers par an et par partenaire
+  const [prod, setProd] = useState("1");
   const [activation, setActivation] = useState(null);
-  const [objectifLibre, setObjectifLibre] = useState("");
 
-  const vCa = caMoyen === null ? caMoyenObserve : (Number(caMoyen) || 0);
-  const vTransfo = transfo === null ? transfoObservee : (Number(transfo) || 0);
-  const vProd = Number(prod) || 0;
-  const vActivation = activation === null ? activationObservee : (Number(activation) || 0);
-  // On affiche la saisie telle quelle, nettoyée de ses zéros de tête, plutôt
-  // que la valeur recalculée : sinon le champ et ce qu'on a tapé divergent.
-  const affCa = caMoyen === null ? String(caMoyenObserve) : caMoyen;
+  // Une hypothèse jamais touchée suit l'observation ; dès qu'on la saisit,
+  // c'est la saisie qui fait foi, affichée telle quelle.
+  const affCa = ca === null ? String(caObserve) : ca;
   const affTransfo = transfo === null ? String(transfoObservee) : transfo;
-  const affProd = String(prod);
   const affActivation = activation === null ? String(activationObservee) : activation;
+  const vCa = Number(affCa) || 0;
+  const vTransfo = Number(affTransfo) || 0;
+  const vProd = Number(prod) || 0;
+  const vActivation = Number(affActivation) || 0;
 
-  const calculable = vCa > 0 && vTransfo > 0 && vProd > 0 && vActivation > 0;
+  const montantLibre = Number(String(libre).replace(/\s/g, "")) || 0;
+  const objectif = montantLibre > 0 ? montantLibre : cible;
+  const reste = Math.max(0, objectif - encaisse);
+  const pct = objectif > 0 ? Math.min(100, Math.round((encaisse / objectif) * 100)) : 0;
+  const tendance = (encaisse / annee.ecoules) * 12;
 
-  const objectifs = [100000, 200000, 300000, 500000, 1000000];
-  const libre = Number(String(objectifLibre).replace(/\s/g, "")) || 0;
-  const liste = libre > 0 ? [...objectifs, libre].sort((a, b) => a - b) : objectifs;
+  const b = besoinsObjectif({
+    reste, ca: vCa, transfo: vTransfo / 100, prod: vProd,
+    activation: vActivation / 100, mois: annee.restants, inscrits: vivants.length,
+  });
 
-  function besoinsPour(cible) {
-    const dossiersGagnes = cible / vCa;
-    const dossiersDeposes = dossiersGagnes / (vTransfo / 100);
-    const parMois = dossiersDeposes / 12;
-    const partenairesActifs = parMois / vProd;
-    const partenairesTotal = partenairesActifs / (vActivation / 100);
-    return { dossiersGagnes, dossiersDeposes, parMois, partenairesActifs, partenairesTotal };
-  }
-
-  const champ = "w-20 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500";
-  const arrondi = (n) => Math.ceil(n - 0.0001);
+  const champ = "w-20 text-sm font-bold fa-navy border border-gray-300 rounded-lg px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const nb = (n) => masqueNb(n);
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
       <div className="font-display font-semibold fa-navy mb-1">Combien pour atteindre mon objectif</div>
       <p className="text-sm text-gray-500 mb-4">
-        Le calcul à l'envers : vous fixez le chiffre d'affaires visé sur douze mois, l'outil remonte au nombre
-        de dossiers et de partenaires nécessaires.
+        Ton objectif de l'année, ce que tu as déjà encaissé, et le rythme qu'il reste à tenir pour combler l'écart.
       </p>
 
-      <div className="fa-bg-offwhite rounded-lg px-3 py-3 mb-4">
-        <div className="text-xs font-semibold fa-navy mb-2">Hypothèses</div>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-gray-600">
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="0" step="10" value={affCa} onChange={e => setCaMoyen(sansZeroDeTete(e.target.value))} className={champ} />
-            € de C.A. par dossier gagné
-            <span className="text-xs text-gray-400">
-              ({avecMontant.length > 0 ? `observé : ${caMoyenObserve} €` : "aucune donnée, valeur à fixer"})
-            </span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="1" max="100" step="1" value={affTransfo} onChange={e => setTransfo(sansZeroDeTete(e.target.value))} className={champ} />
-            % de dossiers qui aboutissent
-            <span className="text-xs text-gray-400">
-              ({arbitres > 0 ? `observé : ${transfoObservee} %` : "aucune donnée"})
-            </span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="0" step="0.1" value={affProd} onChange={e => setProd(sansZeroDeTete(e.target.value))} className={champ} />
-            dossiers/mois par partenaire actif
-            <span className="text-xs text-gray-400">(1,00 = 12 par an)</span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="1" max="100" step="1" value={affActivation} onChange={e => setActivation(sansZeroDeTete(e.target.value))} className={champ} />
-            % de partenaires qui produisent
-            <span className="text-xs text-gray-400">
-              ({vivants.length > 0 ? `observé : ${activationObservee} %` : "aucune donnée"})
-            </span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="0" step="10000" value={objectifLibre} onChange={e => setObjectifLibre(sansZeroDeTete(e.target.value))}
-              placeholder="0" className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
-            objectif personnalisé (€)
-          </label>
+      {/* L'objectif : un palier, ou un montant libre. */}
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        <span className="text-sm font-bold fa-navy">Objectif {annee.an}</span>
+        {PALIERS_OBJECTIF.map(m => {
+          const ici = montantLibre === 0 && cible === m;
+          return (
+            <button key={m} type="button" onClick={() => { setCible(m); setLibre(""); }} aria-pressed={ici}
+              className={`fa-tap text-sm font-bold px-4 py-2 rounded-full border transition ${
+                ici ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
+              {m / 1000} k€
+            </button>
+          );
+        })}
+        <label className="flex items-center gap-1.5 text-xs text-gray-500">
+          ou
+          <input type="number" min="0" step="10000" onFocus={selectionTotale} value={libre}
+            onChange={e => setLibre(sansZeroDeTete(e.target.value))} placeholder="autre"
+            className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          €
+        </label>
+      </div>
+
+      {/* Où on en est : l'encaissé de l'année contre l'objectif. */}
+      <div className="fa-bg-offwhite border border-gray-200 rounded-xl px-4 py-3 mb-3">
+        <div className="flex items-baseline gap-2 flex-wrap mb-2">
+          <span className="font-display text-xl font-bold text-emerald-700">{fmtEuro(encaisse)}</span>
+          <span className="text-sm text-gray-600">déjà encaissés</span>
+          <span className="w-full sm:w-auto sm:flex-1 sm:min-w-0 sm:text-right text-sm text-gray-500">
+            reste <strong className="fa-navy">{reste > 0 ? fmtEuro(reste) : "rien"}</strong>
+            {" · "}{annee.restantsAffiches} mois avant le 31 décembre
+          </span>
+        </div>
+        <div className="h-3 rounded-full bg-gray-200 overflow-hidden">
+          <div className="h-full bg-emerald-600 rounded-full transition-all" style={{ width: pct + "%" }} />
+        </div>
+        <div className="text-[11px] text-gray-400 mt-1.5">
+          {pct} % de l'objectif
+          {encaisse > 0 && <> · au rythme tenu depuis janvier, l'année finirait à {fmtEuro(tendance)}</>}
         </div>
       </div>
 
-      {!calculable ? (
+      {b === null ? (
         <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
-          Renseignez les quatre hypothèses pour obtenir le tableau.
+          Une hypothèse est à zéro : le calcul n'a plus de sens. Remets une valeur ci-dessous.
         </div>
       ) : (
         <>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-gray-400 text-left border-b border-gray-200">
-                  <th className="font-medium py-2">C.A. visé</th>
-                  <th className="font-medium py-2 text-right">Dossiers gagnés</th>
-                  <th className="font-medium py-2 text-right">Dossiers déposés</th>
-                  <th className="font-medium py-2 text-right">Par mois</th>
-                  <th className="font-medium py-2 text-right">Partenaires actifs</th>
-                  <th className="font-medium py-2 text-right">Partenaires à avoir</th>
-                </tr>
-              </thead>
-              <tbody>
-                {liste.map((cible, i) => {
-                  const b = besoinsPour(cible);
-                  const manquants = Math.max(0, arrondi(b.partenairesTotal) - vivants.length);
-                  return (
-                    <tr key={cible} className={i % 2 ? "fa-bg-offwhite" : ""}>
-                      <td className="py-2 font-bold fa-navy">{fmtEuro(cible)}</td>
-                      <td className="py-2 text-right text-gray-600">{arrondi(b.dossiersGagnes)}</td>
-                      <td className="py-2 text-right text-gray-600">{arrondi(b.dossiersDeposes)}</td>
-                      <td className="py-2 text-right text-gray-600">{b.parMois.toFixed(1)}</td>
-                      <td className="py-2 text-right fa-navy font-medium">{arrondi(b.partenairesActifs)}</td>
-                      <td className="py-2 text-right">
-                        <span className="fa-navy font-bold">{arrondi(b.partenairesTotal)}</span>
-                        {manquants > 0 && <span className="text-xs text-amber-700 block">+{manquants} à recruter</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="grid sm:grid-cols-2 gap-3 mb-3">
+            <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3.5">
+              <div className="text-[11px] font-bold text-teal-800 uppercase tracking-wide">Le rythme qu'il reste à tenir</div>
+              <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
+                {b.atteint ? "0" : nb(b.parMois.toLocaleString("fr-FR"))}
+              </div>
+              <div className="text-sm font-bold fa-navy -mt-0.5">dossiers déposés par mois</div>
+              <div className="text-xs text-gray-600 mt-1.5">
+                {b.atteint
+                  ? "Plus rien à déposer pour tenir l'objectif."
+                  : <>{nb(b.deposes)} dossiers à déposer d'ici décembre, dont {nb(b.gagnes)} qui aboutiront</>}
+              </div>
+            </div>
+
+            <div className="fa-bg-gold border border-amber-300 rounded-xl px-4 py-3.5">
+              <div className="text-[11px] font-bold text-amber-900 uppercase tracking-wide">Le réseau qu'il faut</div>
+              <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
+                {b.atteint ? "—" : nb(b.total)}
+              </div>
+              <div className="text-sm font-bold fa-navy -mt-0.5">partenaires inscrits</div>
+              <div className="text-xs text-teal-900/70 mt-1.5">
+                {b.atteint ? "Objectif déjà couvert." : <>dont {nb(b.actifs)} qui produisent vraiment</>}
+              </div>
+            </div>
           </div>
 
-          <div className="text-xs text-gray-500 mt-3 space-y-1">
-            <div>
-              <strong className="fa-navy">Comment lire :</strong> pour {fmtEuro(liste[1] || liste[0])}, il faut
-              {" "}{arrondi(besoinsPour(liste[1] || liste[0]).dossiersGagnes)} dossiers gagnés, donc
-              {" "}{arrondi(besoinsPour(liste[1] || liste[0]).dossiersDeposes)} déposés puisque
-              {" "}{100 - vTransfo} % n'aboutissent pas — soit {besoinsPour(liste[1] || liste[0]).parMois.toFixed(1)} par mois,
-              ce qui demande {arrondi(besoinsPour(liste[1] || liste[0]).partenairesActifs)} partenaires qui produisent,
-              et donc {arrondi(besoinsPour(liste[1] || liste[0]).partenairesTotal)} partenaires au total
-              puisque {100 - vActivation} % ne déposeront jamais.
-            </div>
-            <div className="text-gray-400">
-              Vous avez aujourd'hui {vivants.length} partenaire{vivants.length > 1 ? "s" : ""} dont {actifs.length} actif{actifs.length > 1 ? "s" : ""}.
-            </div>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 bg-slate-800 rounded-xl px-4 py-3.5 mb-3">
+            <span className="sm:flex-1 sm:min-w-0">
+              <span className="block text-[11px] text-white/60">Ce qu'il te manque</span>
+              <span className="block font-display text-2xl font-bold" style={{ color: "var(--fa-gold)" }}>
+                {b.atteint ? "Objectif déjà atteint"
+                  : b.manque > 0 ? <>{nb(b.manque)} partenaire{b.manque > 1 ? "s" : ""} à recruter</>
+                  : "Aucun — ton réseau suffit"}
+              </span>
+            </span>
+            <span className="text-xs text-white/75 sm:text-right border-t border-white/10 pt-2 sm:border-0 sm:pt-0">
+              Aujourd'hui : {nb(vivants.length)} partenaire{vivants.length > 1 ? "s" : ""},
+              {" "}dont {nb(actifsAujourdhui.length)} {actifsAujourdhui.length > 1 ? "produisent" : "produit"}
+            </span>
+          </div>
+
+          <div className="text-xs text-gray-600 leading-relaxed fa-bg-offwhite border-l-[3px] border-teal-200 rounded-r-lg px-3.5 py-2.5">
+            {b.atteint ? (
+              <>Objectif atteint : les {fmtEuro(encaisse)} encaissés depuis janvier dépassent déjà la cible. Vise plus haut pour voir ce que ça demanderait.</>
+            ) : (
+              <>
+                Il reste {fmtEuro(reste)} à faire en {annee.restantsAffiches} mois. À {fmtEuro(vCa)} le dossier, ce sont
+                {" "}{nb(b.gagnes)} dossiers gagnés, donc {nb(b.deposes)} déposés puisque {100 - vTransfo} % n'aboutissent pas —
+                soit {nb(b.parMois.toLocaleString("fr-FR"))} par mois, ce qui demande {nb(b.actifs)} partenaires qui produisent,
+                et {nb(b.total)} inscrits puisque seuls {vActivation} % déposent.
+              </>
+            )}
           </div>
         </>
+      )}
+
+      {/* Les hypothèses, repliées : justes par défaut, on ne les ouvre que
+          pour tester autre chose. */}
+      <div className="flex items-center gap-3 flex-wrap border-t border-gray-100 mt-3 pt-3">
+        <span className="flex-1 min-w-0 text-xs text-gray-400">
+          {fmtEuro(vCa)} par dossier · {vTransfo} % aboutissent · {vProd} dossier/mois par partenaire actif · {vActivation} % des partenaires produisent
+        </span>
+        <button onClick={() => setOuvert(v => !v)}
+          className="fa-tap text-xs font-bold fa-teal-text border border-teal-200 rounded-lg px-3.5 py-2 hover:bg-teal-50 transition">
+          {ouvert ? "Replier" : "Ajuster les hypothèses"}
+        </button>
+      </div>
+
+      {ouvert && (
+        <div className="bg-teal-50/60 border border-teal-200 rounded-xl px-4 py-3.5 mt-2">
+          <div className="text-xs font-bold fa-navy mb-2.5">Hypothèses — reprises de ce que le CRM observe</div>
+          <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="0" step="10" onFocus={selectionTotale} value={affCa}
+                onChange={e => setCa(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">€ de C.A. par dossier gagné</span>
+                <span className="block text-[11px] text-gray-400">
+                  {avecMontant.length > 0 ? `observé : ${caObserve} €` : "aucune donnée, valeur à fixer"}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="1" max="100" step="1" onFocus={selectionTotale} value={affTransfo}
+                onChange={e => setTransfo(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">% de dossiers qui aboutissent</span>
+                <span className="block text-[11px] text-gray-400">
+                  {arbitres > 0 ? `observé : ${transfoObservee} %` : "aucune donnée"}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="0" step="0.1" onFocus={selectionTotale} value={prod}
+                onChange={e => setProd(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">dossiers par mois et par partenaire actif</span>
+                <span className="block text-[11px] text-gray-400">1,00 = 12 par an</span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="1" max="100" step="1" onFocus={selectionTotale} value={affActivation}
+                onChange={e => setActivation(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">% de partenaires qui produisent</span>
+                <span className="block text-[11px] text-gray-400">
+                  {vivants.length > 0 ? `observé : ${activationObservee} %` : "aucune donnée"}
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -15873,15 +16005,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           // Encaissé ce mois : les échéances effectivement reçues, pas les
           // dossiers souscrits. Un dossier réglé en douze fois ne gonfle plus
           // le mois de la signature.
-          const caduMois = liveDossiers.filter(d => d.status !== "KO").reduce((s, d) => {
-            const ech = echeancesDe(d);
-            const parts = repartir(d.caAmount || 0, ech.length);
-            return s + ech.reduce((s2, e, i) => {
-              const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
-                : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
-              return s2 + (quand !== null && quand >= monthStart ? parts[i] : 0);
-            }, 0);
-          }, 0);
+          const caduMois = caEncaisseDepuis(liveDossiers, monthStart);
           const partenairesActifs = data.partners.filter(p => !p.deleted && p.active !== false).length;
 
           return (
