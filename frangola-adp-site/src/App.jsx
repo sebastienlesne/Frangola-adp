@@ -1472,6 +1472,95 @@ function downloadJson(filename, obj) {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+// ─── Relevé comptable ───────────────────────────────────────────────────
+// Ce que le comptable attend, c'est un journal : une ligne par mouvement
+// d'argent, datée. Deux natures seulement — l'honoraire encaissé du client,
+// et la rétrocession versée à l'apporteur. Rien d'attendu, rien de prévu :
+// que ce qui a bougé.
+const NATURE_HONORAIRE = "Honoraire encaissé";
+const NATURE_RETROCESSION = "Rétrocession versée";
+
+function jourDeEcheance(d, e) {
+  if (e.encaisseLe) return e.encaisseLe;
+  if (e.payeSansDate) return d.paymentDate || (d.updatedAt ? isoDe(d.updatedAt) : null);
+  return null;
+}
+
+function mouvementsCompta(data, debutIso, finIso) {
+  const dans = (iso) => !!iso && iso >= debutIso && iso <= finIso;
+  const partenaire = (id) => {
+    const p = (data?.partners || []).find(x => x.id === id);
+    return p ? nomPartenaire(p) + (p.deleted ? " (supprimé)" : "") : "Partenaire introuvable";
+  };
+  const lignes = [];
+
+  // Produits : chaque échéance d'honoraires réellement reçue.
+  for (const d of (data?.dossiers || [])) {
+    if (d.status === "KO") continue;
+    const ech = echeancesDe(d);
+    const parts = repartir(d.caAmount || 0, ech.length);
+    ech.forEach((e, i) => {
+      const jour = jourDeEcheance(d, e);
+      if (!dans(jour) || Math.abs(parts[i]) < 0.005) return;
+      lignes.push({
+        date: jour, nature: NATURE_HONORAIRE, sens: 1,
+        client: clientName(d), partenaire: partenaire(d.partnerId),
+        reference: d.id,
+        montant: parts[i],
+        detail: ech.length > 1 ? `échéance ${e.numero || i + 1}/${ech.length}` : "réglé en une fois",
+      });
+    });
+  }
+
+  // Charges : chaque virement effectivement fait à un apporteur.
+  for (const p of (data?.partners || [])) {
+    for (const v of (p.retrocessionVersements || [])) {
+      if (!dans(v.dateVirement)) continue;
+      lignes.push({
+        date: v.dateVirement, nature: NATURE_RETROCESSION, sens: -1,
+        client: "", partenaire: nomPartenaire(p) + (p.deleted ? " (supprimé)" : ""),
+        reference: v.id || v.cle || "",
+        montant: Number(v.montant) || 0,
+        detail: (v.libelle || v.cle || "") + (v.mode ? ` · ${v.mode}` : ""),
+      });
+    }
+  }
+
+  lignes.sort((a, b) => a.date.localeCompare(b.date) || a.nature.localeCompare(b.nature));
+  return lignes;
+}
+
+function bilanCompta(lignes) {
+  const produits = lignes.filter(l => l.sens > 0).reduce((s, l) => s + l.montant, 0);
+  const charges = lignes.filter(l => l.sens < 0).reduce((s, l) => s + l.montant, 0);
+  return {
+    produits: Math.round(produits * 100) / 100,
+    charges: Math.round(charges * 100) / 100,
+    solde: Math.round((produits - charges) * 100) / 100,
+    nb: lignes.length,
+  };
+}
+
+function exportComptaCsv(data, debutIso, finIso) {
+  const lignes = mouvementsCompta(data, debutIso, finIso);
+  const b = bilanCompta(lignes);
+  const euro = (n) => (Math.round(n * 100) / 100).toFixed(2).replace(".", ",");
+  const rows = [
+    ["Date", "Nature", "Client", "Partenaire", "Détail", "Produit (€)", "Charge (€)", "Référence"],
+    ...lignes.map(l => [
+      l.date, l.nature, l.client, l.partenaire, l.detail,
+      l.sens > 0 ? euro(l.montant) : "",
+      l.sens < 0 ? euro(l.montant) : "",
+      l.reference,
+    ]),
+    [],
+    ["", "TOTAL", "", "", `${b.nb} mouvement${b.nb > 1 ? "s" : ""} du ${debutIso} au ${finIso}`, euro(b.produits), euro(b.charges), ""],
+    ["", "SOLDE", "", "", "produits moins rétrocessions", euro(b.solde), "", ""],
+  ];
+  downloadCsv(`frangola-compta-${debutIso}-au-${finIso}.csv`, rows);
+  return b;
+}
+
 function exportDossiersCsv(dossiers, partners) {
   const partnerName = (id) => { const p = partners.find(p => p.id === id); return p ? (nomPartenaire(p)) : "—"; };
   const rows = [
@@ -2878,48 +2967,6 @@ export default function App() {
     }));
   }
 
-  async function analyzeDossierIA(dossierId) {
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-      return { error: "Analyse IA indisponible dans cet aperçu — fonctionne uniquement sur le site en ligne." };
-    }
-    const d = data.dossiers.find(x => x.id === dossierId);
-    if (!d) return { error: "Dossier introuvable." };
-    try {
-      const offreFile = d.docs?.offre ? await loadFile(d.docs.offre.key) : null;
-      const tableauFile = d.docs?.tableau ? await loadFile(d.docs.tableau.key) : null;
-      const cniFile = d.docs?.cni ? await loadFile(d.docs.cni.key) : null;
-      if (!offreFile && !tableauFile) return { error: "Aucun document (offre ou tableau) déposé sur ce dossier." };
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 150000);
-      let res;
-      try {
-        res = await fetch(`${SUPABASE_URL}/functions/v1/analyse-documents`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
-          body: JSON.stringify({
-            offreDoc: offreFile ? { data: offreFile.data, mime: offreFile.mime || "application/pdf" } : null,
-            tableauDoc: tableauFile ? { data: tableauFile.data, mime: tableauFile.mime || "application/pdf" } : null,
-            cniDoc: cniFile ? { data: cniFile.data, mime: cniFile.mime || "application/pdf" } : null,
-          }),
-          signal: controller.signal,
-        });
-      } catch (fetchErr) {
-        if (fetchErr.name === "AbortError") {
-          return { error: "L'analyse a pris trop de temps et a été interrompue. Réessaie, ou dépose des documents moins volumineux (moins de pages) si le problème persiste." };
-        }
-        throw fetchErr;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-      const json = await res.json();
-      if (!res.ok || json.error) return { error: json.error || "Erreur pendant l'analyse." };
-      return { result: json };
-    } catch (e) {
-      return { error: "Erreur réseau pendant l'analyse : " + String(e) };
-    }
-  }
-
   async function updateDossierPartnerMessage(dossierId, partnerMessage) {
     await mutateData(base => ({
       ...base,
@@ -3270,7 +3317,6 @@ export default function App() {
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
-          onAnalyzeDossierIA={analyzeDossierIA}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
@@ -3343,7 +3389,6 @@ export default function App() {
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onUpdateDossierSimulation={updateDossierSimulation}
-          onAnalyzeDossierIA={analyzeDossierIA}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
@@ -8046,38 +8091,86 @@ function motifManquant(d) {
 // reçues, pas les dossiers souscrits. Un dossier réglé en douze fois ne
 // compte que pour ce qui est tombé. Même lecture que l'encaissé du mois sur
 // l'écran d'accueil — un seul calcul pour les deux.
-function caEncaisseDepuis(dossiers, depuis) {
+function caEncaisseEntre(dossiers, depuis, jusqua = Infinity) {
   return (dossiers || []).filter(d => d.status !== "KO").reduce((s, d) => {
     const ech = echeancesDe(d);
     const parts = repartir(d.caAmount || 0, ech.length);
     return s + ech.reduce((s2, e, i) => {
       const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
         : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
-      return s2 + (quand !== null && quand >= depuis ? parts[i] : 0);
+      return s2 + (quand !== null && quand >= depuis && quand <= jusqua ? parts[i] : 0);
     }, 0);
   }, 0);
 }
+function caEncaisseDepuis(dossiers, depuis) { return caEncaisseEntre(dossiers, depuis); }
 
-// L'année civile en cours : son début, ce qui est écoulé, ce qui reste. Les
-// deux sont des fractions et leur somme fait douze — le 27 septembre, il ne
-// reste pas quatre mois pleins, il en reste 3,1. Compter septembre en entier
-// sous-estimerait le rythme à tenir d'un tiers.
-// `restantsAffiches` arrondit pour la phrase, jamais pour le calcul ; il ne
-// descend pas sous 1 pour que la dernière semaine de décembre ne demande pas
-// un rythme infini.
-function anneeEnCours(maintenant = Date.now()) {
-  const d = new Date(maintenant);
-  const an = d.getFullYear();
-  const debut = new Date(an, 0, 1).getTime();
-  const joursDuMois = new Date(an, d.getMonth() + 1, 0).getDate();
-  const ecoules = d.getMonth() + (d.getDate() - 1) / joursDuMois;
-  const restants = Math.max(1 / 30, 12 - ecoules);
+// Un « mois flottant » : le 27 septembre vaut 8,87 mois depuis janvier, pas 9.
+// C'est ce qui permet de mesurer une période quelconque — du 1er octobre au
+// 30 septembre suivant — sans supposer qu'elle colle à l'année civile.
+function moisFlottant(iso) {
+  const [y, m, j] = iso.split("-").map(Number);
+  const dansLeMois = new Date(y, m, 0).getDate();
+  return y * 12 + (m - 1) + (j - 1) / dansLeMois;
+}
+
+function anneeCivile(maintenant = Date.now()) {
+  const an = new Date(maintenant).getFullYear();
+  return { an, debut: `${an}-01-01`, fin: `${an}-12-31` };
+}
+
+// Un an jour pour jour à partir d'une date, fin incluse : du 1er octobre 2026
+// au 30 septembre 2027.
+function unAnApres(iso) {
+  const [y, m, j] = iso.split("-").map(Number);
+  const d = new Date(y + 1, m - 1, j);
+  d.setDate(d.getDate() - 1);
+  return isoDe(d.getTime());
+}
+
+// La période de l'objectif, quelle qu'elle soit. `ecoules` et `restants` sont
+// des fractions de mois : on ne compte pas septembre en entier le 27, sinon
+// le rythme à tenir est sous-estimé d'un tiers.
+// `restants` ne descend jamais à zéro — une division par zéro n'aide
+// personne — mais `aVenir` et `close` disent à l'écran quoi afficher à la
+// place d'un rythme qui n'a plus de sens.
+function periodeObjectif(debutIso, finIso, maintenant = Date.now()) {
+  if (!debutIso || !finIso || finIso <= debutIso) return { valide: false, debut: debutIso, fin: finIso };
+  const d = moisFlottant(debutIso);
+  const f = moisFlottant(finIso);
+  const n = moisFlottant(isoDe(maintenant));
+  const aVenir = n < d;
+  const close = n > f;
+  const total = Math.max(1 / 30, f - d);
+  const ecoules = Math.max(1 / 30, Math.min(n, f) - d);
+  const restants = Math.max(1 / 30, f - Math.min(Math.max(n, d), f));
+  const jours = Math.max(1, Math.round(restants * 30.44));
+  const restantsAffiches = Math.max(1, Math.round(restants));
+  const finLisible = fmtDate(debutJour(finIso));
+  const compte = jours <= 45 ? `${jours} jour${jours > 1 ? "s" : ""}` : `${restantsAffiches} mois`;
   return {
-    an, debut,
-    ecoules: Math.max(1 / 30, ecoules),
-    restants,
-    restantsAffiches: Math.max(1, Math.round(restants)),
+    valide: true, debut: debutIso, fin: finIso,
+    total, ecoules, restants, restantsAffiches, jours, aVenir, close, finLisible,
+    libelleRestant: aVenir ? `commence le ${fmtDate(debutJour(debutIso))}`
+      : close ? `période close le ${finLisible}`
+      : `${compte} avant le ${finLisible}`,
+    moisDeFin: new Date(debutJour(finIso)).toLocaleDateString("fr-FR", { month: "long" }),
   };
+}
+
+// La période et l'objectif sont un réglage d'appareil, comme l'ordre des
+// onglets : ressaisir « 150 000 » et deux dates à chaque visite n'a aucun
+// intérêt. Les modes « civile » et « glissant » se recalculent tout seuls —
+// seul « sur mesure » garde ses dates telles quelles.
+const CLE_OBJECTIF = "adp:objectif";
+function lireObjectif() {
+  try {
+    const o = JSON.parse(localStorage.getItem(CLE_OBJECTIF) || "null");
+    if (o && typeof o === "object") return o;
+  } catch (e) { /* stockage indisponible */ }
+  return {};
+}
+function ecrireObjectif(o) {
+  try { localStorage.setItem(CLE_OBJECTIF, JSON.stringify(o)); } catch (e) { /* ignore */ }
 }
 
 // Le calcul à l'envers. Tout part de ce qui RESTE à faire et des mois qui
@@ -9627,6 +9720,111 @@ function BanquesPanel({ data, onSet, canEdit, busy }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Le relevé pour le comptable : une période, un aperçu du solde, un fichier.
+// Les périodes courantes sont des boutons — personne n'a envie de retaper
+// « 1er janvier » quatre fois par an.
+function ExportCompta({ data }) {
+  const aujourdhui = new Date();
+  const an = aujourdhui.getFullYear();
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const finDuMois = (a, m) => iso(new Date(a, m + 1, 0));
+
+  const periodes = [
+    { id: "mois", label: "Mois en cours", debut: iso(new Date(an, aujourdhui.getMonth(), 1)), fin: finDuMois(an, aujourdhui.getMonth()) },
+    { id: "moisPrec", label: "Mois dernier", debut: iso(new Date(an, aujourdhui.getMonth() - 1, 1)), fin: finDuMois(an, aujourdhui.getMonth() - 1) },
+    { id: "trimestre", label: "Trimestre en cours",
+      debut: iso(new Date(an, Math.floor(aujourdhui.getMonth() / 3) * 3, 1)),
+      fin: finDuMois(an, Math.floor(aujourdhui.getMonth() / 3) * 3 + 2) },
+    { id: "annee", label: `Année ${an}`, debut: `${an}-01-01`, fin: `${an}-12-31` },
+    { id: "anneePrec", label: `Année ${an - 1}`, debut: `${an - 1}-01-01`, fin: `${an - 1}-12-31` },
+  ];
+
+  const [choisie, setChoisie] = useState("annee");
+  const perso = choisie === "perso";
+  const base = periodes.find(p => p.id === choisie) || periodes[3];
+  const [debut, setDebut] = useState(base.debut);
+  const [fin, setFin] = useState(base.fin);
+
+  const d1 = perso ? debut : base.debut;
+  const d2 = perso ? fin : base.fin;
+  const valide = !!d1 && !!d2 && d1 <= d2;
+
+  const lignes = valide ? mouvementsCompta(data, d1, d2) : [];
+  const b = bilanCompta(lignes);
+  const parNature = (n) => lignes.filter(l => l.nature === n).length;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+      <div className="font-display font-semibold fa-navy mb-1">Relevé pour le comptable</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Un journal des mouvements d'argent sur la période : les honoraires réellement encaissés d'un côté,
+        les rétrocessions réellement versées de l'autre. Ni prévisionnel, ni facturé — que ce qui a bougé.
+      </p>
+
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        {periodes.map(p => (
+          <button key={p.id} type="button" onClick={() => setChoisie(p.id)} aria-pressed={choisie === p.id}
+            className={`fa-tap text-xs font-bold px-3.5 py-2 rounded-full border transition ${
+              choisie === p.id ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
+            {p.label}
+          </button>
+        ))}
+        <button type="button" onClick={() => setChoisie("perso")} aria-pressed={perso}
+          className={`fa-tap text-xs font-bold px-3.5 py-2 rounded-full border transition ${
+            perso ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
+          Sur mesure
+        </button>
+      </div>
+
+      {perso && (
+        <div className="flex items-center gap-2 flex-wrap mb-3 fa-bg-offwhite rounded-lg px-3 py-2.5">
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            Du
+            <input type="date" value={debut} onChange={e => setDebut(e.target.value)}
+              className="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          </label>
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            au
+            <input type="date" value={fin} onChange={e => setFin(e.target.value)}
+              className="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          </label>
+          {!valide && <span className="text-xs text-red-700 font-semibold">La date de fin doit suivre celle de début.</span>}
+        </div>
+      )}
+
+      <div className="grid sm:grid-cols-3 gap-3 mb-4">
+        <div className="fa-bg-offwhite rounded-xl px-4 py-3">
+          <div className="text-xs text-gray-500 mb-0.5">Honoraires encaissés</div>
+          <div className="font-display text-xl font-bold text-emerald-700">{fmtEuroPrecis(b.produits)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">{masqueNb(parNature(NATURE_HONORAIRE))} encaissement{parNature(NATURE_HONORAIRE) > 1 ? "s" : ""}</div>
+        </div>
+        <div className="fa-bg-offwhite rounded-xl px-4 py-3">
+          <div className="text-xs text-gray-500 mb-0.5">Rétrocessions versées</div>
+          <div className="font-display text-xl font-bold text-violet-700">−{fmtEuroPrecis(b.charges)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">{masqueNb(parNature(NATURE_RETROCESSION))} virement{parNature(NATURE_RETROCESSION) > 1 ? "s" : ""}</div>
+        </div>
+        <div className="fa-bg-gold rounded-xl px-4 py-3">
+          <div className="text-xs text-teal-900/70 mb-0.5">Solde de la période</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(b.solde)}</div>
+          <div className="text-[11px] text-teal-900/60 mt-0.5">avant charges de structure</div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <button onClick={() => exportComptaCsv(data, d1, d2)} disabled={!valide || b.nb === 0}
+          className="fa-bg-teal disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium px-4 py-2.5 rounded-lg transition flex items-center gap-2">
+          <Download size={15} /> Télécharger le relevé
+        </button>
+        <span className="text-xs text-gray-400">
+          {!valide ? "Choisis une période valide."
+            : b.nb === 0 ? "Aucun mouvement sur cette période."
+            : `${masqueNb(b.nb)} ligne${b.nb > 1 ? "s" : ""} · CSV séparé par points-virgules, s'ouvre dans Excel`}
+        </span>
+      </div>
     </div>
   );
 }
@@ -12062,16 +12260,40 @@ function ObjectifsCA({ data }) {
   const transfoObservee = arbitres > 0 ? Math.round((gagnes.length / arbitres) * 100) : 60;
   const activationObservee = vivants.length > 0 ? Math.round((actifsAujourdhui.length / vivants.length) * 100) : 40;
 
-  const annee = anneeEnCours();
-  const encaisse = caEncaisseDepuis(tous, annee.debut);
+  // Un seul état pour l'objectif : la période, la cible, le montant libre.
+  // Il est relu au chargement et réécrit à chaque changement.
+  const [reg, setReg] = useState(() => {
+    const o = lireObjectif();
+    const civ = anneeCivile();
+    return {
+      mode: ["civile", "glissant", "perso"].includes(o.mode) ? o.mode : "civile",
+      debut: typeof o.debut === "string" && o.debut ? o.debut : civ.debut,
+      fin: typeof o.fin === "string" && o.fin ? o.fin : civ.fin,
+      cible: PALIERS_OBJECTIF.includes(o.cible) ? o.cible : 100000,
+      libre: typeof o.libre === "string" ? o.libre : "",
+    };
+  });
+  useEffect(() => { ecrireObjectif(reg); }, [reg]);
+  const maj = (p) => setReg(r => ({ ...r, ...p }));
 
-  const [cible, setCible] = useState(100000);
-  const [libre, setLibre] = useState("");
   const [ouvert, setOuvert] = useState(false);
   const [ca, setCa] = useState(null);
   const [transfo, setTransfo] = useState(null);
   const [prod, setProd] = useState("1");
   const [activation, setActivation] = useState(null);
+
+  // Les deux premiers modes se recalculent à chaque affichage : une année
+  // civile enregistrée en 2026 n'a plus de sens en 2027.
+  const civ = anneeCivile();
+  const ajd = isoDe(Date.now());
+  const modes = [
+    { id: "civile", label: `Année civile ${civ.an}`, debut: civ.debut, fin: civ.fin },
+    { id: "glissant", label: "12 mois à partir d'aujourd'hui", debut: ajd, fin: unAnApres(ajd) },
+    { id: "perso", label: "Sur mesure", debut: reg.debut, fin: reg.fin },
+  ];
+  const modeActif = modes.find(m => m.id === reg.mode) || modes[0];
+  const per = periodeObjectif(modeActif.debut, modeActif.fin);
+  const perso = reg.mode === "perso";
 
   // Une hypothèse jamais touchée suit l'observation ; dès qu'on la saisit,
   // c'est la saisie qui fait foi, affichée telle quelle.
@@ -12083,34 +12305,75 @@ function ObjectifsCA({ data }) {
   const vProd = Number(prod) || 0;
   const vActivation = Number(affActivation) || 0;
 
-  const montantLibre = Number(String(libre).replace(/\s/g, "")) || 0;
-  const objectif = montantLibre > 0 ? montantLibre : cible;
+  const montantLibre = Number(String(reg.libre).replace(/\s/g, "")) || 0;
+  const objectif = montantLibre > 0 ? montantLibre : reg.cible;
+  // L'encaissé est borné des deux côtés : seul ce qui est tombé DANS la
+  // fenêtre compte vers l'objectif de cette fenêtre.
+  const encaisse = per.valide
+    ? caEncaisseEntre(tous, debutJour(per.debut), debutJour(per.fin) + 86400000 - 1)
+    : 0;
   const reste = Math.max(0, objectif - encaisse);
   const pct = objectif > 0 ? Math.min(100, Math.round((encaisse / objectif) * 100)) : 0;
-  const tendance = (encaisse / annee.ecoules) * 12;
+  const tendance = (encaisse / per.ecoules) * per.total;
 
-  const b = besoinsObjectif({
+  const b = per.valide && !per.close ? besoinsObjectif({
     reste, ca: vCa, transfo: vTransfo / 100, prod: vProd,
-    activation: vActivation / 100, mois: annee.restants, inscrits: vivants.length,
-  });
+    activation: vActivation / 100, mois: per.restants, inscrits: vivants.length,
+  }) : null;
 
   const champ = "w-20 text-sm font-bold fa-navy border border-gray-300 rounded-lg px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const dateChamp = "text-sm fa-navy border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const puce = (actif) => `fa-tap text-xs font-bold px-3.5 py-2 rounded-full border transition ${
+    actif ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`;
   const nb = (n) => masqueNb(n);
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
       <div className="font-display font-semibold fa-navy mb-1">Combien pour atteindre mon objectif</div>
       <p className="text-sm text-gray-500 mb-4">
-        Ton objectif de l'année, ce que tu as déjà encaissé, et le rythme qu'il reste à tenir pour combler l'écart.
+        Ton objectif sur la période que tu choisis, ce que tu as déjà encaissé dessus, et le rythme qu'il reste à tenir.
       </p>
+
+      {/* La période : trois raccourcis, ou deux dates. */}
+      <div className="flex items-center gap-2 flex-wrap mb-2">
+        <span className="text-sm font-bold fa-navy">Période</span>
+        {modes.map(m => (
+          <button key={m.id} type="button" aria-pressed={reg.mode === m.id}
+            onClick={() => maj(m.id === "perso" ? { mode: "perso" } : { mode: m.id, debut: m.debut, fin: m.fin })}
+            className={puce(reg.mode === m.id)}>
+            {m.label}
+          </button>
+        ))}
+        <span className="w-full sm:w-auto sm:flex-1 sm:min-w-0 sm:text-right text-xs text-gray-500">
+          {per.valide ? <>du {fmtDate(debutJour(per.debut))} au {per.finLisible}</> : "dates à corriger"}
+        </span>
+      </div>
+
+      {perso && (
+        <div className="flex items-center gap-2 flex-wrap fa-bg-offwhite border border-gray-200 rounded-xl px-3 py-2.5 mb-3">
+          <label className="flex items-center gap-1.5 text-xs text-gray-500">
+            Du
+            <input type="date" value={reg.debut} onChange={e => maj({ debut: e.target.value })} className={dateChamp} />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-500">
+            au
+            <input type="date" value={reg.fin} onChange={e => maj({ fin: e.target.value })} className={dateChamp} />
+          </label>
+          <span className={`text-xs ${per.valide ? "text-gray-500" : "text-red-700 font-semibold"}`}>
+            {per.valide
+              ? `${(Math.round(per.total * 10) / 10).toLocaleString("fr-FR")} mois de période`
+              : "La date de fin doit suivre celle de début."}
+          </span>
+        </div>
+      )}
 
       {/* L'objectif : un palier, ou un montant libre. */}
       <div className="flex items-center gap-2 flex-wrap mb-3">
-        <span className="text-sm font-bold fa-navy">Objectif {annee.an}</span>
+        <span className="text-sm font-bold fa-navy">Objectif</span>
         {PALIERS_OBJECTIF.map(m => {
-          const ici = montantLibre === 0 && cible === m;
+          const ici = montantLibre === 0 && reg.cible === m;
           return (
-            <button key={m} type="button" onClick={() => { setCible(m); setLibre(""); }} aria-pressed={ici}
+            <button key={m} type="button" onClick={() => maj({ cible: m, libre: "" })} aria-pressed={ici}
               className={`fa-tap text-sm font-bold px-4 py-2 rounded-full border transition ${
                 ici ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
               {m / 1000} k€
@@ -12119,91 +12382,107 @@ function ObjectifsCA({ data }) {
         })}
         <label className="flex items-center gap-1.5 text-xs text-gray-500">
           ou
-          <input type="number" min="0" step="10000" onFocus={selectionTotale} value={libre}
-            onChange={e => setLibre(sansZeroDeTete(e.target.value))} placeholder="autre"
+          <input type="number" min="0" step="10000" onFocus={selectionTotale} value={reg.libre}
+            onChange={e => maj({ libre: sansZeroDeTete(e.target.value) })} placeholder="autre"
             className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
           €
         </label>
       </div>
 
-      {/* Où on en est : l'encaissé de l'année contre l'objectif. */}
-      <div className="fa-bg-offwhite border border-gray-200 rounded-xl px-4 py-3 mb-3">
-        <div className="flex items-baseline gap-2 flex-wrap mb-2">
-          <span className="font-display text-xl font-bold text-emerald-700">{fmtEuro(encaisse)}</span>
-          <span className="text-sm text-gray-600">déjà encaissés</span>
-          <span className="w-full sm:w-auto sm:flex-1 sm:min-w-0 sm:text-right text-sm text-gray-500">
-            reste <strong className="fa-navy">{reste > 0 ? fmtEuro(reste) : "rien"}</strong>
-            {" · "}{annee.restantsAffiches} mois avant le 31 décembre
-          </span>
-        </div>
-        <div className="h-3 rounded-full bg-gray-200 overflow-hidden">
-          <div className="h-full bg-emerald-600 rounded-full transition-all" style={{ width: pct + "%" }} />
-        </div>
-        <div className="text-[11px] text-gray-400 mt-1.5">
-          {pct} % de l'objectif
-          {encaisse > 0 && <> · au rythme tenu depuis janvier, l'année finirait à {fmtEuro(tendance)}</>}
-        </div>
-      </div>
-
-      {b === null ? (
-        <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
-          Une hypothèse est à zéro : le calcul n'a plus de sens. Remets une valeur ci-dessous.
+      {!per.valide ? (
+        <div className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-lg px-3 py-3">
+          La date de fin doit suivre celle de début. Corrige les deux dates ci-dessus pour retrouver le calcul.
         </div>
       ) : (
         <>
-          <div className="grid sm:grid-cols-2 gap-3 mb-3">
-            <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3.5">
-              <div className="text-[11px] font-bold text-teal-800 uppercase tracking-wide">Le rythme qu'il reste à tenir</div>
-              <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
-                {b.atteint ? "0" : nb(b.parMois.toLocaleString("fr-FR"))}
-              </div>
-              <div className="text-sm font-bold fa-navy -mt-0.5">dossiers déposés par mois</div>
-              <div className="text-xs text-gray-600 mt-1.5">
-                {b.atteint
-                  ? "Plus rien à déposer pour tenir l'objectif."
-                  : <>{nb(b.deposes)} dossiers à déposer d'ici décembre, dont {nb(b.gagnes)} qui aboutiront</>}
-              </div>
-            </div>
-
-            <div className="fa-bg-gold border border-amber-300 rounded-xl px-4 py-3.5">
-              <div className="text-[11px] font-bold text-amber-900 uppercase tracking-wide">Le réseau qu'il faut</div>
-              <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
-                {b.atteint ? "—" : nb(b.total)}
-              </div>
-              <div className="text-sm font-bold fa-navy -mt-0.5">partenaires inscrits</div>
-              <div className="text-xs text-teal-900/70 mt-1.5">
-                {b.atteint ? "Objectif déjà couvert." : <>dont {nb(b.actifs)} qui produisent vraiment</>}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 bg-slate-800 rounded-xl px-4 py-3.5 mb-3">
-            <span className="sm:flex-1 sm:min-w-0">
-              <span className="block text-[11px] text-white/60">Ce qu'il te manque</span>
-              <span className="block font-display text-2xl font-bold" style={{ color: "var(--fa-gold)" }}>
-                {b.atteint ? "Objectif déjà atteint"
-                  : b.manque > 0 ? <>{nb(b.manque)} partenaire{b.manque > 1 ? "s" : ""} à recruter</>
-                  : "Aucun — ton réseau suffit"}
+          {/* Où on en est : l'encaissé de la période contre l'objectif. */}
+          <div className="fa-bg-offwhite border border-gray-200 rounded-xl px-4 py-3 mb-3">
+            <div className="flex items-baseline gap-2 flex-wrap mb-2">
+              <span className="font-display text-xl font-bold text-emerald-700">{fmtEuro(encaisse)}</span>
+              <span className="text-sm text-gray-600">encaissés sur la période</span>
+              <span className="w-full sm:w-auto sm:flex-1 sm:min-w-0 sm:text-right text-sm text-gray-500">
+                reste <strong className="fa-navy">{reste > 0 ? fmtEuro(reste) : "rien"}</strong>
+                {" · "}{per.libelleRestant}
               </span>
-            </span>
-            <span className="text-xs text-white/75 sm:text-right border-t border-white/10 pt-2 sm:border-0 sm:pt-0">
-              Aujourd'hui : {nb(vivants.length)} partenaire{vivants.length > 1 ? "s" : ""},
-              {" "}dont {nb(actifsAujourdhui.length)} {actifsAujourdhui.length > 1 ? "produisent" : "produit"}
-            </span>
+            </div>
+            <div className="h-3 rounded-full bg-gray-200 overflow-hidden">
+              <div className="h-full bg-emerald-600 rounded-full transition-all" style={{ width: pct + "%" }} />
+            </div>
+            <div className="text-[11px] text-gray-400 mt-1.5">
+              {pct} % de l'objectif
+              {!per.aVenir && !per.close && encaisse > 0 && (
+                <> · au rythme tenu depuis le début de la période, elle finirait à {fmtEuro(tendance)}</>
+              )}
+            </div>
           </div>
 
-          <div className="text-xs text-gray-600 leading-relaxed fa-bg-offwhite border-l-[3px] border-teal-200 rounded-r-lg px-3.5 py-2.5">
-            {b.atteint ? (
-              <>Objectif atteint : les {fmtEuro(encaisse)} encaissés depuis janvier dépassent déjà la cible. Vise plus haut pour voir ce que ça demanderait.</>
-            ) : (
-              <>
-                Il reste {fmtEuro(reste)} à faire en {annee.restantsAffiches} mois. À {fmtEuro(vCa)} le dossier, ce sont
-                {" "}{nb(b.gagnes)} dossiers gagnés, donc {nb(b.deposes)} déposés puisque {100 - vTransfo} % n'aboutissent pas —
-                soit {nb(b.parMois.toLocaleString("fr-FR"))} par mois, ce qui demande {nb(b.actifs)} partenaires qui produisent,
-                et {nb(b.total)} inscrits puisque seuls {vActivation} % déposent.
-              </>
-            )}
-          </div>
+          {per.close ? (
+            <div className="text-sm text-gray-700 bg-slate-50 border border-gray-200 rounded-lg px-3.5 py-3">
+              Période close le {per.finLisible} : {fmtEuro(encaisse)} encaissés sur {fmtEuro(objectif)} visés,
+              soit {pct} %. Choisis une nouvelle période pour repartir sur un objectif à tenir.
+            </div>
+          ) : b === null ? (
+            <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
+              Une hypothèse est à zéro : le calcul n'a plus de sens. Remets une valeur ci-dessous.
+            </div>
+          ) : (
+            <>
+              <div className="grid sm:grid-cols-2 gap-3 mb-3">
+                <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3.5">
+                  <div className="text-[11px] font-bold text-teal-800 uppercase tracking-wide">Le rythme qu'il reste à tenir</div>
+                  <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
+                    {b.atteint ? "0" : nb(b.parMois.toLocaleString("fr-FR"))}
+                  </div>
+                  <div className="text-sm font-bold fa-navy -mt-0.5">dossiers déposés par mois</div>
+                  <div className="text-xs text-gray-600 mt-1.5">
+                    {b.atteint
+                      ? "Plus rien à déposer pour tenir l'objectif."
+                      : <>{nb(b.deposes)} dossiers à déposer d'ici {per.moisDeFin}, dont {nb(b.gagnes)} qui aboutiront</>}
+                  </div>
+                </div>
+
+                <div className="fa-bg-gold border border-amber-300 rounded-xl px-4 py-3.5">
+                  <div className="text-[11px] font-bold text-amber-900 uppercase tracking-wide">Le réseau qu'il faut</div>
+                  <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
+                    {b.atteint ? "—" : nb(b.total)}
+                  </div>
+                  <div className="text-sm font-bold fa-navy -mt-0.5">partenaires inscrits</div>
+                  <div className="text-xs text-teal-900/70 mt-1.5">
+                    {b.atteint ? "Objectif déjà couvert." : <>dont {nb(b.actifs)} qui produisent vraiment</>}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 bg-slate-800 rounded-xl px-4 py-3.5 mb-3">
+                <span className="sm:flex-1 sm:min-w-0">
+                  <span className="block text-[11px] text-white/60">Ce qu'il te manque</span>
+                  <span className="block font-display text-2xl font-bold" style={{ color: "var(--fa-gold)" }}>
+                    {b.atteint ? "Objectif déjà atteint"
+                      : b.manque > 0 ? <>{nb(b.manque)} partenaire{b.manque > 1 ? "s" : ""} à recruter</>
+                      : "Aucun — ton réseau suffit"}
+                  </span>
+                </span>
+                <span className="text-xs text-white/75 sm:text-right border-t border-white/10 pt-2 sm:border-0 sm:pt-0">
+                  Aujourd'hui : {nb(vivants.length)} partenaire{vivants.length > 1 ? "s" : ""},
+                  {" "}dont {nb(actifsAujourdhui.length)} {actifsAujourdhui.length > 1 ? "produisent" : "produit"}
+                </span>
+              </div>
+
+              <div className="text-xs text-gray-600 leading-relaxed fa-bg-offwhite border-l-[3px] border-teal-200 rounded-r-lg px-3.5 py-2.5">
+                {b.atteint ? (
+                  <>Objectif atteint : les {fmtEuro(encaisse)} encaissés sur la période dépassent déjà la cible. Vise plus haut pour voir ce que ça demanderait.</>
+                ) : (
+                  <>
+                    Il reste {fmtEuro(reste)} à faire d'ici le {per.finLisible}, soit
+                    {" "}{(Math.round(per.restants * 10) / 10).toLocaleString("fr-FR")} mois. À {fmtEuro(vCa)} le dossier, ce sont
+                    {" "}{nb(b.gagnes)} dossiers gagnés, donc {nb(b.deposes)} déposés puisque {100 - vTransfo} % n'aboutissent pas —
+                    soit {nb(b.parMois.toLocaleString("fr-FR"))} par mois, ce qui demande {nb(b.actifs)} partenaires qui produisent,
+                    et {nb(b.total)} inscrits puisque seuls {vActivation} % déposent.
+                  </>
+                )}
+              </div>
+            </>
+          )}
         </>
       )}
 
@@ -15150,7 +15429,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -15222,6 +15501,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "challengesPartenaires", label: "Challenges partenaires", defaut: "challenge", rendu: () => <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} /> },
     { id: "challengeBoard", label: "Tableau des objectifs", defaut: "challenge", rendu: () => <ChallengeBoard data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} /> },
     { id: "facturation", label: "Facturation et versements", defaut: "facturation", rendu: () => <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} onMajVersement={onMajVersementParrainage} onSupprimerVersement={onSupprimerVersementParrainage} onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} /> },
+    { id: "exportCompta", label: "Relevé pour le comptable", defaut: "facturation", fullAdmin: true, rendu: () => <ExportCompta data={data} /> },
     { id: "compagnies", label: "Compagnies partenaires", defaut: "assureurs", fullAdmin: true, rendu: () => <AssureursPanel data={data} onSet={onSetAssureurs} canEdit={isFullAdmin} busy={busy} /> },
     { id: "productionAssureur", label: "Production par assureur", defaut: "assureurs", fullAdmin: true, rendu: () => <ProductionParAssureur data={data} dossiers={data.dossiers} /> },
     { id: "banques", label: "Banques prêteuses", defaut: "banques", fullAdmin: true, rendu: () => <BanquesPanel data={data} onSet={onSetBanques} canEdit={isFullAdmin} busy={busy} /> },
@@ -15358,15 +15638,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [notesOpenId, setNotesOpenId] = useState(null);
   const [simOpenId, setSimOpenId] = useState(null);
   const [simDraft, setSimDraft] = useState({});
-  const [simAnalyzing, setSimAnalyzing] = useState(null);
-  const [simAnalysisResult, setSimAnalysisResult] = useState(null);
-  const [simAutoReclassified, setSimAutoReclassified] = useState(false);
-  const [simAnalyzeError, setSimAnalyzeError] = useState("");
   function openSim(d) {
     setSimOpenId(d.id);
-    setSimAnalyzeError("");
-    setSimAnalysisResult(null);
-    setSimAutoReclassified(false);
     setSimDraft({
       crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
       assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
@@ -15519,6 +15792,16 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 onChange={e => e.target.files?.[0] && onAdminUploadDoc(d.id, k, e.target.files[0])} />
             </label>
           ))}
+          {/* L'offre et le tableau arrivent régulièrement inversés. Le
+              reclassement se faisait tout seul du temps de l'analyse
+              automatique ; il se fait maintenant d'un clic. */}
+          {(d.docs?.offre || d.docs?.tableau) && (
+            <button onClick={() => onSwapDocs(d.id, "offre", "tableau")}
+              title="Intervertir l'offre de prêt et le tableau d'amortissement"
+              className="fa-tap text-xs bg-white border border-gray-200 hover:border-teal-300 text-gray-500 hover:fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1 transition">
+              <ArrowLeftRight size={12} /> Intervertir offre / tableau
+            </button>
+          )}
           {(d.extraDocs || []).map((ed, i) => (
             <span key={i} className="text-xs bg-teal-50 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1">
               <button onClick={() => previewStoredFile(ed.key)} title="Ouvrir le document"
@@ -16658,126 +16941,24 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
                                       {simOpenId === d.id && (
                                         <div className="mt-2 bg-white border border-gray-200 rounded-xl p-4">
-                                          <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
-                                            <div className="flex items-center gap-2">
-                                              <Sparkles size={15} className="fa-teal-text" />
-                                              <span className="text-sm font-semibold fa-navy">Simulation client</span>
-                                            </div>
-                                            {(d.docs?.offre || d.docs?.tableau) && (
-                                              <button onClick={async () => {
-                                                setSimAnalyzing(d.id); setSimAnalyzeError(""); setSimAnalysisResult(null); setSimAutoReclassified(false);
-                                                const { result, error } = await onAnalyzeDossierIA(d.id);
-                                                // Banque et cotisation actuelle servent aussi au suivi back-office.
-                                                if (result && (result.banque || result.cotisationMensuelleActuelle)) {
-                                                  onUpdateDossierSimulation(d.id, {
-                                                    ...(result.banque ? { banqueDetectee: result.banque } : {}),
-                                                    ...(result.cotisationMensuelleActuelle ? { cotisationActuelle: result.cotisationMensuelleActuelle } : {}),
-                                                  });
-                                                }
-                                                setSimAnalyzing(null);
-                                                if (error) { setSimAnalyzeError(error); return; }
-                                                const misclassified =
-                                                  (result.offreSlotDetecte === "tableau" && result.tableauSlotDetecte === "offre") ||
-                                                  (result.offreSlotDetecte === "tableau" && !d.docs?.tableau) ||
-                                                  (result.tableauSlotDetecte === "offre" && !d.docs?.offre);
-                                                if (misclassified) {
-                                                  await onSwapDocs(d.id, "offre", "tableau");
-                                                  setSimAutoReclassified(true);
-                                                }
-                                                setSimAnalysisResult(result);
-                                                if (!d.clientLastName && result.clientNom) {
-  await onUpdateDossierClient(d.id, {
-    clientLastName: result.clientNom,
-    clientFirstName: result.clientPrenom || "",
-  });
-}
-                                                setSimDraft({
-                                                  crd: result.crdMontant ?? "", crdDate: result.crdDate ?? "",
-                                                  assuranceRestante: result.assuranceRestanteTotal ?? "",
-                                                  dureeRestanteMois: result.dureeRestanteMois ?? "",
-                                                });
-                                              }} disabled={simAnalyzing === d.id}
-                                                className="flex items-center gap-1.5 text-xs font-medium fa-bg-teal disabled:opacity-50 px-3 py-1.5 rounded-lg transition">
-                                                <Sparkles size={12} /> {simAnalyzing === d.id ? "Analyse en cours…" : "Analyser avec l'IA"}
-                                              </button>
-                                            )}
+                                          <div className="flex items-center gap-2 mb-3">
+                                            <Sparkles size={15} className="fa-teal-text" />
+                                            <span className="text-sm font-semibold fa-navy">Simulation client</span>
                                           </div>
-                                          {simAnalyzing === d.id && (
-                                            <p className="text-xs text-gray-400 mb-3">Peut prendre jusqu'à 2 minutes sur des documents volumineux — tu peux continuer à travailler en parallèle, ça tourne en arrière-plan.</p>
-                                          )}
                                           {!d.docs?.tableau && (
                                             <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
                                               <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
                                               <span className="text-xs text-amber-800">Tableau d'amortissement manquant — le CRD, le coût d'assurance restant et la durée restante ne pourront pas être calculés tant qu'il n'est pas déposé.</span>
                                             </div>
                                           )}
-                                          {simAnalyzeError && (
-                                            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
-                                              <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
-                                              <span className="text-xs text-red-700">{simAnalyzeError}</span>
-                                            </div>
-                                          )}
-                                          {simAutoReclassified && (
-                                            <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">
-                                              <Check size={14} className="text-emerald-600 shrink-0 mt-0.5" />
-                                              <span className="text-xs text-emerald-800">"Offre de prêt" et "Tableau d'amortissement" étaient mal classés — reclassés automatiquement.</span>
-                                            </div>
-                                          )}
-                                          {simAnalysisResult?.noteExplicative && (
-                                            <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-3">
-                                              <Sparkles size={14} className="text-sky-600 shrink-0 mt-0.5" />
-                                              <span className="text-xs text-sky-800"><strong>Note de l'analyse :</strong> {simAnalysisResult.noteExplicative}</span>
-                                            </div>
-                                          )}
-
                                           <div className="flex items-center justify-between text-xs mb-1 px-0.5">
-                                            <span className="text-gray-500">Client identifié</span>
-                                            <span className="fa-navy font-medium flex items-center gap-1"><Check size={12} className="text-emerald-600" />{clientName(d)}</span>
+                                            <span className="text-gray-500">Client</span>
+                                            <span className="fa-navy font-medium">{clientName(d)}</span>
                                           </div>
                                           {d.hasCoEmprunteur && (
                                             <div className="flex items-center justify-between text-xs mb-3 px-0.5">
                                               <span className="text-gray-500">Co-emprunteur</span>
                                               <span className="fa-navy font-medium">{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim()}</span>
-                                            </div>
-                                          )}
-
-                                          {simAnalysisResult && simAnalysisResult.clientNom && (
-                                            (simAnalysisResult.clientNom.toUpperCase() !== (d.clientLastName || "").toUpperCase()
-                                              || (simAnalysisResult.clientPrenom || "").toLowerCase() !== (d.clientFirstName || "").toLowerCase()) && (
-                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 flex-wrap">
-                                                <span className="text-xs text-amber-800">
-                                                  ⚠️ Le document indique <strong>{simAnalysisResult.clientNom.toUpperCase()} {simAnalysisResult.clientPrenom}</strong>, le partenaire avait saisi <strong>{clientName(d)}</strong>.
-                                                </span>
-                                                <button onClick={() => onUpdateDossierClient(d.id, { clientLastName: simAnalysisResult.clientNom, clientFirstName: simAnalysisResult.clientPrenom })}
-                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
-                                                  Corriger
-                                                </button>
-                                              </div>
-                                            )
-                                          )}
-                                          {simAnalysisResult && d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
-                                            (simAnalysisResult.coEmprunteurNom.toUpperCase() !== (d.coClientLastName || "").toUpperCase()
-                                              || (simAnalysisResult.coEmprunteurPrenom || "").toLowerCase() !== (d.coClientFirstName || "").toLowerCase()) && (
-                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
-                                                <span className="text-xs text-amber-800">
-                                                  ⚠️ Le document indique un co-emprunteur <strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>, le partenaire avait saisi <strong>{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim() || "aucun"}</strong>.
-                                                </span>
-                                                <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
-                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
-                                                  Corriger
-                                                </button>
-                                              </div>
-                                            )
-                                          )}
-                                          {simAnalysisResult && !d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
-                                            <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
-                                              <span className="text-xs text-amber-800">
-                                                ⚠️ Les documents mentionnent un co-emprunteur (<strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>) non déclaré par le partenaire.
-                                              </span>
-                                              <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
-                                                className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
-                                                Ajouter
-                                              </button>
                                             </div>
                                           )}
 
@@ -16807,12 +16988,6 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             </div>
                                           </div>
 
-                                    {simAnalysisResult?.syntheseCrd && (
-  <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-2">
-    <Sparkles size={14} className="text-sky-600 shrink-0 mt-0.5" />
-    <span className="text-xs text-sky-800"><strong>Comment ce CRD a été trouvé :</strong> {simAnalysisResult.syntheseCrd}</span>
-  </div>
-)}
                                           {simDraft.assuranceRestante && simDraft.dureeRestanteMois && Number(simDraft.dureeRestanteMois) > 0 && (
                                             <div className="fa-bg-offwhite rounded-lg px-3 py-2 mb-3 flex items-center justify-between">
                                               <span className="text-xs text-gray-500">Mensualité moyenne (linéaire)</span>
