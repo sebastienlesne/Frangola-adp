@@ -227,6 +227,7 @@ const CATEGORIES_ADMIN = [
       { id: "partenaires", label: "Partenaires" },
       { id: "mandataires", label: "Mandataires", fullAdmin: true },
       { id: "assureurs", label: "Assureurs", fullAdmin: true },
+      { id: "banques", label: "Banques", fullAdmin: true },
       { id: "journal", label: "Journal" },
       { id: "corbeille", label: "Corbeille" },
     ],
@@ -2309,6 +2310,12 @@ export default function App() {
       settings: { ...base.settings, assureurs: liste },
     }));
   }
+  async function setBanques(liste) {
+    await mutateData(base => ({
+      ...base,
+      settings: { ...base.settings, banques: liste },
+    }));
+  }
 
   // Ajout / modification / suppression d'un challenge ponctuel. L'ancien
   // challenge unique garde son emplacement d'origine : on le modifie là où il
@@ -3240,6 +3247,7 @@ export default function App() {
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
+          onSetBanques={setBanques}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
@@ -3312,6 +3320,7 @@ export default function App() {
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
+          onSetBanques={setBanques}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
@@ -6924,9 +6933,19 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <label className="text-[11px] text-gray-500 col-span-2">Banque
                   {!bo.banque && dossier.simulation?.banqueDetectee && <span className="ml-1 text-teal-700">· lue sur l'offre / le tableau</span>}
-                  <input key={"b" + banqueDuDossier(dossier)} defaultValue={banqueDuDossier(dossier)} placeholder="ex. Crédit Agricole"
-                    onBlur={e => e.target.value.trim() !== banqueDuDossier(dossier) && maj({ banque: e.target.value.trim() })}
-                    className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  {/* Une liste déroulante qui n'empêche pas d'écrire : les banques
+                      rangées dans Logistique sont proposées, et une banque qui n'y
+                      est pas se saisit quand même, signalée « hors liste ». */}
+                  <span className="mt-0.5 flex items-center gap-2">
+                    <PastilleBanque nom={banqueDuDossier(dossier)} data={_colorDataRef} />
+                    <input list="fa-banques" key={"b" + banqueDuDossier(dossier)} defaultValue={banqueDuDossier(dossier)}
+                      placeholder="ex. Crédit Agricole"
+                      onBlur={e => e.target.value.trim() !== banqueDuDossier(dossier) && maj({ banque: e.target.value.trim() })}
+                      className="flex-1 min-w-0 text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </span>
+                  <datalist id="fa-banques">
+                    {listeBanques(_colorDataRef).map(b => <option key={b.id || b.nom} value={b.nom} />)}
+                  </datalist>
                 </label>
                 <label className="text-[11px] text-gray-500">Ancienne assurance
                   <select value={bo.ancienneAssurance || ""} onChange={e => maj({ ancienneAssurance: e.target.value || null })}
@@ -7423,6 +7442,54 @@ function assureurLogo(data, nom) {
   // ceux déposés depuis l'écran de gestion (`logoData`).
   return a?.logoData || a?.logo || null;
 }
+// ─── Banques prêteuses ──────────────────────────────────────────────────
+// Même principe que les compagnies : une liste maison, un logo et une
+// couleur, pour que la banque d'un dossier se reconnaisse d'un coup d'œil au
+// lieu d'être retapée à la main chaque fois — avec les fautes de frappe qui
+// vont avec, et deux « Crédit Agricole » qui ne se ressemblent plus.
+const BANQUES_PAR_DEFAUT = [
+  { id: "credit-agricole", nom: "Crédit Agricole", couleur: "#008752" },
+  { id: "bnp-paribas", nom: "BNP Paribas", couleur: "#00915A" },
+  { id: "societe-generale", nom: "Société Générale", couleur: "#E60028" },
+  { id: "lcl", nom: "LCL", couleur: "#003B7E" },
+  { id: "caisse-d-epargne", nom: "Caisse d'Épargne", couleur: "#E2001A" },
+  { id: "banque-populaire", nom: "Banque Populaire", couleur: "#005EB8" },
+  { id: "credit-mutuel", nom: "Crédit Mutuel", couleur: "#E2001A" },
+  { id: "la-banque-postale", nom: "La Banque Postale", couleur: "#003B7E" },
+  { id: "cic", nom: "CIC", couleur: "#004B93" },
+  { id: "credit-du-nord", nom: "Crédit du Nord", couleur: "#1D3F8B" },
+  { id: "hsbc", nom: "HSBC", couleur: "#DB0011" },
+  { id: "boursorama", nom: "BoursoBank", couleur: "#E5007D" },
+];
+function listeBanques(data) {
+  const l = data?.settings?.banques;
+  return Array.isArray(l) && l.length > 0 ? l : BANQUES_PAR_DEFAUT;
+}
+function banqueParNom(data, nom) {
+  if (!nom) return null;
+  const cle = cleComparaison(nom);
+  return listeBanques(data).find(b => cleComparaison(b.nom) === cle) || null;
+}
+function banqueLogo(data, nom) {
+  const b = banqueParNom(data, nom);
+  return b?.logoData || b?.logo || null;
+}
+// La pastille d'une banque : son logo s'il a été déposé, sa couleur sinon.
+// Une banque saisie à la main mais absente du référentiel reste affichée —
+// on ne cache jamais une information parce qu'elle n'est pas rangée.
+function PastilleBanque({ nom, data, taille = 18 }) {
+  if (!nom) return null;
+  const b = banqueParNom(data, nom);
+  const logo = b?.logoData || b?.logo;
+  if (logo) return <img src={logo} alt={nom} style={{ height: taille }} className="w-auto max-w-[70px] object-contain shrink-0" />;
+  return (
+    <span className="inline-flex items-center gap-1.5 shrink-0">
+      <span className="rounded-full shrink-0" style={{ width: 9, height: 9, backgroundColor: b?.couleur || "#9ca3af" }} />
+      {!b && <span className="text-[10px] text-amber-700" title="Cette banque n'est pas dans ta liste">hors liste</span>}
+    </span>
+  );
+}
+
 function assureurParNom(data, nom) {
   if (!nom) return null;
   return listeAssureurs(data).find(a => a.nom === nom) || null;
@@ -7909,6 +7976,72 @@ const SEUIL_RECUL_CHALLENGE = 10;
 // Taux de rétrocession constaté sur un ensemble de dossiers. À défaut de toute
 // donnée, on retient le taux maison : 50 % pour l'apporteur.
 const TAUX_RETROCESSION_DEFAUT = 0.50;
+// Les honoraires que Frangola facture au client : une part du gain que la
+// substitution lui fait faire. C'est la règle maison, et c'est ce chiffre
+// qu'affiche déjà la simulation client — il n'a plus à être ressaisi à la main.
+const TAUX_HONORAIRES_SIMULATION = 0.10;
+
+function gainSimulation(d) {
+  const actuel = Number(d?.simulation?.assuranceRestante) || 0;
+  const devis = Number(d?.simulation?.devisAssurance) || 0;
+  if (!actuel || !devis) return 0;
+  return actuel - devis;          // négatif si le devis est plus cher
+}
+function honorairesSimules(d) {
+  const gain = gainSimulation(d);
+  if (gain <= 0) return 0;
+  return Math.round(gain * TAUX_HONORAIRES_SIMULATION * 100) / 100;
+}
+
+// La règle de rémunération d'un partenaire : son forfait s'il en a un, sinon
+// le taux qu'on lui applique réellement, lu sur ses propres dossiers. Sans
+// historique, le taux maison. C'est la même lecture que partout ailleurs —
+// on ne crée pas un second barème à côté du premier.
+function regleRetrocession(partner, dossiers) {
+  if (partner?.flatFee != null && partner.flatFee !== "") {
+    return { type: "forfait", montant: Number(partner.flatFee) || 0 };
+  }
+  const siens = (dossiers || []).filter(d => d.partnerId === partner?.id && (d.caAmount || 0) > 0);
+  return { type: "taux", taux: siens.length > 0 ? tauxRetrocession(siens) : TAUX_RETROCESSION_DEFAUT };
+}
+function retrocessionSelonRegle(partner, dossiers, caNet) {
+  const r = regleRetrocession(partner, dossiers);
+  if (r.type === "forfait") return r.montant;
+  return Math.round(Math.max(0, caNet || 0) * r.taux * 100) / 100;
+}
+function libelleRegleRetrocession(partner, dossiers) {
+  const r = regleRetrocession(partner, dossiers);
+  return r.type === "forfait" ? `Forfait ${r.montant}€` : `Sa règle : ${Math.round(r.taux * 100)}%`;
+}
+
+// Un dossier facturé sous le plancher sans motif : la règle maison n'est pas
+// respectée, et rien ne le signalait jusqu'ici.
+// Ce que la simulation doit réécrire dans la rémunération, ou rien du tout.
+// Trois cas où l'on ne touche à rien : pas de gain, un montant déjà saisi à
+// la main, ou un dossier perdu.
+function repriseHonoraires(dossier, simulation, partner, dossiers) {
+  if (!dossier) return null;
+  const d = simulation ? { ...dossier, simulation } : dossier;
+  if (d.status === "KO") return null;
+  const honoraires = honorairesSimules(d);
+  if (honoraires <= 0) return null;
+  const vierge = (d.caAmount == null || d.caAmount === "") && (d.honorairesBruts == null || d.honorairesBruts === "");
+  if (!vierge && !d.honorairesAuto) return null;
+  const geste = Number(d.gesteCommercial) || 0;
+  const net = Math.max(0, Math.round((honoraires - geste) * 100) / 100);
+  return {
+    honorairesBruts: honoraires,
+    caAmount: net,
+    commissionAmount: retrocessionSelonRegle(partner, dossiers, net),
+    honorairesAuto: true,
+  };
+}
+
+function motifManquant(d) {
+  const ca = d?.honorairesBruts != null ? d.honorairesBruts : d?.caAmount;
+  return ca != null && ca !== "" && Number(ca) < HONORAIRES_SEUIL_MOTIF && !d?.motifHonorairesReduits;
+}
+
 function tauxRetrocession(dossiers) {
   const ca = dossiers.reduce((s, d) => s + (d.caAmount || 0), 0);
   if (ca <= 0) return TAUX_RETROCESSION_DEFAUT;
@@ -9315,6 +9448,119 @@ function AssureursPanel({ data, onSet, canEdit, busy }) {
             className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
           <button onClick={ajouter} disabled={!nouveau.trim()}
             className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Ajouter</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Les banques prêteuses, leurs logos et leurs couleurs. Ce sont elles qui
+// alimentent la liste proposée dans le suivi back-office d'un dossier.
+function BanquesPanel({ data, onSet, canEdit, busy }) {
+  const liste = listeBanques(data);
+  const [nouveau, setNouveau] = useState("");
+  const champs = useRef({});
+
+  function maj(id, fields) {
+    onSet(liste.map(b => (b.id || b.nom) === id ? { ...b, ...fields } : b));
+  }
+  function ajouter() {
+    const nom = nouveau.trim();
+    if (!nom || liste.some(b => cleComparaison(b.nom) === cleComparaison(nom))) return;
+    onSet([...liste, { id: cleComparaison(nom).replace(/\s+/g, "-"), nom, couleur: "#6b7280" }]);
+    setNouveau("");
+  }
+  function retirer(id) {
+    onSet(liste.filter(b => (b.id || b.nom) !== id));
+  }
+  async function logo(id, file) {
+    if (!file) return;
+    try { maj(id, { logoData: await reduireImage(file, 200) }); }
+    catch (e) { /* on garde la banque sans logo */ }
+  }
+
+  const compte = (nom) => (data.dossiers || []).filter(d => cleComparaison(banqueDuDossier(d)) === cleComparaison(nom)).length;
+  // Une banque écrite sur un dossier mais absente de la liste : c'est
+  // exactement ce qu'on veut voir pour la ranger une bonne fois.
+  const horsListe = [];
+  for (const d of (data.dossiers || [])) {
+    const nom = banqueDuDossier(d);
+    if (!nom || banqueParNom(data, nom)) continue;
+    const vu = horsListe.find(x => cleComparaison(x.nom) === cleComparaison(nom));
+    if (vu) vu.n++; else horsListe.push({ nom, n: 1 });
+  }
+  horsListe.sort((a, b) => b.n - a.n);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+      <div className="font-display font-semibold fa-navy mb-1">Banques prêteuses</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Elles se choisissent dans une liste sur chaque dossier, au lieu d'être retapées.
+        Le logo et la couleur les rendent reconnaissables d'un coup d'œil dans le suivi back-office.
+      </p>
+
+      <div className="space-y-2">
+        {liste.map(b => {
+          const id = b.id || b.nom;
+          const n = compte(b.nom);
+          return (
+            <div key={id} className="flex items-center gap-3 flex-wrap fa-bg-offwhite rounded-lg px-3 py-2">
+              {(b.logoData || b.logo)
+                ? <img src={b.logoData || b.logo} alt={b.nom} className="h-6 w-auto max-w-[80px] object-contain" />
+                : <span className="w-4 h-4 rounded-full shrink-0" style={{ backgroundColor: b.couleur || "#999" }} />}
+              <span className="text-sm fa-navy font-semibold">{b.nom}</span>
+              <span className="text-xs text-gray-400">{n} dossier{n > 1 ? "s" : ""}</span>
+              {canEdit && (
+                <span className="ml-auto flex items-center gap-2">
+                  <input type="color" value={b.couleur || "#999999"}
+                    onChange={e => maj(id, { couleur: e.target.value })}
+                    title="Couleur de la banque"
+                    className="w-8 h-7 rounded cursor-pointer border border-gray-300" />
+                  <button onClick={() => champs.current[id]?.click()} disabled={busy}
+                    className="text-xs font-medium bg-white border border-gray-300 text-gray-600 px-2.5 py-1 rounded-lg transition">
+                    {b.logoData ? "Changer le logo" : "Logo"}
+                  </button>
+                  <input type="file" accept="image/*" className="hidden" ref={el => champs.current[id] = el}
+                    onChange={e => logo(id, e.target.files?.[0])} />
+                  {n === 0 && (
+                    <button onClick={() => retirer(id)} title="Retirer — aucun dossier ne l'utilise"
+                      className="text-xs text-gray-400 hover:text-red-600">✕</button>
+                  )}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {canEdit && (
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <input value={nouveau} onChange={e => setNouveau(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && ajouter()}
+            placeholder="Ajouter une banque"
+            className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          <button onClick={ajouter} disabled={!nouveau.trim()}
+            className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Ajouter</button>
+        </div>
+      )}
+
+      {horsListe.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-200">
+          <div className="text-xs font-semibold text-amber-800 mb-2">
+            Écrites sur un dossier mais absentes de la liste
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {horsListe.map(x => (
+              <span key={x.nom} className="inline-flex items-center gap-1.5 text-xs bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1">
+                <span className="fa-navy font-medium">{x.nom}</span>
+                <span className="text-amber-700">{x.n}</span>
+                {canEdit && (
+                  <button onClick={() => onSet([...liste, { id: cleComparaison(x.nom).replace(/\s+/g, "-"), nom: x.nom, couleur: "#6b7280" }])}
+                    title="Ajouter à la liste" className="fa-teal-text hover:underline font-semibold">+ ranger</button>
+                )}
+              </span>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -14772,7 +15018,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -14789,7 +15035,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     return CATEGORIES_ADMIN.some(c => c.feuillets.some(f => f.id === cible)) ? cible : "accueil";
   });
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:adminTab", t); };
-  useEffect(() => { if ((tab === "mandataires" || tab === "assureurs") && !isFullAdmin) setTab("accueil"); }, []);
+  useEffect(() => { if (["mandataires", "assureurs", "banques"].includes(tab) && !isFullAdmin) setTab("accueil"); }, []);
   // Sauts de navigation offerts à tout l'espace admin via NavAdmin : un clic
   // sur un nom, où qu'il apparaisse, ouvre la fiche correspondante. On passe
   // par la recherche déjà en place, qui déplie au passage le bon groupe.
@@ -14846,6 +15092,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "facturation", label: "Facturation et versements", defaut: "facturation", rendu: () => <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} onMajVersement={onMajVersementParrainage} onSupprimerVersement={onSupprimerVersementParrainage} onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} /> },
     { id: "compagnies", label: "Compagnies partenaires", defaut: "assureurs", fullAdmin: true, rendu: () => <AssureursPanel data={data} onSet={onSetAssureurs} canEdit={isFullAdmin} busy={busy} /> },
     { id: "productionAssureur", label: "Production par assureur", defaut: "assureurs", fullAdmin: true, rendu: () => <ProductionParAssureur data={data} dossiers={data.dossiers} /> },
+    { id: "banques", label: "Banques prêteuses", defaut: "banques", fullAdmin: true, rendu: () => <BanquesPanel data={data} onSet={onSetBanques} canEdit={isFullAdmin} busy={busy} /> },
     { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
     { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} /> },
     { id: "sauvegardes", label: "Sauvegarde et restauration", defaut: "journal", fullAdmin: true, rendu: () => <SauvegardesPanel onExporter={onExporterSauvegarde} onRestaurer={onRestaurerSauvegarde} onVerifier={onVerifierSauvegarde} busy={busy} /> },
@@ -14994,14 +15241,23 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             devisAssurance: d.simulation?.devisAssurance ?? "",
     });
   }
-  function saveSim(id) {
-    onUpdateDossierSimulation(id, {
+  // Enregistrer la simulation, c'est aussi fixer ce qu'on facture : les
+  // honoraires sont 10 % du gain, et la rétrocession suit la règle du
+  // partenaire. On ne recalcule QUE tant que personne n'a corrigé à la main —
+  // une valeur saisie ne se fait jamais écraser par une nouvelle simulation.
+  async function saveSim(id) {
+    const simulation = {
       crd: simDraft.crd === "" ? null : Number(simDraft.crd),
       crdDate: simDraft.crdDate,
       assuranceRestante: simDraft.assuranceRestante === "" ? null : Number(simDraft.assuranceRestante),
-            devisAssurance: simDraft.devisAssurance === "" ? null : Number(simDraft.devisAssurance),
+      devisAssurance: simDraft.devisAssurance === "" ? null : Number(simDraft.devisAssurance),
       dureeRestanteMois: simDraft.dureeRestanteMois === "" ? null : Number(simDraft.dureeRestanteMois),
-    });
+    };
+    await onUpdateDossierSimulation(id, simulation);
+
+    const d = data.dossiers.find(x => x.id === id);
+    const reprise = repriseHonoraires(d, simulation, data.partners.find(p => p.id === d?.partnerId), data.dossiers);
+    if (reprise) await onUpdateDossierClient(id, reprise);
     setSimOpenId(null);
   }
   const [notesDraft, setNotesDraft] = useState("");
@@ -15227,8 +15483,16 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   function openFinance(d) {
     setFinanceOpenId(d.id);
     const geste = Number(d.gesteCommercial) || 0;
-    const brut = d.honorairesBruts != null ? d.honorairesBruts : (d.caAmount != null ? d.caAmount + geste : "");
-    setFinanceDraft({ caAmount: brut ?? "", commissionAmount: d.commissionAmount ?? "", geste: geste ? String(geste) : "", motif: d.motifHonorairesReduits || "" });
+    let brut = d.honorairesBruts != null ? d.honorairesBruts : (d.caAmount != null ? d.caAmount + geste : "");
+    let commission = d.commissionAmount ?? "";
+    // Rien de saisi et une simulation qui a tourné : on ouvre l'écran déjà
+    // rempli. Ce n'est pas encore enregistré — il reste maître de la valeur.
+    if ((brut === "" || brut == null) && honorairesSimules(d) > 0) {
+      const partner = data.partners.find(p => p.id === d.partnerId);
+      brut = honorairesSimules(d);
+      commission = retrocessionSelonRegle(partner, data.dossiers, Math.max(0, brut - geste));
+    }
+    setFinanceDraft({ caAmount: brut ?? "", commissionAmount: commission, geste: geste ? String(geste) : "", motif: d.motifHonorairesReduits || "" });
   }
   async function saveFinance(id) {
     const brut = financeDraft.caAmount === "" ? null : Number(financeDraft.caAmount);
@@ -15240,6 +15504,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
       gesteCommercial: geste || null,
       motifHonorairesReduits: brut !== null && brut < HONORAIRES_SEUIL_MOTIF ? financeDraft.motif : null,
       commissionAmount: financeDraft.commissionAmount === "" ? null : Number(financeDraft.commissionAmount),
+      // Validé à la main : à partir d'ici, plus aucune simulation ne vient
+      // réécrire ce montant par-dessus.
+      honorairesAuto: null,
     });
     setFinanceOpenId(null);
   }
@@ -16165,6 +16432,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           <button onClick={() => financeOpenId === d.id ? setFinanceOpenId(null) : openFinance(d)}
                                             className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
                                             💶 Rémunération {(d.caAmount || d.commissionAmount) && <span className="fa-bg-gold fa-navy rounded-full w-1.5 h-1.5" />}
+                                            {d.honorairesAuto && <span className="text-[10px] font-semibold bg-teal-50 fa-teal-text border border-teal-200 px-1.5 py-0.5 rounded-full">repris de la simulation</span>}
+                                            {motifManquant(d) && <span className="text-[10px] font-semibold bg-red-50 text-red-700 border border-red-300 px-1.5 py-0.5 rounded-full">motif à choisir</span>}
                                             {d.motifHonorairesReduits && <span className="text-[10px] font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-1.5 py-0.5 rounded-full">{d.motifHonorairesReduits}</span>}
                                             {d.gesteCommercial > 0 && <span className="text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded-full">geste −{fmtEuro(d.gesteCommercial)}</span>}
                                           </button>
@@ -16188,7 +16457,23 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         <div className="mt-2 bg-gray-50 rounded-lg p-3">
                                           <div className="grid sm:grid-cols-2 gap-3">
                                             <div>
-                                              <label className="block text-xs text-gray-500 mb-1">Honoraires facturés (€) — interne</label>
+                                              <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between gap-2">
+                                                <span>Honoraires facturés (€) — interne</span>
+                                                {honorairesSimules(d) > 0 && (
+                                                  Number(financeDraft.caAmount) === honorairesSimules(d)
+                                                    ? <span className="fa-teal-text font-normal normal-case shrink-0">= simulation</span>
+                                                    : <button type="button"
+                                                        onClick={() => setFinanceDraft(f => {
+                                                          const brut = honorairesSimules(d);
+                                                          const net = Math.max(0, brut - (Number(f.geste) || 0));
+                                                          return { ...f, caAmount: String(brut), commissionAmount: String(retrocessionSelonRegle(p, data.dossiers, net)) };
+                                                        })}
+                                                        title={`10 % du gain client calculé dans la simulation (${fmtEuroPrecis(honorairesSimules(d))})`}
+                                                        className="fa-teal-text hover:underline font-normal normal-case shrink-0">
+                                                        Simulation {fmtEuroPrecis(honorairesSimules(d))}
+                                                      </button>
+                                                )}
+                                              </label>
                                               <input type="number" onFocus={selectionTotale} value={financeDraft.caAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, caAmount: e.target.value }))}
                                                 placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
@@ -16217,15 +16502,18 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between">
                                                 Rétrocession partenaire (€)
-                                                {p.flatFee ? (
-                                                  <button type="button"
-                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: String(p.flatFee) }))}
-                                                    className="fa-teal-text hover:underline font-normal normal-case">Forfait {p.flatFee}€</button>
-                                                ) : (
-                                                  <button type="button"
-                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: f.caAmount ? (Math.max(0, Number(f.caAmount) - (Number(f.geste) || 0)) / 2).toString() : f.commissionAmount }))}
-                                                    className="fa-teal-text hover:underline font-normal normal-case">50% auto</button>
-                                                )}
+                                                {/* Un seul bouton, qui applique la règle réelle du partenaire :
+                                                    son forfait, ou le taux qu'on lui applique sur ses dossiers. */}
+                                                <button type="button"
+                                                  onClick={() => setFinanceDraft(f => ({
+                                                    ...f,
+                                                    commissionAmount: String(retrocessionSelonRegle(
+                                                      p, data.dossiers, Math.max(0, (Number(f.caAmount) || 0) - (Number(f.geste) || 0)))),
+                                                  }))}
+                                                  title="Appliquer sa règle de rémunération"
+                                                  className="fa-teal-text hover:underline font-normal normal-case">
+                                                  {libelleRegleRetrocession(p, data.dossiers)}
+                                                </button>
                                               </label>
                                               <input type="number" onFocus={selectionTotale} value={financeDraft.commissionAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, commissionAmount: e.target.value }))}
@@ -18011,6 +18299,13 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           <div>
             <h2 className="font-display text-lg font-semibold fa-navy">Assureurs</h2>
             <p className="text-sm text-gray-500">Les compagnies partenaires, leurs logos et leurs couleurs — et ce que chacune pèse dans ta production.</p>
+          </div>
+        )}
+
+        {tab === "banques" && isFullAdmin && (
+          <div>
+            <h2 className="font-display text-lg font-semibold fa-navy">Banques</h2>
+            <p className="text-sm text-gray-500">Les banques prêteuses que tu retrouves sur les dossiers : leur logo, leur couleur, et ce que chacune représente.</p>
           </div>
         )}
 
