@@ -1098,6 +1098,12 @@ function genererJeuDemo(base) {
         else d.history[d.history.length - 1] = { status: final, at: Math.round(fin) };
         d.status = final;
       })();
+      // Quelques dossiers repris par l'autre commercial, pour que la
+      // réaffectation se voie en démo plutôt que de rester théorique.
+      if (chance(0.07)) {
+        const autre = choix([...commerciaux, "Sébastien"].filter(c => c !== p.commercial));
+        if (autre) d.commercial = autre;
+      }
       dossiers.push(d);
     }
   }
@@ -2953,6 +2959,33 @@ export default function App() {
     });
   }
 
+  // Réaffecter un dossier à un autre commercial, sans toucher au partenaire.
+  // `commercial` à null remet le dossier sur son partenaire. Le changement
+  // déplace de l'argent (part mandataire sur honoraires et récurrence) : il
+  // part au journal, toujours.
+  async function reaffecterDossier(dossierId, commercial) {
+    await mutateData(base => {
+      const cible = base.dossiers.find(d => d.id === dossierId);
+      if (!cible) return base;
+      const duPartenaire = base.partners.find(p => p.id === cible.partnerId)?.commercial || null;
+      // Choisir le commercial du partenaire, c'est revenir au défaut : on
+      // n'enregistre pas une exception qui n'en est pas une.
+      const valeur = (!commercial || commercial === duPartenaire) ? null : commercial;
+      const avant = cible.commercial || duPartenaire;
+      if ((cible.commercial || null) === valeur) return base;
+      const dossiers = base.dossiers.map(d => d.id === dossierId
+        ? { ...d, commercial: valeur, updatedAt: Date.now() }
+        : d);
+      const cname = `${cible.clientLastName || ""} ${cible.clientFirstName || ""}`.trim() || "(sans nom)";
+      const message = valeur
+        ? `a réaffecté le dossier ${cname} à ${commercialLabel(valeur) || valeur}` +
+          (avant ? ` (suivi jusqu'ici par ${commercialLabel(avant) || avant})` : "")
+        : `a remis le dossier ${cname} sur son partenaire` +
+          (duPartenaire ? ` (${commercialLabel(duPartenaire) || duPartenaire})` : "");
+      return withLog({ ...base, dossiers }, message);
+    });
+  }
+
   async function updateDossierNotes(dossierId, notes) {
     await mutateData(base => ({
       ...base,
@@ -3316,6 +3349,7 @@ export default function App() {
           onUploadPieceBackOffice={uploadPieceBackOffice}
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
+          onReaffecterDossier={reaffecterDossier}
           onUpdateDossierSimulation={updateDossierSimulation}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
@@ -3388,6 +3422,7 @@ export default function App() {
           onUploadPieceBackOffice={uploadPieceBackOffice}
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
+          onReaffecterDossier={reaffecterDossier}
           onUpdateDossierSimulation={updateDossierSimulation}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
@@ -5805,6 +5840,25 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
 const MANDATAIRE_PALETTE = ["#545454", "#8B5CF6", "#0EA5E9", "#F97316", "#059669", "#DC2626", "#DB2777", "#CA8A04"];
 let _colorDataRef = null;
 function setColorDataRef(d) { _colorDataRef = d; }
+// Le commercial d'un dossier. Par défaut c'est celui du partenaire — un
+// apporteur est suivi par quelqu'un, et ses dossiers suivent. Mais un dossier
+// peut être repris par l'autre commercial sans que le partenaire change de
+// main : `d.commercial` est cette exception, et elle porte sur CE dossier.
+// Tout ce qui ventile par commercial passe par ici, sinon les chiffres se
+// contredisent d'un écran à l'autre.
+function commercialDuDossier(d, partners) {
+  if (d?.commercial) return d.commercial;
+  return (partners || []).find(p => p.id === d?.partnerId)?.commercial || null;
+}
+// Vrai quand le dossier a été réaffecté à la main, c'est-à-dire quand il ne
+// suit plus son partenaire. Sert à marquer la pastille : une exception
+// invisible rendrait les totaux incompréhensibles.
+function dossierReaffecte(d, partners) {
+  if (!d?.commercial) return false;
+  const duPartenaire = (partners || []).find(p => p.id === d.partnerId)?.commercial || null;
+  return d.commercial !== duPartenaire;
+}
+
 function commercialColor(name) {
   if (!name) return "#999";
   if (_colorDataRef) {
@@ -6155,7 +6209,7 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
   const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
   const goals = data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
 
-  const commercialOf = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
+  const commercialOf = (d) => commercialDuDossier(d, data.partners);
   const paidAt = (d) => d.paymentDate ? new Date(d.paymentDate).getTime() : (d.updatedAt || d.createdAt);
 
   function statsFor(c, start, end) {
@@ -7720,7 +7774,8 @@ function projectionRecurrence(dossiers, nouveauxParMois, r1, r2, annees = 5) {
 // mandataire. Les dossiers suivis par le gérant reviennent à Frangola en
 // entier — appliquer 50 % à l'ensemble reviendrait à se verser une commission
 // à soi-même, et à sous-estimer d'autant le revenu réel de la maison.
-function recurrenceParMandataire(data, nomGerant = "Sébastien") {
+const NOM_GERANT = "Sébastien";
+function recurrenceParMandataire(data, nomGerant = NOM_GERANT) {
   const parPartenaire = new Map((data?.partners || []).map(x => [x.id, x]));
   const lignes = new Map();
   const ligne = (nom) => {
@@ -7744,9 +7799,10 @@ function recurrenceParMandataire(data, nomGerant = "Sébastien") {
     const mensuel = recurrenceMensuelle(d);
     const cumul = recurrenceCumulee(d);
     if (mensuel <= 0 && cumul <= 0) continue;
+    // Un dossier réaffecté suit son commercial ; sinon celui du partenaire.
     // Un partenaire sans commercial connu revient à la maison : c'est le cas
     // du Pot commun, et c'est le bon défaut.
-    const nom = parPartenaire.get(d.partnerId)?.commercial || nomGerant;
+    const nom = d.commercial || parPartenaire.get(d.partnerId)?.commercial || nomGerant;
     const l = ligne(nom);
     if (contratEnCours(d)) {
       l.contrats += 1;
@@ -11887,7 +11943,7 @@ function periodesTerminees(data) {
 
 // Réalisé sur [debut, fin[ (horodatages), ventilé par commercial.
 function realiseProduction(data, commerciaux, debut, fin) {
-  const commercialDuDossier = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
+  const commercialDe = (d) => commercialDuDossier(d, data.partners);
   const parCommercial = (extracteur) => {
     const m = new Map(commerciaux.map(c => [c, 0]));
     extracteur((c, v) => { if (m.has(c)) m.set(c, m.get(c) + v); });
@@ -11904,7 +11960,7 @@ function realiseProduction(data, commerciaux, debut, fin) {
     for (const d of data.dossiers) {
       const t = dateGain(d);
       if (t === null || t < debut || t >= fin) continue;
-      ajoute(commercialDuDossier(d), 1);
+      ajoute(commercialDe(d), 1);
     }
   });
   // Récurrence AJOUTÉE : la commission mensuelle des contrats dont la date
@@ -11914,7 +11970,7 @@ function realiseProduction(data, commerciaux, debut, fin) {
       if (!STATUTS_CONTRAT_VIVANT.includes(d.status) || !d.dateEffet) continue;
       const t = new Date(d.dateEffet + "T12:00:00").getTime();
       if (isNaN(t) || t < debut || t >= fin) continue;
-      ajoute(commercialDuDossier(d), recurrenceMensuelle(d));
+      ajoute(commercialDe(d), recurrenceMensuelle(d));
     }
   });
   const ca = parCommercial(ajoute => {
@@ -11925,7 +11981,7 @@ function realiseProduction(data, commerciaux, debut, fin) {
       ech.forEach((e, i) => {
         const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
           : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
-        if (quand !== null && quand >= debut && quand < fin) ajoute(commercialDuDossier(d), parts[i]);
+        if (quand !== null && quand >= debut && quand < fin) ajoute(commercialDe(d), parts[i]);
       });
     }
   });
@@ -15429,7 +15485,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -16513,8 +16569,16 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 return d.status === dossierFilter;
               };
               const matchesSearch = (d) => matchesFilter(d) && (!searchTerm || `${d.clientFirstName} ${d.clientLastName}`.toLowerCase().includes(searchTerm));
+              // Le filtre commercial s'applique au dossier, pas au partenaire.
+              const suitLeFiltre = (d) => commercialFilter === "tous" || commercialDuDossier(d, data.partners) === commercialFilter;
+              const partenaireRetenu = (p) => {
+                if (commercialFilter === "tous") return true;
+                const siens = data.dossiers.filter(d => d.partnerId === p.id);
+                if (siens.length === 0) return p.commercial === commercialFilter;
+                return siens.some(suitLeFiltre);
+              };
               const deptGroups = {};
-              data.partners.filter(p => !p.deleted && (commercialFilter === "tous" || p.commercial === commercialFilter)).forEach(p => {
+              data.partners.filter(p => !p.deleted && partenaireRetenu(p)).forEach(p => {
                 const key = p.departement || "Non renseigné";
                 if (!deptGroups[key]) deptGroups[key] = [];
                 deptGroups[key].push(p);
@@ -16524,15 +16588,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               const POT = "__pot__";
               const idsConnus = new Set(data.partners.map(x => x.id));
               const anciens = data.partners
-                .filter(x => x.deleted && (commercialFilter === "tous" || x.commercial === commercialFilter) && data.dossiers.some(d => d.partnerId === x.id))
+                .filter(x => x.deleted && partenaireRetenu(x) && data.dossiers.some(d => d.partnerId === x.id))
                 .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
               if (commercialFilter === "tous" && data.dossiers.some(d => !idsConnus.has(d.partnerId))) {
                 anciens.push({ id: "__inconnu__", name: "Partenaire introuvable", firstName: "", deleted: true, _inconnu: true });
               }
               if (anciens.length > 0) deptGroups[POT] = anciens;
-              const dossiersDe = (x) => x._inconnu
+              const dossiersDe = (x) => (x._inconnu
                 ? data.dossiers.filter(d => !idsConnus.has(d.partnerId))
-                : data.dossiers.filter(d => d.partnerId === x.id);
+                : data.dossiers.filter(d => d.partnerId === x.id)).filter(suitLeFiltre);
               const deptKeys = Object.keys(deptGroups).sort((a, b) => {
                 if (a === POT) return -1;
                 if (b === POT) return 1;
@@ -16666,11 +16730,22 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           {p.deleted
                                             ? <span className="text-xs text-violet-700 line-through decoration-violet-300 max-w-[10rem] truncate" title={nomPartenaire(p)}>{nomPartenaire(p)}</span>
                                             : <LienPartenaire p={p} className="text-xs font-semibold text-gray-600 underline decoration-dotted decoration-gray-300 underline-offset-2 max-w-[10rem] truncate" />}
-                                          <span className="text-white text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap"
-                                            style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}
-                                            title="Commercial qui suit ce partenaire">
-                                            {commercialLabel(p.commercial) || "—"}
-                                          </span>
+                                          {(() => {
+                                            const suivi = commercialDuDossier(d, data.partners);
+                                            const apart = dossierReaffecte(d, data.partners);
+                                            return (
+                                              <span className="text-white text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap"
+                                                style={{
+                                                  backgroundColor: COMMERCIAL_COLORS[suivi] || "#999",
+                                                  border: apart ? "2px solid var(--fa-gold)" : "2px solid transparent",
+                                                }}
+                                                title={apart
+                                                  ? `Dossier réaffecté à ${commercialLabel(suivi) || suivi} — le partenaire est suivi par ${commercialLabel(p.commercial) || "personne"}`
+                                                  : "Commercial qui suit ce dossier"}>
+                                                {apart && "→ "}{commercialLabel(suivi) || "—"}
+                                              </span>
+                                            );
+                                          })()}
                                           <StatusBadge status={d.status} />
                                           <PaiementBadge dossier={d} />
                                           <button type="button" onClick={() => toggleFolder(cleCarte)}
@@ -16681,6 +16756,69 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         </div>
                                       </div>
                                       {carteOuverte && (<>
+                                      {/* Qui suit ce dossier. Par défaut le commercial du
+                                          partenaire ; on peut le reprendre sans déplacer le
+                                          partenaire lui-même. Réservé au gérant : la part
+                                          mandataire ne se décide pas tout seul. */}
+                                      {(() => {
+                                        const suivi = commercialDuDossier(d, data.partners);
+                                        const apart = dossierReaffecte(d, data.partners);
+                                        if (!isFullAdmin) {
+                                          if (!apart) return null;
+                                          return (
+                                            <div className="text-xs text-gray-600 fa-bg-offwhite border border-gray-200 rounded-lg px-3 py-2 mt-3">
+                                              Dossier réaffecté à <strong className="fa-navy">{commercialLabel(suivi) || suivi}</strong>
+                                              {" — "}le partenaire reste suivi par {commercialLabel(p.commercial) || "personne"}.
+                                            </div>
+                                          );
+                                        }
+                                        return (
+                                          <div className="fa-bg-offwhite border border-gray-200 rounded-xl px-3.5 py-3 mt-3">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                              <span className="text-sm font-bold fa-navy">Suivi par</span>
+                                              {COMMERCIAUX.map(c => {
+                                                const ici = suivi === c;
+                                                return (
+                                                  <button key={c} type="button" aria-pressed={ici} disabled={busy}
+                                                    onClick={() => onReaffecterDossier(d.id, c)}
+                                                    className="fa-tap text-sm font-bold px-4 py-2 rounded-full border transition disabled:opacity-50"
+                                                    style={ici
+                                                      ? { backgroundColor: COMMERCIAL_COLORS[c], borderColor: COMMERCIAL_COLORS[c], color: "#fff" }
+                                                      : { backgroundColor: "#fff", borderColor: "#d1d5db", color: "#4b5563" }}>
+                                                    {commercialLabel(c) || c}
+                                                  </button>
+                                                );
+                                              })}
+                                              <span className="flex-1 min-w-0" />
+                                              {apart && (
+                                                <button type="button" disabled={busy}
+                                                  onClick={() => onReaffecterDossier(d.id, null)}
+                                                  className="fa-tap text-xs font-bold fa-teal-text bg-white border border-teal-200 rounded-lg px-3.5 py-2 hover:bg-teal-50 transition disabled:opacity-50">
+                                                  Revenir au partenaire
+                                                </button>
+                                              )}
+                                            </div>
+                                            <div className="text-xs text-gray-500 mt-2 leading-relaxed">
+                                              {apart
+                                                ? <>Exception sur ce dossier seulement. {nomPartenaire(p)} reste un partenaire de {commercialLabel(p.commercial) || "personne"} : ses autres dossiers ne bougent pas.</>
+                                                : <>Suit le partenaire. {nomPartenaire(p)} relève de {commercialLabel(p.commercial) || "personne"}, donc ce dossier aussi.</>}
+                                            </div>
+                                            {apart && (
+                                              <div className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2 leading-relaxed">
+                                                {suivi === NOM_GERANT ? (
+                                                  <>Ce qui suit {commercialLabel(suivi) || suivi} : la part mandataire de 50 % sur les honoraires,
+                                                  le point au challenge du mois, et la ligne au tableau des objectifs. Sur la récurrence, la maison
+                                                  garde tout — aucune part n'est prélevée sur les dossiers du gérant.</>
+                                                ) : (
+                                                  <>Ce qui suit {commercialLabel(suivi) || suivi} : la part mandataire de 50 % sur les honoraires
+                                                  et sur la récurrence, le point au challenge du mois, et la ligne au tableau des objectifs.</>
+                                                )}
+                                                {" "}La rétrocession reste à {nomPartenaire(p)}.
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      })()}
                                       <Stepper status={d.status} />
                                       {d.status === "Bordereau émis" && (() => {
                                         const bAt = getBordereauAt(d);
@@ -16924,7 +17062,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                                   <div className="flex justify-between"><span>CA généré après geste commercial ({fmtEuro(brutSaisi)} − {fmtEuro(geste)})</span><span className="font-semibold fa-navy">{fmtEuro(ca)}</span></div>
                                                 )}
                                                 <div className="flex justify-between"><span>CA réel Frangola (après apporteur)</span><span className="font-semibold fa-navy">{fmtEuro(caReel)}</span></div>
-                                                <div className="flex justify-between"><span>Part {p.commercial || "commercial"} (mandataire, 50%)</span><span className="font-semibold" style={{ color: COMMERCIAL_COLORS[p.commercial] }}>{fmtEuro(mandataireCut)}</span></div>
+                                                {(() => {
+                                                  const suivi = commercialDuDossier(d, data.partners);
+                                                  return (
+                                                    <div className="flex justify-between">
+                                                      <span>Part {commercialLabel(suivi) || "commercial"} (mandataire, 50%){dossierReaffecte(d, data.partners) && <span className="text-gray-400"> · réaffecté</span>}</span>
+                                                      <span className="font-semibold" style={{ color: COMMERCIAL_COLORS[suivi] }}>{fmtEuro(mandataireCut)}</span>
+                                                    </div>
+                                                  );
+                                                })()}
                                                 <div className="flex justify-between"><span>Marge nette finale Frangola</span><span className="font-bold text-emerald-700">{fmtEuro(margeNette)}</span></div>
                                               </div>
                                             );
