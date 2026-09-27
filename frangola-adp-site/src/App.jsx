@@ -16133,80 +16133,40 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 if (b === "Non renseigné") return -1;
                 return a.localeCompare(b, undefined, { numeric: true });
               });
-              return deptKeys.map(deptKey => {
-                const estPot = deptKey === POT;
-                const partnersInDeptAll = estPot ? deptGroups[deptKey] : [...deptGroups[deptKey]].sort((a, b) => (a.ville || "").localeCompare(b.ville || ""));
-                const filterActive = !!searchTerm || dossierFilter !== "tous";
-                const partnersInDept = filterActive
-                  ? partnersInDeptAll.filter(p => dossiersDe(p).some(d => matchesSearch(d)))
-                  : partnersInDeptAll;
-                if (filterActive && partnersInDept.length === 0) return null;
-                const deptDossiers = partnersInDeptAll.flatMap(p => dossiersDe(p));
-                const deptNewCount = deptDossiers.filter(d => d.status === "Déposé").length;
-                const deptFolderKey = "dept:" + deptKey;
-                const isDeptCollapsed = filterActive ? false : estPlie(deptFolderKey);
+              // Une seule liste, à plat. Deux dossiers à ouvrir avant
+              // d'atteindre un client coûtaient plus de temps qu'ils n'en
+              // faisaient gagner : passé quelques dizaines de dossiers, on ne
+              // voit plus rien. Le département disparaît de l'affichage — il
+              // reste sur la fiche du partenaire — et le partenaire comme le
+              // commercial passent sur la ligne du client.
+              const filterActive = !!searchTerm || dossierFilter !== "tous";
+              const lignesDossiers = [];
+              for (const deptKey of deptKeys) {
+                for (const p of deptGroups[deptKey]) {
+                  for (const d of dossiersDe(p)) {
+                    if (filterActive && !matchesSearch(d)) continue;
+                    lignesDossiers.push({ d, p });
+                  }
+                }
+              }
+              lignesDossiers.sort((a, b) => b.d.createdAt - a.d.createdAt);
+              if (lignesDossiers.length === 0) {
                 return (
-                  <div key={deptFolderKey} className={`rounded-2xl overflow-hidden border-2 shadow-sm ${estPot ? "border-violet-200" : "border-teal-100"}`}>
-                    <button onClick={() => toggleFolder(deptFolderKey)}
-                      className={`w-full flex items-center justify-between px-5 py-4 hover:brightness-95 transition ${estPot ? "bg-violet-50" : "fa-bg-pink"}`}>
-                      <div className="flex items-center gap-3">
-                        {estPot ? <span className="text-xl leading-none">🗂️</span> : isDeptCollapsed ? <Folder className="fa-navy" size={22} /> : <FolderOpen className="fa-navy" size={22} />}
-                        <div className="text-left">
-                          <div className={`font-display font-bold ${estPot ? "text-violet-700" : "fa-navy"}`}>
-                            {estPot ? "Pot commun" : deptKey === "Non renseigné" ? "Département non renseigné" : `Département ${deptKey}`}
-                          </div>
-                          {estPot ? (
-                            <div className="text-xs text-gray-500">{deptDossiers.length} client{deptDossiers.length !== 1 ? "s" : ""} d'anciens partenaires · {partnersInDeptAll.length} partenaire{partnersInDeptAll.length !== 1 ? "s" : ""} supprimé{partnersInDeptAll.length !== 1 ? "s" : ""}</div>
-                          ) : (
-                          <div className="text-xs text-teal-900/70">{partnersInDeptAll.length} partenaire{partnersInDeptAll.length !== 1 ? "s" : ""} · {deptDossiers.length} dossier{deptDossiers.length !== 1 ? "s" : ""}</div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2.5">
-                        {deptNewCount > 0 && <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{deptNewCount}</span>}
-                        <ChevronDown size={16} className={`fa-navy transition-transform ${isDeptCollapsed ? "" : "rotate-180"}`} />
-                      </div>
-                    </button>
-
-                    {!isDeptCollapsed && (
-                      <div className="fa-bg-offwhite p-2.5 sm:p-4 space-y-4">
-                        {partnersInDept.map(p => {
-                          const partnerDossiersAll = dossiersDe(p).sort((a, b) => b.createdAt - a.createdAt);
-                          const partnerDossiers = filterActive ? partnerDossiersAll.filter(matchesSearch) : partnerDossiersAll;
-                          const newCount = partnerDossiersAll.filter(d => d.status === "Déposé").length;
-                          const isCollapsed = filterActive ? false : estPlie(p.id);
-                          return (
-                            <div key={p.id} className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm">
-                              <button onClick={() => toggleFolder(p.id)}
-                                className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition">
-                                <div className="flex items-center gap-3">
-                                  {isCollapsed ? <Folder className="fa-teal-text" size={20} /> : <FolderOpen className="fa-teal-text" size={20} />}
-                                  <div className="text-left">
-                                    <div className="font-display font-semibold fa-navy flex items-center gap-2">
-                                      {p.deleted
-                                        ? <span className="font-bold line-through decoration-violet-300">{nomPartenaire(p)}</span>
-                                        : <LienPartenaire p={p} dansUnBouton className="font-bold" />}
-                                      {p.deleted && !p._inconnu && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">supprimé{p.deletedAt ? ` le ${fmtDate(p.deletedAt)}` : ""}</span>}
-                                      {!p.deleted && p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
-                                    </div>
-                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}
-                                      {!p.deleted && (() => { const c = derniereConnexion(p.lastLoginAt); return <span className={c.teinte} title={c.long}>· {c.jamais ? "jamais connecté" : `vu ${c.court}`}</span>; })()}</div>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-2.5">
-                                  {newCount > 0 && <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{newCount}</span>}
-                                  <ChevronDown size={16} className={`text-gray-400 transition-transform ${isCollapsed ? "" : "rotate-180"}`} />
-                                </div>
-                              </button>
-
-                              {!isCollapsed && (
-                                <div className="border-t border-gray-100 fa-bg-offwhite p-2.5 sm:p-4 space-y-4">
-                                  {partnerDossiers.length === 0 && (
-                                    <div className="text-center text-gray-400 text-sm py-8">Aucun dossier déposé par ce partenaire.</div>
-                                  )}
-                                  {partnerDossiers.map(d => (
-                                    <div key={d.id} className="bg-white border border-gray-200 rounded-2xl p-3.5 sm:p-5 shadow-sm">
-                                      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                  <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">
+                    Aucun dossier ne correspond à ce filtre.
+                  </div>
+                );
+              }
+              // Un seul résultat : inutile de réclamer un clic de plus.
+              const seulDossier = lignesDossiers.length === 1;
+              return (
+                <div className="space-y-2.5">
+                  {lignesDossiers.map(({ d, p }) => {
+                    const cleCarte = "d:" + d.id;
+                    const carteOuverte = seulDossier ? !ouverts.has(cleCarte) : ouverts.has(cleCarte);
+                    return (
+                                    <div key={d.id} className={`bg-white border border-gray-200 rounded-2xl shadow-sm ${carteOuverte ? "p-3.5 sm:p-5" : "px-3.5 py-2.5 sm:px-5 sm:py-3"}`}>
+                                      <div className={`flex items-center justify-between flex-wrap gap-2 ${carteOuverte ? "mb-3" : ""}`}>
                                         {editingDossierId === d.id ? (
                                           <div className="w-full space-y-2">
                                             <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
@@ -16247,7 +16207,11 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         ) : (
                                           <div>
                                             <div className="font-bold fa-navy flex items-center gap-2 flex-wrap">
-                                              {clientName(d)}
+                                              <button type="button" onClick={() => toggleFolder(cleCarte)}
+                                                title={carteOuverte ? "Replier ce dossier" : "Ouvrir ce dossier"}
+                                                className="fa-tap font-bold fa-navy hover:fa-teal-text transition text-left">
+                                                {clientName(d)}
+                                              </button>
                                               <CoEmprunteurBadge d={d} />
                                               <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
                                               {findDuplicates(d).length > 0 && (
@@ -16284,16 +16248,32 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             )}
                                           </div>
                                         )}
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex items-center gap-2 flex-wrap ml-auto">
                                           {isStale(d) && (
                                             <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full flex items-center gap-1">
                                               <Clock size={11} /> {staleHours(d)}h sans changement
                                             </span>
                                           )}
+                                          {/* Le partenaire et son commercial, là où se trouvaient
+                                              les dossiers qu'il fallait ouvrir pour les connaître. */}
+                                          {p.deleted
+                                            ? <span className="text-xs text-violet-700 line-through decoration-violet-300 max-w-[10rem] truncate" title={nomPartenaire(p)}>{nomPartenaire(p)}</span>
+                                            : <LienPartenaire p={p} className="text-xs font-semibold text-gray-600 underline decoration-dotted decoration-gray-300 underline-offset-2 max-w-[10rem] truncate" />}
+                                          <span className="text-white text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap"
+                                            style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}
+                                            title="Commercial qui suit ce partenaire">
+                                            {commercialLabel(p.commercial) || "—"}
+                                          </span>
                                           <StatusBadge status={d.status} />
                                           <PaiementBadge dossier={d} />
+                                          <button type="button" onClick={() => toggleFolder(cleCarte)}
+                                            title={carteOuverte ? "Replier ce dossier" : "Ouvrir ce dossier"}
+                                            className="fa-tap text-gray-400 hover:fa-teal-text transition">
+                                            <ChevronDown size={16} className={carteOuverte ? "rotate-180 transition-transform" : "transition-transform"} />
+                                          </button>
                                         </div>
                                       </div>
+                                      {carteOuverte && (<>
                                       <Stepper status={d.status} />
                                       {d.status === "Bordereau émis" && (() => {
                                         const bAt = getBordereauAt(d);
@@ -16400,7 +16380,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} assureurs={listeAssureurs(data)} />
                                       )}
 
-                                      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100">
+                                      {/* Six actions sur une ligne : sur téléphone elles
+                                          débordaient de l'écran. Elles passent maintenant à la
+                                          ligne au lieu de sortir de la carte. */}
+                                      <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap mt-3 pt-3 border-t border-gray-100">
                                         <button onClick={() => simOpenId === d.id ? setSimOpenId(null) : openSim(d)}
                                           className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
                                           <Sparkles size={13} /> Simulation client {d.simulation?.crd != null && <span className="fa-bg-gold fa-navy rounded-full w-1.5 h-1.5" />}
@@ -16794,18 +16777,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           {(!d.history || d.history.length === 0) && <div className="text-xs text-gray-400">Pas d'historique disponible pour ce dossier.</div>}
                                         </div>
                                       )}
+                                      </>)}
                                     </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              });
+                    );
+                  })}
+                </div>
+              );
             })()}
           </div>
         )}
