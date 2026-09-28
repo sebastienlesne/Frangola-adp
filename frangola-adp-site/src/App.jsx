@@ -547,6 +547,12 @@ const MOTIFS_REFUS = [
   "Autre",
 ];
 
+// Forfait de départ d'un apporteur hors immobilier créé par parrainage. Le
+// même que celui proposé à la création manuelle : il se règle ensuite sur la
+// fiche, mais il ne doit jamais rester vide — sinon la règle des 50 % du
+// chiffre d'affaires s'appliquerait à quelqu'un qui doit toucher un fixe.
+const FORFAIT_HORS_IMMO_DEFAUT = 100;
+
 function siretValide(siret) {
   const s = (siret || "").replace(/\D/g, "");
   if (s.length !== 14) return false;
@@ -2301,10 +2307,11 @@ export default function App() {
         const nouveau = {
           id: uid(),
           name: d.nom || "", firstName: d.prenom || "", company: d.reseau || "",
-          telephone: d.telephone || "", siret: d.siret || "", email: d.email || "",
+          telephone: d.telephone || "", siret: d.horsImmo ? "" : (d.siret || ""), email: d.email || "",
           ville: "", postalCode: "", departement: "",
           commercial: parrain?.commercial || "Sébastien",
           parrainId: d.parrainId || null, issuDuParrainage: true,
+          ...(d.horsImmo ? { horsImmo: true, flatFee: FORFAIT_HORS_IMMO_DEFAUT } : {}),
           active: true, code: genCode(), createdAt: Date.now(),
         };
         nouveaux.push(nouveau);
@@ -2332,12 +2339,13 @@ export default function App() {
           firstName: decl.prenom || "",
           company: decl.reseau || "",
           telephone: decl.telephone || "",
-          siret: decl.siret || "",
+          siret: decl.horsImmo ? "" : (decl.siret || ""),
           email: "",
           ville: "", postalCode: "", departement: "",
           commercial: parrain?.commercial || "Sébastien",
           parrainId: decl.parrainId || null,
           issuDuParrainage: true,
+          ...(decl.horsImmo ? { horsImmo: true, flatFee: FORFAIT_HORS_IMMO_DEFAUT } : {}),
           active: true,
           code: genCode(),
           createdAt: Date.now(),
@@ -4352,7 +4360,7 @@ function BlocAcces({ cible, onReinitialiser, expediteur, telephone, genre = "par
 
 function ParrainageCard({ partner, onDeclarer }) {
   const [ouvert, setOuvert] = useState(false);
-  const [form, setForm] = useState({ nom: "", prenom: "", telephone: "", reseau: "", siret: "" });
+  const [form, setForm] = useState({ nom: "", prenom: "", telephone: "", reseau: "", siret: "", horsImmo: false });
   const [erreur, setErreur] = useState("");
   const [busy, setBusy] = useState(false);
   const [envoye, setEnvoye] = useState(false);
@@ -4361,16 +4369,21 @@ function ParrainageCard({ partner, onDeclarer }) {
   async function envoyer() {
     if (!form.nom.trim() || !form.prenom.trim()) { setErreur("Le nom et le prénom sont obligatoires."); return; }
     if (normaliseTel(form.telephone).length < 9) { setErreur("Le numéro de téléphone est incomplet."); return; }
-    if ((form.siret || "").replace(/\D/g, "").length !== 14) { setErreur("Le SIRET doit comporter 14 chiffres."); return; }
+    // Un apporteur hors immobilier est un particulier : il n'a pas de SIRET,
+    // et l'exiger rendait la déclaration impossible.
+    if (!form.horsImmo && (form.siret || "").replace(/\D/g, "").length !== 14) {
+      setErreur("Le SIRET doit comporter 14 chiffres."); return;
+    }
     setErreur(""); setBusy(true);
     try {
       const ok = await onDeclarer(partner.id, {
         nom: form.nom.trim(), prenom: form.prenom.trim(),
         telephone: form.telephone.trim(), reseau: form.reseau.trim(),
-        siret: form.siret.replace(/\D/g, ""),
+        siret: form.horsImmo ? "" : form.siret.replace(/\D/g, ""),
+        horsImmo: !!form.horsImmo,
       });
       if (ok !== false) {
-        setForm({ nom: "", prenom: "", telephone: "", reseau: "", siret: "" });
+        setForm({ nom: "", prenom: "", telephone: "", reseau: "", siret: "", horsImmo: false });
         setOuvert(false); setEnvoye(true);
         setTimeout(() => setEnvoye(false), 6000);
       }
@@ -4416,10 +4429,25 @@ function ParrainageCard({ partner, onDeclarer }) {
             {champ("nom", "Nom")}
             {champ("prenom", "Prénom")}
             {champ("telephone", "Téléphone")}
-            {champ("reseau", "Réseau / agence")}
+            {champ("reseau", form.horsImmo ? "Activité (facultatif)" : "Réseau / agence")}
           </div>
-          {champ("siret", "N° SIRET (14 chiffres)")}
-          <p className="text-xs text-gray-400">Le SIRET nous permet de vérifier que ce confrère n'est pas déjà référencé.</p>
+          <label className="flex items-start gap-2 text-sm text-gray-600">
+            <input type="checkbox" checked={form.horsImmo}
+              onChange={e => setForm(f => ({ ...f, horsImmo: e.target.checked, siret: e.target.checked ? "" : f.siret }))}
+              className="rounded border-gray-300 mt-0.5" />
+            <span>Ce n'est pas un professionnel de l'immobilier</span>
+          </label>
+          {form.horsImmo ? (
+            <p className="text-xs text-gray-400">
+              Pas de SIRET demandé. Nous vérifierons sur le nom, le prénom et le téléphone que ce contact
+              n'est pas déjà référencé.
+            </p>
+          ) : (
+            <>
+              {champ("siret", "N° SIRET (14 chiffres)")}
+              <p className="text-xs text-gray-400">Le SIRET nous permet de vérifier que ce confrère n'est pas déjà référencé.</p>
+            </>
+          )}
           {erreur && <div className="text-xs text-red-600">{erreur}</div>}
           <div className="flex gap-2">
             <button onClick={envoyer} disabled={busy}
@@ -6106,8 +6134,17 @@ function RegistreParrainages({ data, onTraiter, onTraiterEnLot, onAnnuler, busy 
                 <span className="text-xs text-gray-500">présenté par <strong className="fa-navy">{nomParrainDe(d.parrainId)}</strong> le {fmtDate(d.at)}</span>
               </div>
               <div className="text-xs text-gray-500 mb-2">
-                {d.telephone} {d.reseau && `· ${d.reseau}`} · SIRET {d.siret}
+                {d.telephone} {d.reseau && `· ${d.reseau}`}
+                {d.horsImmo
+                  ? <span className="ml-1 font-semibold text-violet-700">· hors immobilier, pas de SIRET</span>
+                  : <> · SIRET {d.siret || "non renseigné"}</>}
               </div>
+              {d.horsImmo && (
+                <div className="text-xs text-violet-800 bg-violet-50 border border-violet-200 rounded-lg px-2.5 py-1.5 mb-2">
+                  Sera créé au forfait de {fmtEuro(FORFAIT_HORS_IMMO_DEFAUT)} par contrat — à ajuster sur sa fiche
+                  avant le premier dossier.
+                </div>
+              )}
 
               {/* Chaque correspondance renvoie vers la fiche concernée : sans
                   ça, il faudrait aller la chercher à la main pour trancher. */}
@@ -6128,7 +6165,9 @@ function RegistreParrainages({ data, onTraiter, onTraiterEnLot, onAnnuler, busy 
                 </div>
               )}
               {alerte.partenaires.length === 0 && alerte.messages.length === 0 && (
-                <div className="text-xs text-emerald-700 mb-2.5">✓ Aucun doublon détecté sur le nom, le prénom, le SIRET, le téléphone ni l'email.</div>
+                <div className="text-xs text-emerald-700 mb-2.5">
+                  ✓ Aucun doublon détecté sur le nom, le prénom, {d.horsImmo ? "" : "le SIRET, "}le téléphone ni l'email.
+                </div>
               )}
 
               {refusId === d.id ? (
