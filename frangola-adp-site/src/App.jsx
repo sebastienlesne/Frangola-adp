@@ -1114,6 +1114,26 @@ function genererJeuDemo(base) {
     }
   }
 
+  // Une déclaration qui désigne un partenaire DÉJÀ inscrit ET qui a déjà
+  // produit : c'est le cas qui fait apparaître « Rattacher à cette fiche », et
+  // l'avertissement sur l'argent ne veut rien dire sur un partenaire à zéro.
+  {
+    const parrain = choix(parrains);
+    const avecDossiers = partners
+      .filter(x => x.id !== parrain.id && !x.parrainId && !x.deleted && x.telephone)
+      .map(x => ({ x, n: dossiers.filter(d => d.partnerId === x.id).length }))
+      .sort((a, b) => b.n - a.n)[0];
+    if (avecDossiers?.n > 0) {
+      const deja = avecDossiers.x;
+      parrainages.push({
+        id: "demo-pa-doublon", parrainId: parrain.id,
+        nom: deja.name, prenom: deja.firstName,
+        telephone: deja.telephone, email: "", reseau: deja.company || "", siret: deja.siret || "",
+        at: maintenant - 2 * JOUR, statut: "en_attente", motif: "",
+      });
+    }
+  }
+
   // ── Paiements à jour ──────────────────────────────────────────────────────
   // Une démonstration criblée de lignes rouges donne l'image d'un cabinet qui
   // ne paie pas ses apporteurs. On solde donc tout ce qui est dû, en laissant
@@ -1223,11 +1243,30 @@ function filleulsDe(partnerId) {
 // C.A. réellement encaissé grâce à ce partenaire. Un dossier réglé en douze
 // fois ne compte que pour les échéances déjà reçues : c'est ce qui autorise
 // à verser la prime du parrain sans avancer d'argent.
+// Le chiffre d'affaires d'un filleul qui compte pour son parrain.
+// Un filleul rattaché à la main à une fiche qui existait déjà porte une date :
+// le parrain ne touche que sur ce qui est encaissé APRÈS elle — il n'a pas
+// apporté les dossiers d'avant. Sans date (tous les parrainages faits jusqu'ici,
+// où la fiche est née du parrainage), le calcul reste celui d'origine : dater
+// rétroactivement effacerait des gains déjà acquis.
 function caGenerePar(partnerId) {
   if (!_colorDataRef) return 0;
-  return _colorDataRef.dossiers
-    .filter(d => d.partnerId === partnerId && d.status !== "KO")
-    .reduce((s, d) => s + partEncaissee(d, d.caAmount || 0), 0);
+  const siens = _colorDataRef.dossiers
+    .filter(d => d.partnerId === partnerId && d.status !== "KO");
+  const filleul = (_colorDataRef.partners || []).find(p => p.id === partnerId);
+  if (filleul?.parrainDepuis) return caEncaisseEntre(siens, filleul.parrainDepuis);
+  return siens.reduce((s, d) => s + partEncaissee(d, d.caAmount || 0), 0);
+}
+
+// Peut-on rattacher cette déclaration à cette fiche ? Quatre cas disent non,
+// et chacun pour une raison qu'il vaut mieux afficher que deviner.
+function motifRefusRattachement(decl, cible, parrainId) {
+  if (!decl || !cible) return "fiche introuvable";
+  if (cible.deleted) return "cette fiche est à la corbeille";
+  if (cible.id === parrainId) return "c'est la fiche du parrain lui-même";
+  if (cible.parrainId && cible.parrainId !== parrainId) return "déjà filleul de quelqu'un d'autre";
+  if (cible.parrainId === parrainId) return "déjà rattaché à ce parrain";
+  return null;
 }
 
 // Toutes les échéances de rétrocession d'un partenaire, mises à plat et
@@ -2325,6 +2364,35 @@ export default function App() {
     });
   }
 
+  // Rattacher une déclaration à une fiche qui existe déjà, au lieu d'en créer
+  // une seconde. Le parrain est posé sur la fiche existante, avec la date du
+  // jour : c'est elle qui borne son gain.
+  async function rattacherParrainage(declId, partnerId) {
+    await mutateData(base => {
+      const decl = (base.parrainages || []).find(p => p.id === declId);
+      const cible = base.partners.find(p => p.id === partnerId);
+      if (!decl || decl.statut !== "en_attente") return base;
+      if (motifRefusRattachement(decl, cible, decl.parrainId)) return base;
+      const maintenant = Date.now();
+      // La borne est le DÉBUT de la journée, pas l'instant du clic : sinon un
+      // dossier encaissé le matin même compterait ou non selon l'heure à
+      // laquelle on a cliqué. L'écran annonce « à partir d'aujourd'hui », donc
+      // aujourd'hui compte en entier.
+      const depuis = debutJour(isoDe(maintenant));
+      const parrain = base.partners.find(p => p.id === decl.parrainId);
+      return withLog({
+        ...base,
+        partners: base.partners.map(p => p.id === partnerId
+          ? { ...p, parrainId: decl.parrainId || null, parrainDepuis: depuis }
+          : p),
+        parrainages: (base.parrainages || []).map(p => p.id === declId
+          ? { ...p, statut: "valide", motif: "", traiteAt: maintenant, partnerId, rattache: true }
+          : p),
+      }, `a rattaché ${nomPartenaire(cible)} à la fiche existante` +
+         (parrain ? ` — ${nomPartenaire(parrain)} touche ${Math.round(PARRAINAGE_TAUX * 100)} % à partir d'aujourd'hui` : ""));
+    });
+  }
+
   async function traiterParrainage(id, statut, motif) {
     await mutateData(base => {
       const decl = (base.parrainages || []).find(p => p.id === id);
@@ -3338,6 +3406,7 @@ export default function App() {
           onSetBanques={setBanques}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
+                    onRattacherParrainage={rattacherParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
                     onRetirerFilleul={retirerFilleul}
                     onAnnulerParrainage={annulerTraitementParrainage}
@@ -3411,6 +3480,7 @@ export default function App() {
           onSetBanques={setBanques}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
+                    onRattacherParrainage={rattacherParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
                     onRetirerFilleul={retirerFilleul}
                     onAnnulerParrainage={annulerTraitementParrainage}
@@ -6031,8 +6101,11 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
   );
 }
 
-function RegistreParrainages({ data, onTraiter, onTraiterEnLot, onAnnuler, busy }) {
+function RegistreParrainages({ data, onTraiter, onRattacher, onTraiterEnLot, onAnnuler, busy }) {
   const [annulerId, setAnnulerId] = useState(null);
+  // La confirmation de rattachement, désignée par « déclaration|fiche » :
+  // une même déclaration peut désigner deux fiches.
+  const [rattacheId, setRattacheId] = useState(null);
   const [refusId, setRefusId] = useState(null);
   const [motif, setMotif] = useState(MOTIFS_REFUS[0]);
   const [motifLibre, setMotifLibre] = useState("");
@@ -6150,13 +6223,64 @@ function RegistreParrainages({ data, onTraiter, onTraiterEnLot, onAnnuler, busy 
                   ça, il faudrait aller la chercher à la main pour trancher. */}
               {alerte.partenaires.length > 0 && (
                 <div className={`text-xs mb-2.5 space-y-1 ${alerte.niveau === "rouge" ? "text-red-800" : "text-amber-800"}`}>
-                  {alerte.partenaires.map(({ p, motif }) => (
-                    <div key={p.id} className="flex items-baseline gap-1.5 flex-wrap">
-                      <span>⚠</span>
-                      <LienPartenaire p={p} className="font-bold underline decoration-dotted" />
-                      <span>— {motif}</span>
-                    </div>
-                  ))}
+                  {alerte.partenaires.map(({ p, motif }) => {
+                    const cle = `${d.id}|${p.id}`;
+                    const empeche = motifRefusRattachement(d, p, d.parrainId);
+                    const deja = caGenerePar(p.id);
+                    const nbDossiers = data.dossiers.filter(x => x.partnerId === p.id && x.status !== "KO").length;
+                    return (
+                      <div key={p.id}>
+                        <div className="flex items-baseline gap-1.5 flex-wrap">
+                          <span>⚠</span>
+                          <LienPartenaire p={p} className="font-bold underline decoration-dotted" />
+                          <span>— {motif}</span>
+                          {empeche
+                            ? <span className="text-gray-400">· rattachement impossible : {empeche}</span>
+                            : (
+                              <button type="button" disabled={busy}
+                                onClick={() => setRattacheId(rattacheId === cle ? null : cle)}
+                                className="fa-tap text-[11px] font-bold fa-navy fa-bg-gold px-2.5 py-1.5 rounded-lg transition disabled:opacity-50">
+                                Rattacher à cette fiche
+                              </button>
+                            )}
+                        </div>
+                        {rattacheId === cle && !empeche && (
+                          <div className="bg-white border border-amber-300 rounded-xl px-3.5 py-3 mt-2 space-y-2.5">
+                            <div className="text-[13px] font-bold fa-navy">
+                              Rattacher {nomPartenaire(p)} à {nomParrainDe(d.parrainId)} ?
+                            </div>
+                            <div className="text-xs text-gray-600 leading-relaxed">
+                              Aucune seconde fiche ne sera créée. La fiche existante de {nomPartenaire(p)} prend
+                              {" "}{nomParrainDe(d.parrainId)} comme parrain, à la date d'aujourd'hui.
+                            </div>
+                            <div className="grid sm:grid-cols-2 gap-2.5">
+                              <div className="fa-bg-offwhite border border-gray-200 rounded-lg px-3 py-2">
+                                <div className="text-[11px] text-gray-400">Déjà encaissé</div>
+                                <div className="font-display text-lg font-bold text-gray-400">{fmtEuro(deja)}</div>
+                                <div className="text-[11px] text-gray-400">
+                                  {masqueNb(nbDossiers)} dossier{nbDossiers > 1 ? "s" : ""} — ne compte pas
+                                </div>
+                              </div>
+                              <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                                <div className="text-[11px] text-emerald-800">Ce que touchera le parrain</div>
+                                <div className="font-display text-lg font-bold text-emerald-800">{Math.round(PARRAINAGE_TAUX * 100)} %</div>
+                                <div className="text-[11px] text-emerald-800">de ce qui sera encaissé à partir d'aujourd'hui</div>
+                              </div>
+                            </div>
+                            <div className="flex gap-2 flex-wrap">
+                              <button type="button" disabled={busy}
+                                onClick={() => { onRattacher?.(d.id, p.id); setRattacheId(null); }}
+                                className="text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-1.5 rounded-lg transition disabled:opacity-50">
+                                Confirmer le rattachement
+                              </button>
+                              <button type="button" onClick={() => setRattacheId(null)}
+                                className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               {alerte.messagesAutres?.length > 0 && (
@@ -15524,7 +15648,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onRattacherParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -17273,7 +17397,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
         {tab === "partenaires" && (
           <div>
-                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} onAnnuler={onAnnulerParrainage} busy={busy} />
+                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onRattacher={onRattacherParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} onAnnuler={onAnnulerParrainage} busy={busy} />
 
             <ContratTypePanel contrat={data.settings?.contratType} partners={data.partners}
               onUpload={onUploadContratType} canEdit={isFullAdmin} busy={busy} />
