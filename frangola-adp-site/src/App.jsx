@@ -1114,6 +1114,23 @@ function genererJeuDemo(base) {
     }
   }
 
+  // Un vrai doublon de fiche, pour que « Fusionner » soit visible en démo :
+  // le même partenaire saisi deux fois, une fois complet et une fois à moitié.
+  {
+    const modele = partners.find(x => !x.deleted && x.telephone && x.email && x.departement);
+    if (modele) {
+      partners.push({
+        id: "demo-p-doublon",
+        name: modele.name, firstName: modele.firstName,
+        company: "", telephone: modele.telephone, email: "", siret: "",
+        ville: "", postalCode: "", departement: "",
+        commercial: choix(commerciaux), active: true,
+        code: "DBL" + String(rnd(100, 999)),
+        createdAt: maintenant - rnd(1, 5) * JOUR,
+      });
+    }
+  }
+
   // Une déclaration qui désigne un partenaire DÉJÀ inscrit ET qui a déjà
   // produit : c'est le cas qui fait apparaître « Rattacher à cette fiche », et
   // l'avertissement sur l'argent ne veut rien dire sur un partenaire à zéro.
@@ -1523,6 +1540,316 @@ function downloadJson(filename, obj) {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+// ─── Fusion de deux fiches partenaires en doublon ────────────────────────
+// Une fiche porte beaucoup plus que ses champs visibles : des dossiers, des
+// virements, des factures, des contrats, des filleuls, et trois listes rangées
+// dans les réglages qui sont indexées par identifiant de fiche. Fusionner à la
+// main en oublierait toujours une ; c'est pour ça que ça se code une fois.
+
+const CHAMPS_FUSION = [
+  ["name", "Nom"], ["firstName", "Prénom"], ["company", "Réseau / agence"],
+  ["email", "Email"], ["telephone", "Téléphone"], ["siret", "SIRET"],
+  ["ville", "Ville"], ["postalCode", "Code postal"], ["departement", "Département"],
+  ["dateEntree", "Date d'entrée"], ["monthlyGoal", "Objectif mensuel"],
+];
+
+function champVide(v) {
+  return v === null || v === undefined || v === "" ||
+    (typeof v === "string" && v.trim() === "");
+}
+
+// Pourquoi cette fusion est impossible, ou null si elle l'est.
+function motifRefusFusion(garde, absorbe) {
+  if (!garde || !absorbe) return "fiche introuvable";
+  if (garde.id === absorbe.id) return "c'est la même fiche";
+  if (garde.deleted) return "la fiche conservée est à la corbeille";
+  return null;
+}
+
+// Les fiches qui ressemblent à celle-ci, du signal le plus sûr au plus faible.
+// Mêmes critères que l'anti-doublon des parrainages : un SIRET ne se partage
+// pas, un homonyme est fréquent.
+// De quoi distinguer deux fiches qui portent le même nom : ce qui diffère,
+// pas ce qui se répète.
+function signatureFiche(p, data) {
+  const bouts = [];
+  bouts.push(p.departement ? `dép. ${p.departement}` : "sans département");
+  if (p.ville) bouts.push(p.ville);
+  bouts.push(commercialLabel(p.commercial) || "sans commercial");
+  const n = (data?.dossiers || []).filter(d => d.partnerId === p.id).length;
+  bouts.push(`${n} dossier${n > 1 ? "s" : ""}`);
+  if (p.deleted) bouts.push("à la corbeille");
+  return bouts.join(" · ");
+}
+
+// Laquelle des deux fiches vaut mieux garder ? Celle qui porte le plus de
+// vie : des dossiers d'abord, puis des pièces attachées, puis des champs
+// remplis. Ce n'est qu'un défaut — l'écran laisse inverser — mais sur une
+// opération irréversible, partir du bon côté évite un mauvais clic.
+function poidsFiche(p, data) {
+  if (!p) return -1;
+  const dossiers = (data?.dossiers || []).filter(d => d.partnerId === p.id).length;
+  const remplis = ["email", "telephone", "siret", "ville", "postalCode", "departement", "company"]
+    .filter(k => !champVide(p[k])).length;
+  const attaches = (p.retrocessionVersements || []).length + (p.factures || []).length +
+    (p.contractFiles || []).length + (p.ribFile ? 1 : 0);
+  return dossiers * 1000 + attaches * 100 + remplis * 10 + (p.lastLoginAt ? 5 : 0);
+}
+
+function doublonsProbables(data, partnerId) {
+  const moi = (data?.partners || []).find(p => p.id === partnerId);
+  if (!moi) return [];
+  const siret = (moi.siret || "").replace(/\D/g, "");
+  const tel = normaliseTel(moi.telephone);
+  const email = cleComparaison(moi.email);
+  const nom = cleComparaison(moi.name);
+  const prenom = cleComparaison(moi.firstName);
+  const out = [];
+  for (const p of (data.partners || [])) {
+    if (p.id === partnerId) continue;
+    const memeSiret = siret && (p.siret || "").replace(/\D/g, "") === siret;
+    const memeEmail = email && cleComparaison(p.email) === email;
+    const memeTel = tel && normaliseTel(p.telephone) === tel;
+    const memeIdentite = nom && cleComparaison(p.name) === nom && prenom && cleComparaison(p.firstName) === prenom;
+    let motif = null, niveau = null;
+    if (memeSiret) { motif = "SIRET identique"; niveau = "rouge"; }
+    else if (memeEmail) { motif = "email identique"; niveau = "rouge"; }
+    else if (memeTel) { motif = "téléphone identique"; niveau = "rouge"; }
+    else if (memeIdentite) { motif = "même nom et même prénom"; niveau = "orange"; }
+    if (motif) out.push({ p, motif, niveau });
+  }
+  const rang = { rouge: 0, orange: 1 };
+  return out.sort((a, b) => (rang[a.niveau] - rang[b.niveau]) ||
+    nomPartenaire(a.p).localeCompare(nomPartenaire(b.p), "fr"));
+}
+
+// Ce que la fusion donnerait, sans rien écrire. C'est ce que l'écran affiche
+// avant de demander confirmation : personne ne doit valider à l'aveugle une
+// opération qui efface une fiche.
+function apercuFusion(data, gardeId, absorbeId) {
+  const garde = (data?.partners || []).find(p => p.id === gardeId);
+  const absorbe = (data?.partners || []).find(p => p.id === absorbeId);
+  const refus = motifRefusFusion(garde, absorbe);
+  if (refus) return { ok: false, refus };
+
+  const lignes = CHAMPS_FUSION.map(([cle, label]) => {
+    const a = garde[cle], b = absorbe[cle];
+    const repris = champVide(a) && !champVide(b);
+    return { cle, champ: label, garde: a, absorbe: b, repris, resultat: repris ? b : a };
+  });
+
+  // La rémunération se lit comme un tout : le forfait et l'étiquette « hors
+  // immobilier » vont ensemble, sinon on obtient un forfait sans motif.
+  const forfaitRepris = garde.flatFee == null && absorbe.flatFee != null;
+  lignes.push({
+    cle: "flatFee", champ: "Rémunération",
+    garde: garde.flatFee == null ? null : `Forfait ${garde.flatFee} €`,
+    absorbe: absorbe.flatFee == null ? null : `Forfait ${absorbe.flatFee} €`,
+    repris: forfaitRepris,
+    resultat: forfaitRepris ? `Forfait ${absorbe.flatFee} €` : (garde.flatFee == null ? null : `Forfait ${garde.flatFee} €`),
+  });
+
+  const parrainRepris = !garde.parrainId && !!absorbe.parrainId && absorbe.parrainId !== garde.id;
+  const nomDe = (id) => {
+    const x = (data.partners || []).find(y => y.id === id);
+    return x ? nomPartenaire(x) : null;
+  };
+  lignes.push({
+    cle: "parrainId", champ: "Parrain",
+    garde: nomDe(garde.parrainId), absorbe: nomDe(absorbe.parrainId),
+    repris: parrainRepris,
+    resultat: parrainRepris ? nomDe(absorbe.parrainId) : nomDe(garde.parrainId),
+  });
+
+  // Le code d'activation ne se reprend jamais : c'est une clé d'accès.
+  lignes.push({
+    cle: "code", champ: "Code d'activation",
+    garde: garde.code || null, absorbe: absorbe.code || null,
+    repris: false, resultat: garde.code || null,
+  });
+
+  const versAbsorbe = (data.dossiers || []).filter(d => d.partnerId === absorbeId);
+  const clesGarde = new Set((garde.retrocessionVersements || []).map(v => v.cle || v.mois));
+  const virementsRepris = (absorbe.retrocessionVersements || [])
+    .filter(v => !clesGarde.has(v.cle || v.mois));
+  const virementsDoublons = (absorbe.retrocessionVersements || []).length - virementsRepris.length;
+
+  const filleulsAbsorbe = (data.partners || [])
+    .filter(p => p.id !== absorbeId && (p.parrainId === absorbeId || p.ancienParrainId === absorbeId));
+
+  const pertes = [];
+  if (absorbe.code) {
+    pertes.push(`Le code d'activation ${absorbe.code} disparaît avec la fiche absorbée. Si le partenaire a reçu CE code-là, son lien ne marchera plus.`);
+  }
+  if (!champVide(absorbe.email) && !champVide(garde.email) &&
+      cleComparaison(absorbe.email) !== cleComparaison(garde.email)) {
+    pertes.push(`Les deux fiches ont un email différent : seul ${garde.email} reste, et c'est lui qui servira à se connecter.`);
+  }
+  if (absorbe.lastLoginAt && !garde.lastLoginAt) {
+    pertes.push("La fiche absorbée s'est déjà connectée, pas celle qu'on garde : l'historique de connexion est repris, mais le partenaire devra se reconnecter avec l'autre code.");
+  }
+  if (virementsDoublons > 0) {
+    pertes.push(`${virementsDoublons} virement${virementsDoublons > 1 ? "s" : ""} de la fiche absorbée port${virementsDoublons > 1 ? "ent" : "e"} un mois déjà réglé sur la fiche conservée : ${virementsDoublons > 1 ? "ils sont écartés" : "il est écarté"} pour ne pas payer deux fois.`);
+  }
+  if (absorbe.parrainId && garde.parrainId && absorbe.parrainId !== garde.parrainId) {
+    pertes.push(`Les deux fiches ont un parrain différent : seul ${nomDe(garde.parrainId)} est conservé.`);
+  }
+  if (absorbe.parrainId === garde.id || garde.parrainId === absorbeId) {
+    pertes.push("Une fiche est le parrain de l'autre : le lien est coupé, une fiche ne peut pas être sa propre filleule.");
+  }
+
+  return {
+    ok: true, garde, absorbe, lignes,
+    compteurs: {
+      dossiers: versAbsorbe.length,
+      virements: virementsRepris.length,
+      factures: (absorbe.factures || []).length,
+      versementsParrainage: (absorbe.parrainageVersements || []).length,
+      contrats: (absorbe.contractFiles || []).length + (absorbe.contractFile ? 1 : 0),
+      filleuls: filleulsAbsorbe.length,
+    },
+    pertes,
+  };
+}
+
+// La fusion elle-même : renvoie le nouvel état, ou `base` inchangé si elle est
+// impossible. Fonction pure, pour qu'elle se teste sans écran.
+function fusionnerFiches(base, gardeId, absorbeId) {
+  const garde = (base?.partners || []).find(p => p.id === gardeId);
+  const absorbe = (base?.partners || []).find(p => p.id === absorbeId);
+  if (motifRefusFusion(garde, absorbe)) return base;
+
+  const prendre = (cle) => champVide(garde[cle]) ? absorbe[cle] : garde[cle];
+  const plusAncien = (a, b) => (a && b) ? Math.min(a, b) : (a || b || null);
+  const plusRecent = (a, b) => (a && b) ? Math.max(a, b) : (a || b || null);
+
+  const fondu = { ...garde };
+  for (const [cle] of CHAMPS_FUSION) {
+    const v = prendre(cle);
+    if (!champVide(v)) fondu[cle] = v;
+  }
+
+  // Le forfait et son étiquette voyagent ensemble.
+  if (garde.flatFee == null && absorbe.flatFee != null) {
+    fondu.flatFee = absorbe.flatFee;
+    fondu.horsImmo = true;
+    fondu.siret = "";
+  }
+
+  // Le parrain : celui de la fiche conservée, sinon celui de l'autre — jamais
+  // soi-même, une fiche ne peut pas être sa propre filleule.
+  if (!fondu.parrainId && absorbe.parrainId && absorbe.parrainId !== gardeId) {
+    fondu.parrainId = absorbe.parrainId;
+    if (absorbe.parrainDepuis) fondu.parrainDepuis = absorbe.parrainDepuis;
+    if (absorbe.issuDuParrainage) fondu.issuDuParrainage = true;
+  }
+  if (fondu.parrainId === gardeId || fondu.parrainId === absorbeId) {
+    fondu.parrainId = null;
+    delete fondu.parrainDepuis;
+  }
+  if (fondu.ancienParrainId === gardeId || fondu.ancienParrainId === absorbeId) {
+    delete fondu.ancienParrainId;
+  }
+
+  // Les dates et compteurs : le plus ancien pour une naissance, le plus récent
+  // pour un dernier passage, la somme pour ce qui se cumule.
+  fondu.createdAt = plusAncien(garde.createdAt, absorbe.createdAt) || Date.now();
+  fondu.lastLoginAt = plusRecent(garde.lastLoginAt, absorbe.lastLoginAt);
+  fondu.connexions = (Number(garde.connexions) || 0) + (Number(absorbe.connexions) || 0);
+  fondu.contratAccepteLe = plusAncien(garde.contratAccepteLe, absorbe.contratAccepteLe);
+  fondu.parrainageVerse = (Number(garde.parrainageVerse) || 0) + (Number(absorbe.parrainageVerse) || 0);
+  fondu.relanceNb = (Number(garde.relanceNb) || 0) + (Number(absorbe.relanceNb) || 0);
+  if ((absorbe.relanceLe || 0) > (garde.relanceLe || 0)) {
+    fondu.relanceLe = absorbe.relanceLe;
+    fondu.relanceCode = absorbe.relanceCode;
+  }
+  fondu.relanceIgnoreLe = plusRecent(garde.relanceIgnoreLe, absorbe.relanceIgnoreLe);
+
+  // Les listes : on concatène. Les virements se dédoublonnent par mois, sinon
+  // une échéance déjà réglée réapparaîtrait comme due une seconde fois.
+  const parId = (a, b) => {
+    const vus = new Set((a || []).map(x => x.id));
+    return [...(a || []), ...(b || []).filter(x => !vus.has(x.id))];
+  };
+  fondu.factures = parId(garde.factures, absorbe.factures);
+  fondu.parrainageVersements = parId(garde.parrainageVersements, absorbe.parrainageVersements);
+  fondu.contractFiles = parId(garde.contractFiles, absorbe.contractFiles);
+  const clesVues = new Set((garde.retrocessionVersements || []).map(v => v.cle || v.mois));
+  fondu.retrocessionVersements = [
+    ...(garde.retrocessionVersements || []),
+    ...(absorbe.retrocessionVersements || []).filter(v => !clesVues.has(v.cle || v.mois)),
+  ];
+  if (!garde.contractFile && absorbe.contractFile) fondu.contractFile = absorbe.contractFile;
+  if (!garde.ribFile && absorbe.ribFile) fondu.ribFile = absorbe.ribFile;
+
+  // L'intégration : pour chaque étape, la date la plus ancienne des deux —
+  // l'étape a bien été faite, peu importe sur quelle fiche.
+  const iA = garde.integration || {}, iB = absorbe.integration || {};
+  const integration = {};
+  for (const k of ["contratEnvoyeLe", "annexeEnvoyeeLe", "bienvenueLe", "appliLe"]) {
+    const v = plusAncien(iA[k], iB[k]);
+    if (v) integration[k] = v;
+  }
+  if (iA.annexeConcernee !== undefined) integration.annexeConcernee = iA.annexeConcernee;
+  else if (iB.annexeConcernee !== undefined) integration.annexeConcernee = iB.annexeConcernee;
+  if (Object.keys(integration).length > 0) fondu.integration = integration;
+
+  // Tout ce qui pointait vers la fiche absorbée pointe désormais vers l'autre.
+  const dossiers = (base.dossiers || []).map(d =>
+    d.partnerId === absorbeId ? { ...d, partnerId: gardeId } : d);
+
+  const partners = (base.partners || [])
+    .filter(p => p.id !== absorbeId)
+    .map(p => {
+      if (p.id === gardeId) return fondu;
+      let q = p;
+      if (q.parrainId === absorbeId) q = { ...q, parrainId: gardeId };
+      if (q.ancienParrainId === absorbeId) q = { ...q, ancienParrainId: gardeId };
+      // Un partenaire ne peut pas être son propre parrain.
+      if (q.parrainId === q.id) q = { ...q, parrainId: null };
+      if (q.ancienParrainId === q.id) { q = { ...q }; delete q.ancienParrainId; }
+      return q;
+    });
+
+  const parrainages = (base.parrainages || []).map(d => {
+    let q = d;
+    if (q.parrainId === absorbeId) q = { ...q, parrainId: gardeId };
+    if (q.partnerId === absorbeId) q = { ...q, partnerId: gardeId };
+    if (q.filleulId === absorbeId) q = { ...q, filleulId: gardeId };
+    // Une déclaration où le parrain et le filleul sont la même fiche n'a plus
+    // de sens : on la marque plutôt que de la laisser fausser les compteurs.
+    if (q.parrainId && q.partnerId && q.parrainId === q.partnerId) {
+      q = { ...q, statut: "refuse", motif: "Fiches fusionnées : le parrain et le filleul sont la même personne." };
+    }
+    return q;
+  });
+
+  // Les trois listes des réglages sont des dictionnaires dont la CLÉ est un
+  // identifiant de fiche. Un filter() sur les partenaires les laisserait
+  // pointer vers une fiche qui n'existe plus.
+  const recle = (obj) => {
+    if (!obj || typeof obj !== "object" || !(absorbeId in obj)) return obj;
+    const copie = { ...obj };
+    if (!(gardeId in copie)) copie[gardeId] = copie[absorbeId];
+    delete copie[absorbeId];
+    return copie;
+  };
+  const settings = { ...(base.settings || {}) };
+  if (settings.challengeBienvenue) {
+    settings.challengeBienvenue = {
+      ...settings.challengeBienvenue,
+      inscrits: recle(settings.challengeBienvenue.inscrits),
+      exclus: recle(settings.challengeBienvenue.exclus),
+    };
+  }
+  if (Array.isArray(settings.challenges)) {
+    settings.challenges = settings.challenges.map(c =>
+      c?.participants ? { ...c, participants: recle(c.participants) } : c);
+  }
+
+  return { ...base, partners, dossiers, parrainages, settings };
+}
+
 // ─── Relevé comptable ───────────────────────────────────────────────────
 // Ce que le comptable attend, c'est un journal : une ligne par mouvement
 // d'argent, datée. Deux natures seulement — l'honoraire encaissé du client,
@@ -2367,6 +2694,26 @@ export default function App() {
   // Rattacher une déclaration à une fiche qui existe déjà, au lieu d'en créer
   // une seconde. Le parrain est posé sur la fiche existante, avec la date du
   // jour : c'est elle qui borne son gain.
+  // Fusionner deux fiches en doublon. Le calcul est dans `fusionnerFiches`,
+  // une fonction pure : ici on ne fait que l'appliquer et l'écrire au journal.
+  async function fusionnerPartenaires(gardeId, absorbeId) {
+    await mutateData(base => {
+      const garde = base.partners.find(p => p.id === gardeId);
+      const absorbe = base.partners.find(p => p.id === absorbeId);
+      if (motifRefusFusion(garde, absorbe)) return base;
+      const avant = {
+        dossiers: (base.dossiers || []).filter(d => d.partnerId === absorbeId).length,
+        nomAbsorbe: nomPartenaire(absorbe),
+        nomGarde: nomPartenaire(garde),
+      };
+      const suite = fusionnerFiches(base, gardeId, absorbeId);
+      if (suite === base) return base;
+      return withLog(suite,
+        `a fusionné la fiche de ${avant.nomAbsorbe} dans celle de ${avant.nomGarde}` +
+        (avant.dossiers > 0 ? ` — ${avant.dossiers} dossier${avant.dossiers > 1 ? "s" : ""} déplacé${avant.dossiers > 1 ? "s" : ""}` : ""));
+    });
+  }
+
   async function rattacherParrainage(declId, partnerId) {
     await mutateData(base => {
       const decl = (base.parrainages || []).find(p => p.id === declId);
@@ -3427,6 +3774,7 @@ export default function App() {
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onReaffecterDossier={reaffecterDossier}
+          onFusionnerPartenaires={fusionnerPartenaires}
           onUpdateDossierSimulation={updateDossierSimulation}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
@@ -3501,6 +3849,7 @@ export default function App() {
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
           onReaffecterDossier={reaffecterDossier}
+          onFusionnerPartenaires={fusionnerPartenaires}
           onUpdateDossierSimulation={updateDossierSimulation}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
@@ -15648,7 +15997,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onRattacherParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, onFusionnerPartenaires, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onRattacherParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -15852,6 +16201,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [dossierSearch, setDossierSearch] = useState("");
   const [dossierFilter, setDossierFilter] = useState("tous");
   const [commercialFilter, setCommercialFilter] = useState("tous");
+  // La fusion en cours : l'id de la fiche depuis laquelle on a ouvert le
+  // panneau, et celle qu'on a désignée comme doublon.
+  const [fusionDe, setFusionDe] = useState(null);
+  const [fusionAvec, setFusionAvec] = useState(null);
+  const [fusionSens, setFusionSens] = useState("moi");
+  const [fusionRecherche, setFusionRecherche] = useState("");
   const [statsDepartementFilter, setStatsDepartementFilter] = useState("tous");
   const [statsReseauFilter, setStatsReseauFilter] = useState("tous");
   const [notesOpenId, setNotesOpenId] = useState(null);
@@ -17802,6 +18157,14 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           title="Voir son espace exactement comme lui le voit — en lecture seule"
                           className="fa-tap text-sm fa-teal-text hover:underline px-2">👁 Son espace</button>
                         <button onClick={() => startEdit(p)} className="fa-tap text-sm fa-teal-text hover:underline px-2">Modifier</button>
+                        {isFullAdmin && onFusionnerPartenaires && (
+                          <button
+                            onClick={() => { setFusionDe(fusionDe === p.id ? null : p.id); setFusionAvec(null); setFusionSens("moi"); setFusionRecherche(""); }}
+                            title="Cette fiche ressemble à une autre : fusionner les deux"
+                            className="fa-tap text-sm fa-teal-text hover:underline px-2">
+                            {fusionDe === p.id ? "Fermer la fusion" : "Fusionner"}
+                          </button>
+                        )}
                         <button onClick={() => toggleActive(p)}
                           className={`text-xs font-semibold px-3 py-1.5 rounded-full transition ${p.active === false ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-red-50 text-red-700 hover:bg-red-100"}`}>
                           {p.active === false ? "Réactiver" : "Désactiver"}
@@ -17873,6 +18236,162 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                           <button onClick={() => { setArreterRetro(false); setConfirmDeleteId(p.id); }} className="fa-tap text-xs text-gray-400 hover:text-red-600 px-2">Supprimer</button>
                         )}
                       </div>
+
+                      {/* Fusion de deux fiches en doublon. On choisit d'abord
+                          laquelle absorber, puis on lit l'aperçu — personne ne
+                          doit effacer une fiche sans voir ce qui bouge. */}
+                      {fusionDe === p.id && (() => {
+                        const candidats = doublonsProbables(data, p.id);
+                        const autre = data.partners.find(x => x.id === fusionAvec) || null;
+                        // Une fiche à la corbeille ne peut jamais être celle qu'on garde.
+                        const sensSur = (fusionSens === "autre" && autre?.deleted) ? "moi" : fusionSens;
+                        const gardeId = sensSur === "moi" ? p.id : (autre?.id || p.id);
+                        const absorbeId = sensSur === "moi" ? (autre?.id || null) : p.id;
+                        const ap = autre ? apercuFusion(data, gardeId, absorbeId) : null;
+                        return (
+                          <div className="mt-3 border border-amber-300 rounded-xl p-4 bg-amber-50/30">
+                            <div className="font-display font-semibold fa-navy mb-1">Fusionner deux fiches</div>
+                            <p className="text-xs text-gray-600 mb-3 leading-relaxed">
+                              Une seule fiche survit. Tout ce que porte l'autre y bascule — dossiers, virements,
+                              factures, contrats, filleuls — puis elle disparaît.
+                            </p>
+
+                            <div className="text-xs font-bold fa-navy mb-1.5">
+                              Quelle fiche est le doublon ?
+                              {candidats.length === 0 && <span className="ml-1 font-normal text-gray-500">aucune fiche ne ressemble à celle-ci — cherche-la par son nom ci-dessous.</span>}
+                            </div>
+                            <div className="space-y-1.5 mb-3">
+                              {candidats.map(({ p: c, motif, niveau }) => (
+                                <button key={c.id} type="button" onClick={() => { setFusionAvec(c.id); setFusionSens(poidsFiche(c, data) > poidsFiche(p, data) ? "autre" : "moi"); }}
+                                  className={`w-full text-left flex items-center gap-2.5 flex-wrap px-3 py-2 rounded-lg border transition ${
+                                    fusionAvec === c.id ? "border-teal-400 bg-teal-50" : "border-gray-200 bg-white hover:border-teal-200"}`}>
+                                  <span className={`w-2 h-2 rounded-full shrink-0 ${niveau === "rouge" ? "bg-red-500" : "bg-amber-500"}`} />
+                                  <span className="flex-1 min-w-[10rem]">
+                                    <span className="block text-sm font-bold fa-navy">{nomPartenaire(c)}</span>
+                                    <span className="block text-[11px] text-gray-500">{signatureFiche(c, data)}</span>
+                                  </span>
+                                  <span className={`text-[11px] font-bold ${niveau === "rouge" ? "text-red-700" : "text-amber-700"}`}>{motif}</span>
+                                </button>
+                              ))}
+                            </div>
+
+                            {/* La recherche libre : deux fiches saisies très
+                                différemment ne se détectent pas toutes seules. */}
+                            <div className="flex items-center gap-2 flex-wrap mb-3">
+                              <label className="flex-1 min-w-[12rem] flex items-center gap-2">
+                                <span className="text-[11px] text-gray-500 shrink-0">Chercher une autre fiche</span>
+                                <input type="text" value={fusionRecherche} onChange={e => setFusionRecherche(e.target.value)}
+                                  placeholder="nom du partenaire…"
+                                  className="flex-1 min-w-0 text-xs border border-gray-300 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                              </label>
+                            </div>
+                            {fusionRecherche.trim().length >= 2 && (() => {
+                              const q = cleComparaison(fusionRecherche);
+                              const dejaVus = new Set(candidats.map(c => c.p.id));
+                              const trouves = data.partners
+                                .filter(x => x.id !== p.id && !dejaVus.has(x.id) && !x.deleted &&
+                                  cleComparaison(nomPartenaire(x)).includes(q))
+                                .slice(0, 6);
+                              if (trouves.length === 0) {
+                                return <div className="text-[11px] text-gray-400 mb-3">Aucune fiche à ce nom.</div>;
+                              }
+                              return (
+                                <div className="space-y-1.5 mb-3">
+                                  {trouves.map(x => (
+                                    <button key={x.id} type="button" onClick={() => { setFusionAvec(x.id); setFusionSens(poidsFiche(x, data) > poidsFiche(p, data) ? "autre" : "moi"); }}
+                                      className={`w-full text-left flex items-center gap-2.5 flex-wrap px-3 py-2 rounded-lg border transition ${
+                                        fusionAvec === x.id ? "border-teal-400 bg-teal-50" : "border-gray-200 bg-white hover:border-teal-200"}`}>
+                                      <span className="w-2 h-2 rounded-full shrink-0 bg-gray-300" />
+                                      <span className="flex-1 min-w-[10rem]">
+                                        <span className="block text-sm font-bold fa-navy">{nomPartenaire(x)}</span>
+                                        <span className="block text-[11px] text-gray-500">{signatureFiche(x, data)}</span>
+                                      </span>
+                                      <span className="text-[11px] text-gray-400">choisie à la main</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              );
+                            })()}
+
+                            {ap?.ok === false && (
+                              <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                                Fusion impossible : {ap.refus}.
+                              </div>
+                            )}
+
+                            {ap?.ok && (
+                              <>
+                                <div className="flex items-center gap-2 flex-wrap mb-3">
+                                  <span className="text-xs font-bold fa-navy">Fiche conservée</span>
+                                  {[["moi", signatureFiche(p, data)], ["autre", signatureFiche(autre, data)]].map(([cle, label]) => (
+                                    <button key={cle} type="button" onClick={() => setFusionSens(cle)} aria-pressed={sensSur === cle}
+                                      disabled={cle === "autre" && autre.deleted}
+                                      title={cle === "autre" && autre.deleted ? "Une fiche à la corbeille ne peut pas être celle qu'on garde" : ""}
+                                      className={`fa-tap text-xs font-bold px-3.5 py-2 rounded-full border transition disabled:opacity-40 ${
+                                        sensSur === cle ? "bg-emerald-700 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
+                                      {label}
+                                    </button>
+                                  ))}
+                                </div>
+
+                                <div className="border border-gray-200 rounded-xl overflow-hidden bg-white mb-3">
+                                  <div className="grid grid-cols-[7rem_minmax(0,1fr)_minmax(0,1fr)] fa-bg-offwhite border-b border-gray-200">
+                                    <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wide px-2.5 py-2">Champ</div>
+                                    <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wide px-2.5 py-2 truncate">Conservée</div>
+                                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wide px-2.5 py-2 truncate">Absorbée</div>
+                                  </div>
+                                  {ap.lignes.filter(l => !champVide(l.garde) || !champVide(l.absorbe)).map(l => (
+                                    <div key={l.cle} className={`grid grid-cols-[7rem_minmax(0,1fr)_minmax(0,1fr)] border-b border-gray-50 last:border-0 ${l.repris ? "bg-amber-50/60" : ""}`}>
+                                      <div className="text-[11px] text-gray-500 px-2.5 py-1.5">{l.champ}</div>
+                                      <div className={`text-xs fa-navy px-2.5 py-1.5 break-words ${l.repris ? "font-bold" : "font-medium"}`}>
+                                        {champVide(l.resultat) ? <span className="text-gray-300">—</span> : String(l.resultat)}
+                                        {l.repris && <span className="text-[10px] text-amber-700 font-bold"> ← repris</span>}
+                                      </div>
+                                      <div className="text-xs text-gray-400 px-2.5 py-1.5 break-words">
+                                        {champVide(l.absorbe) ? "—" : String(l.absorbe)}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+                                  {[["dossiers", "dossier(s) déplacé(s)"], ["virements", "virement(s) repris"],
+                                    ["factures", "facture(s) reprise(s)"], ["filleuls", "filleul(s) rattaché(s)"]].map(([cle, quoi]) => (
+                                    <div key={cle} className="fa-bg-offwhite border border-gray-200 rounded-lg px-2.5 py-2">
+                                      <div className="font-display text-lg font-bold fa-navy leading-tight">{masqueNb(ap.compteurs[cle])}</div>
+                                      <div className="text-[10px] text-gray-500 leading-tight">{quoi}</div>
+                                    </div>
+                                  ))}
+                                </div>
+
+                                {ap.pertes.length > 0 && (
+                                  <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2.5 mb-3">
+                                    <div className="text-xs font-bold text-red-800 mb-1">Ce qui sera perdu</div>
+                                    <ul className="text-[11px] text-red-800 space-y-1 leading-relaxed">
+                                      {ap.pertes.map((x, i) => <li key={i}>{x}</li>)}
+                                    </ul>
+                                  </div>
+                                )}
+
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <button type="button" disabled={busy}
+                                    onClick={async () => {
+                                      await onFusionnerPartenaires(gardeId, absorbeId);
+                                      setFusionDe(null); setFusionAvec(null); setFusionSens("moi");
+                                    }}
+                                    className="text-xs font-semibold bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg transition disabled:opacity-50">
+                                    Fusionner les deux fiches
+                                  </button>
+                                  <button type="button" onClick={() => { setFusionDe(null); setFusionAvec(null); }}
+                                    className="text-xs text-gray-500 hover:text-gray-700 px-2">Annuler</button>
+                                  <span className="flex-1 min-w-0" />
+                                  <span className="text-[11px] text-gray-400">Irréversible. La fusion part au journal.</span>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
 
