@@ -227,6 +227,7 @@ const CATEGORIES_ADMIN = [
       { id: "partenaires", label: "Partenaires" },
       { id: "mandataires", label: "Mandataires", fullAdmin: true },
       { id: "assureurs", label: "Assureurs", fullAdmin: true },
+      { id: "banques", label: "Banques", fullAdmin: true },
       { id: "journal", label: "Journal" },
       { id: "corbeille", label: "Corbeille" },
     ],
@@ -1097,6 +1098,12 @@ function genererJeuDemo(base) {
         else d.history[d.history.length - 1] = { status: final, at: Math.round(fin) };
         d.status = final;
       })();
+      // Quelques dossiers repris par l'autre commercial, pour que la
+      // réaffectation se voie en démo plutôt que de rester théorique.
+      if (chance(0.07)) {
+        const autre = choix([...commerciaux, "Sébastien"].filter(c => c !== p.commercial));
+        if (autre) d.commercial = autre;
+      }
       dossiers.push(d);
     }
   }
@@ -1257,12 +1264,15 @@ function calendrierRetrocession(partner, dossiers) {
     let m = mois.find(x => x.cle === cle);
     if (!m) {
       m = {
-        cle, montant: 0, bonus: 0, nb: 0, recus: 0,
+        cle, montant: 0, bonus: 0, nb: 0, recus: 0, lignes: [],
         libelle: new Date(l.datePrevue + "T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }),
       };
       mois.push(m);
     }
     m.montant += l.montant; m.bonus += (l.bonus || 0); m.nb += 1; if (l.recu) m.recus += 1;
+    // On garde les échéances qui composent le mois : c'est ce qui permet de
+    // déplier le détail client par client au moment de facturer.
+    m.lignes.push(l);
   }
   for (const m of mois) {
     // Tolérance de lecture : les versements enregistrés avant le renommage
@@ -1275,6 +1285,42 @@ function calendrierRetrocession(partner, dossiers) {
   mois.sort((a, b) => a.cle.localeCompare(b.cle));
   const sansDate = lignes.filter(l => !l.datePrevue).length;
   return { mois, sansDate };
+}
+
+// Le détail d'un mois, client par client. Un partenaire qui facture dix-huit
+// dossiers d'un coup doit pouvoir cocher chaque ligne : on trie du plus gros
+// au plus petit, et la somme des parts vaut exactement le montant du mois.
+function detailMois(m) {
+  return (m?.lignes || [])
+    .map(l => ({
+      cle: l.cle,
+      nom: clientName(l.dossier),
+      numero: l.numero,
+      total: l.total,
+      part: l.montant + (l.bonus || 0),
+      bonus: l.bonus || 0,
+      recu: !!l.recu,
+    }))
+    .sort((a, b) => b.part - a.part || a.nom.localeCompare(b.nom, "fr"));
+}
+function totalDetail(lignes) {
+  return (lignes || []).reduce((t, c) => t + c.part, 0);
+}
+function detailEnTexte(titre, lignes) {
+  const l = ["Client\tÉchéance\tMontant"];
+  for (const c of lignes) l.push(c.nom + "\t" + c.numero + "/" + c.total + "\t" + fmtEuroPrecis(c.part));
+  l.push("Total (" + lignes.length + ")\t\t" + fmtEuroPrecis(totalDetail(lignes)));
+  return titre + "\n" + l.join("\n");
+}
+function detailEnHtml(titre, lignes) {
+  const e = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const corps = lignes.map(c =>
+    "<tr><td>" + e(c.nom) + "</td><td>" + c.numero + "/" + c.total + "</td>" +
+    "<td align=\"right\">" + e(fmtEuroPrecis(c.part)) + "</td></tr>").join("");
+  return "<p><strong>" + e(titre) + "</strong></p><table border=\"1\" cellpadding=\"4\" cellspacing=\"0\">" +
+    "<tr><th>Client</th><th>Échéance</th><th>Montant</th></tr>" + corps +
+    "<tr><td><strong>Total (" + lignes.length + ")</strong></td><td></td>" +
+    "<td align=\"right\"><strong>" + e(fmtEuroPrecis(totalDetail(lignes))) + "</strong></td></tr></table>";
 }
 
 // ─── Pot commun ─────────────────────────────────────────────────────────────
@@ -1432,6 +1478,95 @@ function downloadJson(filename, obj) {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+// ─── Relevé comptable ───────────────────────────────────────────────────
+// Ce que le comptable attend, c'est un journal : une ligne par mouvement
+// d'argent, datée. Deux natures seulement — l'honoraire encaissé du client,
+// et la rétrocession versée à l'apporteur. Rien d'attendu, rien de prévu :
+// que ce qui a bougé.
+const NATURE_HONORAIRE = "Honoraire encaissé";
+const NATURE_RETROCESSION = "Rétrocession versée";
+
+function jourDeEcheance(d, e) {
+  if (e.encaisseLe) return e.encaisseLe;
+  if (e.payeSansDate) return d.paymentDate || (d.updatedAt ? isoDe(d.updatedAt) : null);
+  return null;
+}
+
+function mouvementsCompta(data, debutIso, finIso) {
+  const dans = (iso) => !!iso && iso >= debutIso && iso <= finIso;
+  const partenaire = (id) => {
+    const p = (data?.partners || []).find(x => x.id === id);
+    return p ? nomPartenaire(p) + (p.deleted ? " (supprimé)" : "") : "Partenaire introuvable";
+  };
+  const lignes = [];
+
+  // Produits : chaque échéance d'honoraires réellement reçue.
+  for (const d of (data?.dossiers || [])) {
+    if (d.status === "KO") continue;
+    const ech = echeancesDe(d);
+    const parts = repartir(d.caAmount || 0, ech.length);
+    ech.forEach((e, i) => {
+      const jour = jourDeEcheance(d, e);
+      if (!dans(jour) || Math.abs(parts[i]) < 0.005) return;
+      lignes.push({
+        date: jour, nature: NATURE_HONORAIRE, sens: 1,
+        client: clientName(d), partenaire: partenaire(d.partnerId),
+        reference: d.id,
+        montant: parts[i],
+        detail: ech.length > 1 ? `échéance ${e.numero || i + 1}/${ech.length}` : "réglé en une fois",
+      });
+    });
+  }
+
+  // Charges : chaque virement effectivement fait à un apporteur.
+  for (const p of (data?.partners || [])) {
+    for (const v of (p.retrocessionVersements || [])) {
+      if (!dans(v.dateVirement)) continue;
+      lignes.push({
+        date: v.dateVirement, nature: NATURE_RETROCESSION, sens: -1,
+        client: "", partenaire: nomPartenaire(p) + (p.deleted ? " (supprimé)" : ""),
+        reference: v.id || v.cle || "",
+        montant: Number(v.montant) || 0,
+        detail: (v.libelle || v.cle || "") + (v.mode ? ` · ${v.mode}` : ""),
+      });
+    }
+  }
+
+  lignes.sort((a, b) => a.date.localeCompare(b.date) || a.nature.localeCompare(b.nature));
+  return lignes;
+}
+
+function bilanCompta(lignes) {
+  const produits = lignes.filter(l => l.sens > 0).reduce((s, l) => s + l.montant, 0);
+  const charges = lignes.filter(l => l.sens < 0).reduce((s, l) => s + l.montant, 0);
+  return {
+    produits: Math.round(produits * 100) / 100,
+    charges: Math.round(charges * 100) / 100,
+    solde: Math.round((produits - charges) * 100) / 100,
+    nb: lignes.length,
+  };
+}
+
+function exportComptaCsv(data, debutIso, finIso) {
+  const lignes = mouvementsCompta(data, debutIso, finIso);
+  const b = bilanCompta(lignes);
+  const euro = (n) => (Math.round(n * 100) / 100).toFixed(2).replace(".", ",");
+  const rows = [
+    ["Date", "Nature", "Client", "Partenaire", "Détail", "Produit (€)", "Charge (€)", "Référence"],
+    ...lignes.map(l => [
+      l.date, l.nature, l.client, l.partenaire, l.detail,
+      l.sens > 0 ? euro(l.montant) : "",
+      l.sens < 0 ? euro(l.montant) : "",
+      l.reference,
+    ]),
+    [],
+    ["", "TOTAL", "", "", `${b.nb} mouvement${b.nb > 1 ? "s" : ""} du ${debutIso} au ${finIso}`, euro(b.produits), euro(b.charges), ""],
+    ["", "SOLDE", "", "", "produits moins rétrocessions", euro(b.solde), "", ""],
+  ];
+  downloadCsv(`frangola-compta-${debutIso}-au-${finIso}.csv`, rows);
+  return b;
+}
+
 function exportDossiersCsv(dossiers, partners) {
   const partnerName = (id) => { const p = partners.find(p => p.id === id); return p ? (nomPartenaire(p)) : "—"; };
   const rows = [
@@ -2270,6 +2405,12 @@ export default function App() {
       settings: { ...base.settings, assureurs: liste },
     }));
   }
+  async function setBanques(liste) {
+    await mutateData(base => ({
+      ...base,
+      settings: { ...base.settings, banques: liste },
+    }));
+  }
 
   // Ajout / modification / suppression d'un challenge ponctuel. L'ancien
   // challenge unique garde son emplacement d'origine : on le modifie là où il
@@ -2818,6 +2959,33 @@ export default function App() {
     });
   }
 
+  // Réaffecter un dossier à un autre commercial, sans toucher au partenaire.
+  // `commercial` à null remet le dossier sur son partenaire. Le changement
+  // déplace de l'argent (part mandataire sur honoraires et récurrence) : il
+  // part au journal, toujours.
+  async function reaffecterDossier(dossierId, commercial) {
+    await mutateData(base => {
+      const cible = base.dossiers.find(d => d.id === dossierId);
+      if (!cible) return base;
+      const duPartenaire = base.partners.find(p => p.id === cible.partnerId)?.commercial || null;
+      // Choisir le commercial du partenaire, c'est revenir au défaut : on
+      // n'enregistre pas une exception qui n'en est pas une.
+      const valeur = (!commercial || commercial === duPartenaire) ? null : commercial;
+      const avant = cible.commercial || duPartenaire;
+      if ((cible.commercial || null) === valeur) return base;
+      const dossiers = base.dossiers.map(d => d.id === dossierId
+        ? { ...d, commercial: valeur, updatedAt: Date.now() }
+        : d);
+      const cname = `${cible.clientLastName || ""} ${cible.clientFirstName || ""}`.trim() || "(sans nom)";
+      const message = valeur
+        ? `a réaffecté le dossier ${cname} à ${commercialLabel(valeur) || valeur}` +
+          (avant ? ` (suivi jusqu'ici par ${commercialLabel(avant) || avant})` : "")
+        : `a remis le dossier ${cname} sur son partenaire` +
+          (duPartenaire ? ` (${commercialLabel(duPartenaire) || duPartenaire})` : "");
+      return withLog({ ...base, dossiers }, message);
+    });
+  }
+
   async function updateDossierNotes(dossierId, notes) {
     await mutateData(base => ({
       ...base,
@@ -2830,48 +2998,6 @@ export default function App() {
       ...base,
       dossiers: base.dossiers.map(d => d.id === dossierId ? { ...d, simulation: { ...(d.simulation || {}), ...fields } } : d),
     }));
-  }
-
-  async function analyzeDossierIA(dossierId) {
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-      return { error: "Analyse IA indisponible dans cet aperçu — fonctionne uniquement sur le site en ligne." };
-    }
-    const d = data.dossiers.find(x => x.id === dossierId);
-    if (!d) return { error: "Dossier introuvable." };
-    try {
-      const offreFile = d.docs?.offre ? await loadFile(d.docs.offre.key) : null;
-      const tableauFile = d.docs?.tableau ? await loadFile(d.docs.tableau.key) : null;
-      const cniFile = d.docs?.cni ? await loadFile(d.docs.cni.key) : null;
-      if (!offreFile && !tableauFile) return { error: "Aucun document (offre ou tableau) déposé sur ce dossier." };
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 150000);
-      let res;
-      try {
-        res = await fetch(`${SUPABASE_URL}/functions/v1/analyse-documents`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${SUPABASE_ANON_KEY}` },
-          body: JSON.stringify({
-            offreDoc: offreFile ? { data: offreFile.data, mime: offreFile.mime || "application/pdf" } : null,
-            tableauDoc: tableauFile ? { data: tableauFile.data, mime: tableauFile.mime || "application/pdf" } : null,
-            cniDoc: cniFile ? { data: cniFile.data, mime: cniFile.mime || "application/pdf" } : null,
-          }),
-          signal: controller.signal,
-        });
-      } catch (fetchErr) {
-        if (fetchErr.name === "AbortError") {
-          return { error: "L'analyse a pris trop de temps et a été interrompue. Réessaie, ou dépose des documents moins volumineux (moins de pages) si le problème persiste." };
-        }
-        throw fetchErr;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-      const json = await res.json();
-      if (!res.ok || json.error) return { error: json.error || "Erreur pendant l'analyse." };
-      return { result: json };
-    } catch (e) {
-      return { error: "Erreur réseau pendant l'analyse : " + String(e) };
-    }
   }
 
   async function updateDossierPartnerMessage(dossierId, partnerMessage) {
@@ -3201,6 +3327,7 @@ export default function App() {
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
+          onSetBanques={setBanques}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
@@ -3222,8 +3349,8 @@ export default function App() {
           onUploadPieceBackOffice={uploadPieceBackOffice}
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
+          onReaffecterDossier={reaffecterDossier}
           onUpdateDossierSimulation={updateDossierSimulation}
-          onAnalyzeDossierIA={analyzeDossierIA}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
@@ -3273,6 +3400,7 @@ export default function App() {
           onMajChallenge={majChallenge}
           onSupprimerChallenge={supprimerChallenge}
           onSetAssureurs={setAssureurs}
+          onSetBanques={setBanques}
           onUpdateAdmin={updateAdmin}
                     onTraiterParrainage={traiterParrainage}
                     onTraiterParrainagesEnLot={traiterParrainagesEnLot}
@@ -3294,8 +3422,8 @@ export default function App() {
           onUploadPieceBackOffice={uploadPieceBackOffice}
           onDeleteDossier={deleteDossierPermanently}
           onUpdateDossierNotes={updateDossierNotes}
+          onReaffecterDossier={reaffecterDossier}
           onUpdateDossierSimulation={updateDossierSimulation}
-          onAnalyzeDossierIA={analyzeDossierIA}
           onUpdateDossierPartnerMessage={updateDossierPartnerMessage}
           onUploadBordereau={uploadBordereau}
           onAdminUploadDoc={adminUploadDoc}
@@ -3804,6 +3932,79 @@ function Copiable({ valeur, manquant, titre, mono }) {
       <span className={`shrink-0 text-[10px] font-semibold ${copie === "ok" ? "text-emerald-600" : copie === "echec" ? "text-red-600" : "text-gray-300 group-hover:text-teal-600"}`}>
         {copie === "ok" ? "✓ copié" : copie === "echec" ? "échec" : "copier"}
       </span>
+    </button>
+  );
+}
+
+// Le détail d'un mois de rétrocession, déplié sous la ligne du mois. La
+// ligne de total est le point de contrôle : c'est elle qui doit correspondre
+// au montant facturé.
+function DetailRetrocession({ mois, titre }) {
+  const [copie, setCopie] = useState(false);
+  const clients = detailMois(mois);
+  if (clients.length === 0) return null;
+  const intitule = titre || ((mois.libelle || "").charAt(0).toUpperCase() + (mois.libelle || "").slice(1));
+
+  async function copier() {
+    const ok = await copierRiche(detailEnHtml(intitule, clients), detailEnTexte(intitule, clients));
+    setCopie(ok ? "ok" : "echec");
+    setTimeout(() => setCopie(false), 2000);
+  }
+
+  return (
+    <div className="mt-1.5 rounded-lg border border-gray-200 bg-white overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border-b border-gray-200 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+        <span className="flex-1 min-w-0">Client</span>
+        <span className="hidden sm:block w-14 text-center shrink-0">Échéance</span>
+        <span className="w-20 text-right shrink-0">Votre part</span>
+      </div>
+      <div className="max-h-[232px] overflow-y-auto">
+        {clients.map(c => (
+          <div key={c.cle} className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-100 last:border-b-0">
+            <span className="flex-1 min-w-0 leading-tight">
+              <span className="block truncate text-xs font-semibold fa-navy">{c.nom}</span>
+              {/* Sur téléphone la colonne échéance mangerait le nom : on la
+                  replie sous le nom, où elle tient sans rien serrer. */}
+              <span className="sm:hidden block text-[10px] text-gray-400">échéance {c.numero}/{c.total}</span>
+            </span>
+            <span className="hidden sm:block w-14 text-center shrink-0 text-[11px] text-gray-400">{c.numero}/{c.total}</span>
+            <span className="w-20 text-right shrink-0 leading-tight">
+              <span className="block text-xs font-bold fa-navy">{fmtEuroPrecis(c.part)}</span>
+              {c.bonus > 0.005 && (
+                <span className="block text-[10px] font-semibold text-violet-700">⚡ dont {fmtEuroPrecis(c.bonus)}</span>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-t border-gray-200">
+        <span className="flex-1 min-w-0 text-[11px] font-bold fa-navy">
+          Total — {clients.length} client{clients.length > 1 ? "s" : ""}
+        </span>
+        <span className="text-sm font-extrabold fa-navy">{fmtEuroPrecis(totalDetail(clients))}</span>
+      </div>
+      <div className="px-3 py-2 border-t border-gray-100">
+        <button onClick={copier}
+          className="fa-tap w-full inline-flex items-center justify-center gap-1.5 text-xs font-semibold fa-navy fa-bg-gold rounded-lg py-2 hover:brightness-95 transition">
+          {copie === "ok" ? <Check size={13} /> : <Copy size={13} />}
+          {copie === "ok" ? "Détail copié" : copie === "echec" ? "Copie impossible" : "Copier le détail"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// La pastille qui ouvre le détail. Elle se place à gauche du montant : la
+// ligne du mois reste une ligne, pas un bouton — elle contient déjà le lien
+// vers l'ordre de virement, et on n'imbrique pas deux boutons.
+function PastilleDetail({ nb, ouvert, onClick }) {
+  if (!nb) return null;
+  return (
+    <button onClick={onClick} aria-expanded={ouvert}
+      title={ouvert ? "Masquer le détail" : "Voir le détail client par client"}
+      className="fa-tap inline-flex items-center gap-1 text-[11px] font-bold text-gray-600 hover:fa-teal-text bg-white/70 border border-black/10 rounded-full px-2 py-0.5 transition">
+      <ChevronDown size={11} className={`transition-transform ${ouvert ? "rotate-180" : ""}`} />
+      {nb} client{nb > 1 ? "s" : ""}
     </button>
   );
 }
@@ -4535,6 +4736,10 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
   const [filtrePaiement, setFiltrePaiement] = useState("tous");
+  // Le mois de rétrocession déplié dans « Mes rétrocessions ». Un seul à la
+  // fois : on compare rarement deux mois, et deux listes ouvertes noient
+  // l'écran du téléphone.
+  const [detailOuvert, setDetailOuvert] = useState(null);
   const [clientFirstName, setClientFirstName] = useState("");
   const [clientLastName, setClientLastName] = useState("");
   const [clientPhone, setClientPhone] = useState("");
@@ -5415,10 +5620,11 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                         </div>
                         {lignesVue.map(m => (
                           <div key={m.cle}
-                            className={`flex items-center justify-between gap-2 flex-wrap rounded-lg px-3 py-2 border ${
+                            className={`rounded-lg px-3 py-2 border ${
                               m.etat === "regle" ? "bg-emerald-50 border-emerald-200"
                               : m.etat === "a_regler" ? "fa-bg-gold border-amber-300"
                               : "fa-bg-offwhite border-transparent"}`}>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
                             <span className={`text-sm fa-navy font-medium ${auForfait ? "" : "capitalize"}`}>{m.libelle}</span>
                             <span className="text-xs text-gray-500">
                               {m.etat === "regle"
@@ -5436,6 +5642,10 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                                   <Download size={12} /> {m.versement.mode === "Carte cadeau" ? "carte cadeau" : "ordre de virement"}
                                 </button>
                               )}
+                              {!auForfait && (
+                                <PastilleDetail nb={(m.lignes || []).length} ouvert={detailOuvert === m.cle}
+                                  onClick={() => setDetailOuvert(detailOuvert === m.cle ? null : m.cle)} />
+                              )}
                               {(m.bonus || 0) > 0.005 && m.etat !== "regle" ? (
                                 <span className="flex flex-col items-end leading-tight">
                                   <span className="text-[11px] text-gray-500">rétrocession {fmtEuroPrecis(m.montant)}</span>
@@ -5450,6 +5660,8 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
                                 </span>
                               )}
                             </span>
+                            </div>
+                            {!auForfait && detailOuvert === m.cle && <DetailRetrocession mois={m} />}
                           </div>
                         ))}
                       </div>
@@ -5628,6 +5840,25 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
 const MANDATAIRE_PALETTE = ["#545454", "#8B5CF6", "#0EA5E9", "#F97316", "#059669", "#DC2626", "#DB2777", "#CA8A04"];
 let _colorDataRef = null;
 function setColorDataRef(d) { _colorDataRef = d; }
+// Le commercial d'un dossier. Par défaut c'est celui du partenaire — un
+// apporteur est suivi par quelqu'un, et ses dossiers suivent. Mais un dossier
+// peut être repris par l'autre commercial sans que le partenaire change de
+// main : `d.commercial` est cette exception, et elle porte sur CE dossier.
+// Tout ce qui ventile par commercial passe par ici, sinon les chiffres se
+// contredisent d'un écran à l'autre.
+function commercialDuDossier(d, partners) {
+  if (d?.commercial) return d.commercial;
+  return (partners || []).find(p => p.id === d?.partnerId)?.commercial || null;
+}
+// Vrai quand le dossier a été réaffecté à la main, c'est-à-dire quand il ne
+// suit plus son partenaire. Sert à marquer la pastille : une exception
+// invisible rendrait les totaux incompréhensibles.
+function dossierReaffecte(d, partners) {
+  if (!d?.commercial) return false;
+  const duPartenaire = (partners || []).find(p => p.id === d.partnerId)?.commercial || null;
+  return d.commercial !== duPartenaire;
+}
+
 function commercialColor(name) {
   if (!name) return "#999";
   if (_colorDataRef) {
@@ -5978,7 +6209,7 @@ function ChallengeBoard({ data, commerciaux, onSetGoals, canEdit }) {
   const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
   const goals = data.settings?.challenge || { partenaires: 40, dossiers: 30, ca: 22500 };
 
-  const commercialOf = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
+  const commercialOf = (d) => commercialDuDossier(d, data.partners);
   const paidAt = (d) => d.paymentDate ? new Date(d.paymentDate).getTime() : (d.updatedAt || d.createdAt);
 
   function statsFor(c, start, end) {
@@ -6801,9 +7032,19 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <label className="text-[11px] text-gray-500 col-span-2">Banque
                   {!bo.banque && dossier.simulation?.banqueDetectee && <span className="ml-1 text-teal-700">· lue sur l'offre / le tableau</span>}
-                  <input key={"b" + banqueDuDossier(dossier)} defaultValue={banqueDuDossier(dossier)} placeholder="ex. Crédit Agricole"
-                    onBlur={e => e.target.value.trim() !== banqueDuDossier(dossier) && maj({ banque: e.target.value.trim() })}
-                    className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  {/* Une liste déroulante qui n'empêche pas d'écrire : les banques
+                      rangées dans Logistique sont proposées, et une banque qui n'y
+                      est pas se saisit quand même, signalée « hors liste ». */}
+                  <span className="mt-0.5 flex items-center gap-2">
+                    <PastilleBanque nom={banqueDuDossier(dossier)} data={_colorDataRef} />
+                    <input list="fa-banques" key={"b" + banqueDuDossier(dossier)} defaultValue={banqueDuDossier(dossier)}
+                      placeholder="ex. Crédit Agricole"
+                      onBlur={e => e.target.value.trim() !== banqueDuDossier(dossier) && maj({ banque: e.target.value.trim() })}
+                      className="flex-1 min-w-0 text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  </span>
+                  <datalist id="fa-banques">
+                    {listeBanques(_colorDataRef).map(b => <option key={b.id || b.nom} value={b.nom} />)}
+                  </datalist>
                 </label>
                 <label className="text-[11px] text-gray-500">Ancienne assurance
                   <select value={bo.ancienneAssurance || ""} onChange={e => maj({ ancienneAssurance: e.target.value || null })}
@@ -7300,6 +7541,54 @@ function assureurLogo(data, nom) {
   // ceux déposés depuis l'écran de gestion (`logoData`).
   return a?.logoData || a?.logo || null;
 }
+// ─── Banques prêteuses ──────────────────────────────────────────────────
+// Même principe que les compagnies : une liste maison, un logo et une
+// couleur, pour que la banque d'un dossier se reconnaisse d'un coup d'œil au
+// lieu d'être retapée à la main chaque fois — avec les fautes de frappe qui
+// vont avec, et deux « Crédit Agricole » qui ne se ressemblent plus.
+const BANQUES_PAR_DEFAUT = [
+  { id: "credit-agricole", nom: "Crédit Agricole", couleur: "#008752" },
+  { id: "bnp-paribas", nom: "BNP Paribas", couleur: "#00915A" },
+  { id: "societe-generale", nom: "Société Générale", couleur: "#E60028" },
+  { id: "lcl", nom: "LCL", couleur: "#003B7E" },
+  { id: "caisse-d-epargne", nom: "Caisse d'Épargne", couleur: "#E2001A" },
+  { id: "banque-populaire", nom: "Banque Populaire", couleur: "#005EB8" },
+  { id: "credit-mutuel", nom: "Crédit Mutuel", couleur: "#E2001A" },
+  { id: "la-banque-postale", nom: "La Banque Postale", couleur: "#003B7E" },
+  { id: "cic", nom: "CIC", couleur: "#004B93" },
+  { id: "credit-du-nord", nom: "Crédit du Nord", couleur: "#1D3F8B" },
+  { id: "hsbc", nom: "HSBC", couleur: "#DB0011" },
+  { id: "boursorama", nom: "BoursoBank", couleur: "#E5007D" },
+];
+function listeBanques(data) {
+  const l = data?.settings?.banques;
+  return Array.isArray(l) && l.length > 0 ? l : BANQUES_PAR_DEFAUT;
+}
+function banqueParNom(data, nom) {
+  if (!nom) return null;
+  const cle = cleComparaison(nom);
+  return listeBanques(data).find(b => cleComparaison(b.nom) === cle) || null;
+}
+function banqueLogo(data, nom) {
+  const b = banqueParNom(data, nom);
+  return b?.logoData || b?.logo || null;
+}
+// La pastille d'une banque : son logo s'il a été déposé, sa couleur sinon.
+// Une banque saisie à la main mais absente du référentiel reste affichée —
+// on ne cache jamais une information parce qu'elle n'est pas rangée.
+function PastilleBanque({ nom, data, taille = 18 }) {
+  if (!nom) return null;
+  const b = banqueParNom(data, nom);
+  const logo = b?.logoData || b?.logo;
+  if (logo) return <img src={logo} alt={nom} style={{ height: taille }} className="w-auto max-w-[70px] object-contain shrink-0" />;
+  return (
+    <span className="inline-flex items-center gap-1.5 shrink-0">
+      <span className="rounded-full shrink-0" style={{ width: 9, height: 9, backgroundColor: b?.couleur || "#9ca3af" }} />
+      {!b && <span className="text-[10px] text-amber-700" title="Cette banque n'est pas dans ta liste">hors liste</span>}
+    </span>
+  );
+}
+
 function assureurParNom(data, nom) {
   if (!nom) return null;
   return listeAssureurs(data).find(a => a.nom === nom) || null;
@@ -7485,7 +7774,8 @@ function projectionRecurrence(dossiers, nouveauxParMois, r1, r2, annees = 5) {
 // mandataire. Les dossiers suivis par le gérant reviennent à Frangola en
 // entier — appliquer 50 % à l'ensemble reviendrait à se verser une commission
 // à soi-même, et à sous-estimer d'autant le revenu réel de la maison.
-function recurrenceParMandataire(data, nomGerant = "Sébastien") {
+const NOM_GERANT = "Sébastien";
+function recurrenceParMandataire(data, nomGerant = NOM_GERANT) {
   const parPartenaire = new Map((data?.partners || []).map(x => [x.id, x]));
   const lignes = new Map();
   const ligne = (nom) => {
@@ -7509,9 +7799,10 @@ function recurrenceParMandataire(data, nomGerant = "Sébastien") {
     const mensuel = recurrenceMensuelle(d);
     const cumul = recurrenceCumulee(d);
     if (mensuel <= 0 && cumul <= 0) continue;
+    // Un dossier réaffecté suit son commercial ; sinon celui du partenaire.
     // Un partenaire sans commercial connu revient à la maison : c'est le cas
     // du Pot commun, et c'est le bon défaut.
-    const nom = parPartenaire.get(d.partnerId)?.commercial || nomGerant;
+    const nom = d.commercial || parPartenaire.get(d.partnerId)?.commercial || nomGerant;
     const l = ligne(nom);
     if (contratEnCours(d)) {
       l.contrats += 1;
@@ -7786,6 +8077,184 @@ const SEUIL_RECUL_CHALLENGE = 10;
 // Taux de rétrocession constaté sur un ensemble de dossiers. À défaut de toute
 // donnée, on retient le taux maison : 50 % pour l'apporteur.
 const TAUX_RETROCESSION_DEFAUT = 0.50;
+// Les honoraires que Frangola facture au client : une part du gain que la
+// substitution lui fait faire. C'est la règle maison, et c'est ce chiffre
+// qu'affiche déjà la simulation client — il n'a plus à être ressaisi à la main.
+const TAUX_HONORAIRES_SIMULATION = 0.10;
+
+function gainSimulation(d) {
+  const actuel = Number(d?.simulation?.assuranceRestante) || 0;
+  const devis = Number(d?.simulation?.devisAssurance) || 0;
+  if (!actuel || !devis) return 0;
+  return actuel - devis;          // négatif si le devis est plus cher
+}
+function honorairesSimules(d) {
+  const gain = gainSimulation(d);
+  if (gain <= 0) return 0;
+  return Math.round(gain * TAUX_HONORAIRES_SIMULATION * 100) / 100;
+}
+
+// La règle de rémunération d'un partenaire : son forfait s'il en a un, sinon
+// le taux qu'on lui applique réellement, lu sur ses propres dossiers. Sans
+// historique, le taux maison. C'est la même lecture que partout ailleurs —
+// on ne crée pas un second barème à côté du premier.
+function regleRetrocession(partner, dossiers) {
+  if (partner?.flatFee != null && partner.flatFee !== "") {
+    return { type: "forfait", montant: Number(partner.flatFee) || 0 };
+  }
+  const siens = (dossiers || []).filter(d => d.partnerId === partner?.id && (d.caAmount || 0) > 0);
+  return { type: "taux", taux: siens.length > 0 ? tauxRetrocession(siens) : TAUX_RETROCESSION_DEFAUT };
+}
+function retrocessionSelonRegle(partner, dossiers, caNet) {
+  const r = regleRetrocession(partner, dossiers);
+  if (r.type === "forfait") return r.montant;
+  return Math.round(Math.max(0, caNet || 0) * r.taux * 100) / 100;
+}
+function libelleRegleRetrocession(partner, dossiers) {
+  const r = regleRetrocession(partner, dossiers);
+  return r.type === "forfait" ? `Forfait ${r.montant}€` : `Sa règle : ${Math.round(r.taux * 100)}%`;
+}
+
+// Un dossier facturé sous le plancher sans motif : la règle maison n'est pas
+// respectée, et rien ne le signalait jusqu'ici.
+// Ce que la simulation doit réécrire dans la rémunération, ou rien du tout.
+// Trois cas où l'on ne touche à rien : pas de gain, un montant déjà saisi à
+// la main, ou un dossier perdu.
+function repriseHonoraires(dossier, simulation, partner, dossiers) {
+  if (!dossier) return null;
+  const d = simulation ? { ...dossier, simulation } : dossier;
+  if (d.status === "KO") return null;
+  const honoraires = honorairesSimules(d);
+  if (honoraires <= 0) return null;
+  const vierge = (d.caAmount == null || d.caAmount === "") && (d.honorairesBruts == null || d.honorairesBruts === "");
+  if (!vierge && !d.honorairesAuto) return null;
+  const geste = Number(d.gesteCommercial) || 0;
+  const net = Math.max(0, Math.round((honoraires - geste) * 100) / 100);
+  return {
+    honorairesBruts: honoraires,
+    caAmount: net,
+    commissionAmount: retrocessionSelonRegle(partner, dossiers, net),
+    honorairesAuto: true,
+  };
+}
+
+function motifManquant(d) {
+  const ca = d?.honorairesBruts != null ? d.honorairesBruts : d?.caAmount;
+  return ca != null && ca !== "" && Number(ca) < HONORAIRES_SEUIL_MOTIF && !d?.motifHonorairesReduits;
+}
+
+// Honoraires réellement ENCAISSÉS depuis une date : on somme les échéances
+// reçues, pas les dossiers souscrits. Un dossier réglé en douze fois ne
+// compte que pour ce qui est tombé. Même lecture que l'encaissé du mois sur
+// l'écran d'accueil — un seul calcul pour les deux.
+function caEncaisseEntre(dossiers, depuis, jusqua = Infinity) {
+  return (dossiers || []).filter(d => d.status !== "KO").reduce((s, d) => {
+    const ech = echeancesDe(d);
+    const parts = repartir(d.caAmount || 0, ech.length);
+    return s + ech.reduce((s2, e, i) => {
+      const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
+        : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
+      return s2 + (quand !== null && quand >= depuis && quand <= jusqua ? parts[i] : 0);
+    }, 0);
+  }, 0);
+}
+function caEncaisseDepuis(dossiers, depuis) { return caEncaisseEntre(dossiers, depuis); }
+
+// Un « mois flottant » : le 27 septembre vaut 8,87 mois depuis janvier, pas 9.
+// C'est ce qui permet de mesurer une période quelconque — du 1er octobre au
+// 30 septembre suivant — sans supposer qu'elle colle à l'année civile.
+function moisFlottant(iso) {
+  const [y, m, j] = iso.split("-").map(Number);
+  const dansLeMois = new Date(y, m, 0).getDate();
+  return y * 12 + (m - 1) + (j - 1) / dansLeMois;
+}
+
+function anneeCivile(maintenant = Date.now()) {
+  const an = new Date(maintenant).getFullYear();
+  return { an, debut: `${an}-01-01`, fin: `${an}-12-31` };
+}
+
+// Un an jour pour jour à partir d'une date, fin incluse : du 1er octobre 2026
+// au 30 septembre 2027.
+function unAnApres(iso) {
+  const [y, m, j] = iso.split("-").map(Number);
+  const d = new Date(y + 1, m - 1, j);
+  d.setDate(d.getDate() - 1);
+  return isoDe(d.getTime());
+}
+
+// La période de l'objectif, quelle qu'elle soit. `ecoules` et `restants` sont
+// des fractions de mois : on ne compte pas septembre en entier le 27, sinon
+// le rythme à tenir est sous-estimé d'un tiers.
+// `restants` ne descend jamais à zéro — une division par zéro n'aide
+// personne — mais `aVenir` et `close` disent à l'écran quoi afficher à la
+// place d'un rythme qui n'a plus de sens.
+function periodeObjectif(debutIso, finIso, maintenant = Date.now()) {
+  if (!debutIso || !finIso || finIso <= debutIso) return { valide: false, debut: debutIso, fin: finIso };
+  const d = moisFlottant(debutIso);
+  const f = moisFlottant(finIso);
+  const n = moisFlottant(isoDe(maintenant));
+  const aVenir = n < d;
+  const close = n > f;
+  const total = Math.max(1 / 30, f - d);
+  const ecoules = Math.max(1 / 30, Math.min(n, f) - d);
+  const restants = Math.max(1 / 30, f - Math.min(Math.max(n, d), f));
+  const jours = Math.max(1, Math.round(restants * 30.44));
+  const restantsAffiches = Math.max(1, Math.round(restants));
+  const finLisible = fmtDate(debutJour(finIso));
+  const compte = jours <= 45 ? `${jours} jour${jours > 1 ? "s" : ""}` : `${restantsAffiches} mois`;
+  return {
+    valide: true, debut: debutIso, fin: finIso,
+    total, ecoules, restants, restantsAffiches, jours, aVenir, close, finLisible,
+    libelleRestant: aVenir ? `commence le ${fmtDate(debutJour(debutIso))}`
+      : close ? `période close le ${finLisible}`
+      : `${compte} avant le ${finLisible}`,
+    moisDeFin: new Date(debutJour(finIso)).toLocaleDateString("fr-FR", { month: "long" }),
+  };
+}
+
+// La période et l'objectif sont un réglage d'appareil, comme l'ordre des
+// onglets : ressaisir « 150 000 » et deux dates à chaque visite n'a aucun
+// intérêt. Les modes « civile » et « glissant » se recalculent tout seuls —
+// seul « sur mesure » garde ses dates telles quelles.
+const CLE_OBJECTIF = "adp:objectif";
+function lireObjectif() {
+  try {
+    const o = JSON.parse(localStorage.getItem(CLE_OBJECTIF) || "null");
+    if (o && typeof o === "object") return o;
+  } catch (e) { /* stockage indisponible */ }
+  return {};
+}
+function ecrireObjectif(o) {
+  try { localStorage.setItem(CLE_OBJECTIF, JSON.stringify(o)); } catch (e) { /* ignore */ }
+}
+
+// Le calcul à l'envers. Tout part de ce qui RESTE à faire et des mois qui
+// restent : en septembre, tenir 100 000 € ne demande pas le rythme d'une
+// année pleine, il demande celui d'un trimestre.
+function besoinsObjectif({ reste, ca, transfo, prod, activation, mois, inscrits = 0 }) {
+  const ok = ca > 0 && transfo > 0 && prod > 0 && activation > 0 && mois > 0;
+  if (!ok) return null;
+  if (reste <= 0) {
+    return { atteint: true, gagnes: 0, deposes: 0, parMois: 0, actifs: 0, total: 0, manque: 0 };
+  }
+  const ceil = (n) => Math.ceil(n - 0.0001);
+  const gagnes = reste / ca;
+  const deposes = gagnes / transfo;
+  const parMois = deposes / mois;
+  const actifs = parMois / prod;
+  const total = actifs / activation;
+  return {
+    atteint: false,
+    gagnes: ceil(gagnes), deposes: ceil(deposes),
+    parMois: Math.round(parMois * 10) / 10,
+    actifs: ceil(actifs), total: ceil(total),
+    manque: Math.max(0, ceil(total) - inscrits),
+  };
+}
+
+const PALIERS_OBJECTIF = [50000, 100000, 200000, 300000, 500000];
+
 function tauxRetrocession(dossiers) {
   const ca = dossiers.reduce((s, d) => s + (d.caAmount || 0), 0);
   if (ca <= 0) return TAUX_RETROCESSION_DEFAUT;
@@ -9194,6 +9663,224 @@ function AssureursPanel({ data, onSet, canEdit, busy }) {
             className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Ajouter</button>
         </div>
       )}
+    </div>
+  );
+}
+
+// Les banques prêteuses, leurs logos et leurs couleurs. Ce sont elles qui
+// alimentent la liste proposée dans le suivi back-office d'un dossier.
+function BanquesPanel({ data, onSet, canEdit, busy }) {
+  const liste = listeBanques(data);
+  const [nouveau, setNouveau] = useState("");
+  const champs = useRef({});
+
+  function maj(id, fields) {
+    onSet(liste.map(b => (b.id || b.nom) === id ? { ...b, ...fields } : b));
+  }
+  function ajouter() {
+    const nom = nouveau.trim();
+    if (!nom || liste.some(b => cleComparaison(b.nom) === cleComparaison(nom))) return;
+    onSet([...liste, { id: cleComparaison(nom).replace(/\s+/g, "-"), nom, couleur: "#6b7280" }]);
+    setNouveau("");
+  }
+  function retirer(id) {
+    onSet(liste.filter(b => (b.id || b.nom) !== id));
+  }
+  async function logo(id, file) {
+    if (!file) return;
+    try { maj(id, { logoData: await reduireImage(file, 200) }); }
+    catch (e) { /* on garde la banque sans logo */ }
+  }
+
+  const compte = (nom) => (data.dossiers || []).filter(d => cleComparaison(banqueDuDossier(d)) === cleComparaison(nom)).length;
+  // Une banque écrite sur un dossier mais absente de la liste : c'est
+  // exactement ce qu'on veut voir pour la ranger une bonne fois.
+  const horsListe = [];
+  for (const d of (data.dossiers || [])) {
+    const nom = banqueDuDossier(d);
+    if (!nom || banqueParNom(data, nom)) continue;
+    const vu = horsListe.find(x => cleComparaison(x.nom) === cleComparaison(nom));
+    if (vu) vu.n++; else horsListe.push({ nom, n: 1 });
+  }
+  horsListe.sort((a, b) => b.n - a.n);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+      <div className="font-display font-semibold fa-navy mb-1">Banques prêteuses</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Elles se choisissent dans une liste sur chaque dossier, au lieu d'être retapées.
+        Le logo et la couleur les rendent reconnaissables d'un coup d'œil dans le suivi back-office.
+      </p>
+
+      <div className="space-y-2">
+        {liste.map(b => {
+          const id = b.id || b.nom;
+          const n = compte(b.nom);
+          return (
+            <div key={id} className="flex items-center gap-3 flex-wrap fa-bg-offwhite rounded-lg px-3 py-2">
+              {(b.logoData || b.logo)
+                ? <img src={b.logoData || b.logo} alt={b.nom} className="h-6 w-auto max-w-[80px] object-contain" />
+                : <span className="w-4 h-4 rounded-full shrink-0" style={{ backgroundColor: b.couleur || "#999" }} />}
+              <span className="text-sm fa-navy font-semibold">{b.nom}</span>
+              <span className="text-xs text-gray-400">{n} dossier{n > 1 ? "s" : ""}</span>
+              {canEdit && (
+                <span className="ml-auto flex items-center gap-2">
+                  <input type="color" value={b.couleur || "#999999"}
+                    onChange={e => maj(id, { couleur: e.target.value })}
+                    title="Couleur de la banque"
+                    className="w-8 h-7 rounded cursor-pointer border border-gray-300" />
+                  <button onClick={() => champs.current[id]?.click()} disabled={busy}
+                    className="text-xs font-medium bg-white border border-gray-300 text-gray-600 px-2.5 py-1 rounded-lg transition">
+                    {b.logoData ? "Changer le logo" : "Logo"}
+                  </button>
+                  <input type="file" accept="image/*" className="hidden" ref={el => champs.current[id] = el}
+                    onChange={e => logo(id, e.target.files?.[0])} />
+                  {n === 0 && (
+                    <button onClick={() => retirer(id)} title="Retirer — aucun dossier ne l'utilise"
+                      className="text-xs text-gray-400 hover:text-red-600">✕</button>
+                  )}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {canEdit && (
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <input value={nouveau} onChange={e => setNouveau(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && ajouter()}
+            placeholder="Ajouter une banque"
+            className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          <button onClick={ajouter} disabled={!nouveau.trim()}
+            className="fa-bg-teal disabled:opacity-50 text-xs font-medium px-3 py-1.5 rounded-lg transition">Ajouter</button>
+        </div>
+      )}
+
+      {horsListe.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-200">
+          <div className="text-xs font-semibold text-amber-800 mb-2">
+            Écrites sur un dossier mais absentes de la liste
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {horsListe.map(x => (
+              <span key={x.nom} className="inline-flex items-center gap-1.5 text-xs bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1">
+                <span className="fa-navy font-medium">{x.nom}</span>
+                <span className="text-amber-700">{x.n}</span>
+                {canEdit && (
+                  <button onClick={() => onSet([...liste, { id: cleComparaison(x.nom).replace(/\s+/g, "-"), nom: x.nom, couleur: "#6b7280" }])}
+                    title="Ajouter à la liste" className="fa-teal-text hover:underline font-semibold">+ ranger</button>
+                )}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Le relevé pour le comptable : une période, un aperçu du solde, un fichier.
+// Les périodes courantes sont des boutons — personne n'a envie de retaper
+// « 1er janvier » quatre fois par an.
+function ExportCompta({ data }) {
+  const aujourdhui = new Date();
+  const an = aujourdhui.getFullYear();
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const finDuMois = (a, m) => iso(new Date(a, m + 1, 0));
+
+  const periodes = [
+    { id: "mois", label: "Mois en cours", debut: iso(new Date(an, aujourdhui.getMonth(), 1)), fin: finDuMois(an, aujourdhui.getMonth()) },
+    { id: "moisPrec", label: "Mois dernier", debut: iso(new Date(an, aujourdhui.getMonth() - 1, 1)), fin: finDuMois(an, aujourdhui.getMonth() - 1) },
+    { id: "trimestre", label: "Trimestre en cours",
+      debut: iso(new Date(an, Math.floor(aujourdhui.getMonth() / 3) * 3, 1)),
+      fin: finDuMois(an, Math.floor(aujourdhui.getMonth() / 3) * 3 + 2) },
+    { id: "annee", label: `Année ${an}`, debut: `${an}-01-01`, fin: `${an}-12-31` },
+    { id: "anneePrec", label: `Année ${an - 1}`, debut: `${an - 1}-01-01`, fin: `${an - 1}-12-31` },
+  ];
+
+  const [choisie, setChoisie] = useState("annee");
+  const perso = choisie === "perso";
+  const base = periodes.find(p => p.id === choisie) || periodes[3];
+  const [debut, setDebut] = useState(base.debut);
+  const [fin, setFin] = useState(base.fin);
+
+  const d1 = perso ? debut : base.debut;
+  const d2 = perso ? fin : base.fin;
+  const valide = !!d1 && !!d2 && d1 <= d2;
+
+  const lignes = valide ? mouvementsCompta(data, d1, d2) : [];
+  const b = bilanCompta(lignes);
+  const parNature = (n) => lignes.filter(l => l.nature === n).length;
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6">
+      <div className="font-display font-semibold fa-navy mb-1">Relevé pour le comptable</div>
+      <p className="text-sm text-gray-500 mb-4">
+        Un journal des mouvements d'argent sur la période : les honoraires réellement encaissés d'un côté,
+        les rétrocessions réellement versées de l'autre. Ni prévisionnel, ni facturé — que ce qui a bougé.
+      </p>
+
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        {periodes.map(p => (
+          <button key={p.id} type="button" onClick={() => setChoisie(p.id)} aria-pressed={choisie === p.id}
+            className={`fa-tap text-xs font-bold px-3.5 py-2 rounded-full border transition ${
+              choisie === p.id ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
+            {p.label}
+          </button>
+        ))}
+        <button type="button" onClick={() => setChoisie("perso")} aria-pressed={perso}
+          className={`fa-tap text-xs font-bold px-3.5 py-2 rounded-full border transition ${
+            perso ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
+          Sur mesure
+        </button>
+      </div>
+
+      {perso && (
+        <div className="flex items-center gap-2 flex-wrap mb-3 fa-bg-offwhite rounded-lg px-3 py-2.5">
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            Du
+            <input type="date" value={debut} onChange={e => setDebut(e.target.value)}
+              className="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          </label>
+          <label className="text-xs text-gray-500 flex items-center gap-1.5">
+            au
+            <input type="date" value={fin} onChange={e => setFin(e.target.value)}
+              className="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          </label>
+          {!valide && <span className="text-xs text-red-700 font-semibold">La date de fin doit suivre celle de début.</span>}
+        </div>
+      )}
+
+      <div className="grid sm:grid-cols-3 gap-3 mb-4">
+        <div className="fa-bg-offwhite rounded-xl px-4 py-3">
+          <div className="text-xs text-gray-500 mb-0.5">Honoraires encaissés</div>
+          <div className="font-display text-xl font-bold text-emerald-700">{fmtEuroPrecis(b.produits)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">{masqueNb(parNature(NATURE_HONORAIRE))} encaissement{parNature(NATURE_HONORAIRE) > 1 ? "s" : ""}</div>
+        </div>
+        <div className="fa-bg-offwhite rounded-xl px-4 py-3">
+          <div className="text-xs text-gray-500 mb-0.5">Rétrocessions versées</div>
+          <div className="font-display text-xl font-bold text-violet-700">−{fmtEuroPrecis(b.charges)}</div>
+          <div className="text-[11px] text-gray-400 mt-0.5">{masqueNb(parNature(NATURE_RETROCESSION))} virement{parNature(NATURE_RETROCESSION) > 1 ? "s" : ""}</div>
+        </div>
+        <div className="fa-bg-gold rounded-xl px-4 py-3">
+          <div className="text-xs text-teal-900/70 mb-0.5">Solde de la période</div>
+          <div className="font-display text-xl font-bold fa-navy">{fmtEuroPrecis(b.solde)}</div>
+          <div className="text-[11px] text-teal-900/60 mt-0.5">avant charges de structure</div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <button onClick={() => exportComptaCsv(data, d1, d2)} disabled={!valide || b.nb === 0}
+          className="fa-bg-teal disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium px-4 py-2.5 rounded-lg transition flex items-center gap-2">
+          <Download size={15} /> Télécharger le relevé
+        </button>
+        <span className="text-xs text-gray-400">
+          {!valide ? "Choisis une période valide."
+            : b.nb === 0 ? "Aucun mouvement sur cette période."
+            : `${masqueNb(b.nb)} ligne${b.nb > 1 ? "s" : ""} · CSV séparé par points-virgules, s'ouvre dans Excel`}
+        </span>
+      </div>
     </div>
   );
 }
@@ -11256,7 +11943,7 @@ function periodesTerminees(data) {
 
 // Réalisé sur [debut, fin[ (horodatages), ventilé par commercial.
 function realiseProduction(data, commerciaux, debut, fin) {
-  const commercialDuDossier = (d) => data.partners.find(p => p.id === d.partnerId)?.commercial || null;
+  const commercialDe = (d) => commercialDuDossier(d, data.partners);
   const parCommercial = (extracteur) => {
     const m = new Map(commerciaux.map(c => [c, 0]));
     extracteur((c, v) => { if (m.has(c)) m.set(c, m.get(c) + v); });
@@ -11273,7 +11960,7 @@ function realiseProduction(data, commerciaux, debut, fin) {
     for (const d of data.dossiers) {
       const t = dateGain(d);
       if (t === null || t < debut || t >= fin) continue;
-      ajoute(commercialDuDossier(d), 1);
+      ajoute(commercialDe(d), 1);
     }
   });
   // Récurrence AJOUTÉE : la commission mensuelle des contrats dont la date
@@ -11283,7 +11970,7 @@ function realiseProduction(data, commerciaux, debut, fin) {
       if (!STATUTS_CONTRAT_VIVANT.includes(d.status) || !d.dateEffet) continue;
       const t = new Date(d.dateEffet + "T12:00:00").getTime();
       if (isNaN(t) || t < debut || t >= fin) continue;
-      ajoute(commercialDuDossier(d), recurrenceMensuelle(d));
+      ajoute(commercialDe(d), recurrenceMensuelle(d));
     }
   });
   const ca = parCommercial(ajoute => {
@@ -11294,7 +11981,7 @@ function realiseProduction(data, commerciaux, debut, fin) {
       ech.forEach((e, i) => {
         const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
           : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
-        if (quand !== null && quand >= debut && quand < fin) ajoute(commercialDuDossier(d), parts[i]);
+        if (quand !== null && quand >= debut && quand < fin) ajoute(commercialDe(d), parts[i]);
       });
     }
   });
@@ -11617,151 +12304,300 @@ function ObjectifsCA({ data }) {
   const tous = data.dossiers;
   const gagnes = tous.filter(d => ["Souscrit", "Bordereau émis", "Payé"].includes(d.status));
   const ko = tous.filter(d => d.status === "KO");
-  const actifs = vivants.filter(p => tous.some(d => d.partnerId === p.id));
+  const actifsAujourdhui = vivants.filter(p => tous.some(d => d.partnerId === p.id));
 
+  // Les quatre hypothèses sortent de ce que le CRM observe déjà. On ne les
+  // demande pas : on les montre, et on ne les ouvre que pour en essayer d'autres.
   const avecMontant = gagnes.filter(d => (d.caAmount || 0) > 0);
-  const caMoyenObserve = avecMontant.length > 0
+  const caObserve = avecMontant.length > 0
     ? Math.round(avecMontant.reduce((s, d) => s + (d.caAmount || 0), 0) / avecMontant.length)
-    : 500;
+    : CA_MINIMUM_REFERENCE;
   const arbitres = gagnes.length + ko.length;
   const transfoObservee = arbitres > 0 ? Math.round((gagnes.length / arbitres) * 100) : 60;
-  const activationObservee = vivants.length > 0 ? Math.round((actifs.length / vivants.length) * 100) : 40;
+  const activationObservee = vivants.length > 0 ? Math.round((actifsAujourdhui.length / vivants.length) * 100) : 40;
 
-  const [caMoyen, setCaMoyen] = useState(null);
+  // Un seul état pour l'objectif : la période, la cible, le montant libre.
+  // Il est relu au chargement et réécrit à chaque changement.
+  const [reg, setReg] = useState(() => {
+    const o = lireObjectif();
+    const civ = anneeCivile();
+    return {
+      mode: ["civile", "glissant", "perso"].includes(o.mode) ? o.mode : "civile",
+      debut: typeof o.debut === "string" && o.debut ? o.debut : civ.debut,
+      fin: typeof o.fin === "string" && o.fin ? o.fin : civ.fin,
+      cible: PALIERS_OBJECTIF.includes(o.cible) ? o.cible : 100000,
+      libre: typeof o.libre === "string" ? o.libre : "",
+    };
+  });
+  useEffect(() => { ecrireObjectif(reg); }, [reg]);
+  const maj = (p) => setReg(r => ({ ...r, ...p }));
+
+  const [ouvert, setOuvert] = useState(false);
+  const [ca, setCa] = useState(null);
   const [transfo, setTransfo] = useState(null);
-  const [prod, setProd] = useState(1);          // 12 dossiers par an et par partenaire
+  const [prod, setProd] = useState("1");
   const [activation, setActivation] = useState(null);
-  const [objectifLibre, setObjectifLibre] = useState("");
 
-  const vCa = caMoyen === null ? caMoyenObserve : (Number(caMoyen) || 0);
-  const vTransfo = transfo === null ? transfoObservee : (Number(transfo) || 0);
-  const vProd = Number(prod) || 0;
-  const vActivation = activation === null ? activationObservee : (Number(activation) || 0);
-  // On affiche la saisie telle quelle, nettoyée de ses zéros de tête, plutôt
-  // que la valeur recalculée : sinon le champ et ce qu'on a tapé divergent.
-  const affCa = caMoyen === null ? String(caMoyenObserve) : caMoyen;
+  // Les deux premiers modes se recalculent à chaque affichage : une année
+  // civile enregistrée en 2026 n'a plus de sens en 2027.
+  const civ = anneeCivile();
+  const ajd = isoDe(Date.now());
+  const modes = [
+    { id: "civile", label: `Année civile ${civ.an}`, debut: civ.debut, fin: civ.fin },
+    { id: "glissant", label: "12 mois à partir d'aujourd'hui", debut: ajd, fin: unAnApres(ajd) },
+    { id: "perso", label: "Sur mesure", debut: reg.debut, fin: reg.fin },
+  ];
+  const modeActif = modes.find(m => m.id === reg.mode) || modes[0];
+  const per = periodeObjectif(modeActif.debut, modeActif.fin);
+  const perso = reg.mode === "perso";
+
+  // Une hypothèse jamais touchée suit l'observation ; dès qu'on la saisit,
+  // c'est la saisie qui fait foi, affichée telle quelle.
+  const affCa = ca === null ? String(caObserve) : ca;
   const affTransfo = transfo === null ? String(transfoObservee) : transfo;
-  const affProd = String(prod);
   const affActivation = activation === null ? String(activationObservee) : activation;
+  const vCa = Number(affCa) || 0;
+  const vTransfo = Number(affTransfo) || 0;
+  const vProd = Number(prod) || 0;
+  const vActivation = Number(affActivation) || 0;
 
-  const calculable = vCa > 0 && vTransfo > 0 && vProd > 0 && vActivation > 0;
+  const montantLibre = Number(String(reg.libre).replace(/\s/g, "")) || 0;
+  const objectif = montantLibre > 0 ? montantLibre : reg.cible;
+  // L'encaissé est borné des deux côtés : seul ce qui est tombé DANS la
+  // fenêtre compte vers l'objectif de cette fenêtre.
+  const encaisse = per.valide
+    ? caEncaisseEntre(tous, debutJour(per.debut), debutJour(per.fin) + 86400000 - 1)
+    : 0;
+  const reste = Math.max(0, objectif - encaisse);
+  const pct = objectif > 0 ? Math.min(100, Math.round((encaisse / objectif) * 100)) : 0;
+  const tendance = (encaisse / per.ecoules) * per.total;
 
-  const objectifs = [100000, 200000, 300000, 500000, 1000000];
-  const libre = Number(String(objectifLibre).replace(/\s/g, "")) || 0;
-  const liste = libre > 0 ? [...objectifs, libre].sort((a, b) => a - b) : objectifs;
+  const b = per.valide && !per.close ? besoinsObjectif({
+    reste, ca: vCa, transfo: vTransfo / 100, prod: vProd,
+    activation: vActivation / 100, mois: per.restants, inscrits: vivants.length,
+  }) : null;
 
-  function besoinsPour(cible) {
-    const dossiersGagnes = cible / vCa;
-    const dossiersDeposes = dossiersGagnes / (vTransfo / 100);
-    const parMois = dossiersDeposes / 12;
-    const partenairesActifs = parMois / vProd;
-    const partenairesTotal = partenairesActifs / (vActivation / 100);
-    return { dossiersGagnes, dossiersDeposes, parMois, partenairesActifs, partenairesTotal };
-  }
-
-  const champ = "w-20 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500";
-  const arrondi = (n) => Math.ceil(n - 0.0001);
+  const champ = "w-20 text-sm font-bold fa-navy border border-gray-300 rounded-lg px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const dateChamp = "text-sm fa-navy border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const puce = (actif) => `fa-tap text-xs font-bold px-3.5 py-2 rounded-full border transition ${
+    actif ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`;
+  const nb = (n) => masqueNb(n);
 
   return (
     <div className="bg-white border border-gray-200 rounded-2xl p-5">
       <div className="font-display font-semibold fa-navy mb-1">Combien pour atteindre mon objectif</div>
       <p className="text-sm text-gray-500 mb-4">
-        Le calcul à l'envers : vous fixez le chiffre d'affaires visé sur douze mois, l'outil remonte au nombre
-        de dossiers et de partenaires nécessaires.
+        Ton objectif sur la période que tu choisis, ce que tu as déjà encaissé dessus, et le rythme qu'il reste à tenir.
       </p>
 
-      <div className="fa-bg-offwhite rounded-lg px-3 py-3 mb-4">
-        <div className="text-xs font-semibold fa-navy mb-2">Hypothèses</div>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-gray-600">
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="0" step="10" value={affCa} onChange={e => setCaMoyen(sansZeroDeTete(e.target.value))} className={champ} />
-            € de C.A. par dossier gagné
-            <span className="text-xs text-gray-400">
-              ({avecMontant.length > 0 ? `observé : ${caMoyenObserve} €` : "aucune donnée, valeur à fixer"})
-            </span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="1" max="100" step="1" value={affTransfo} onChange={e => setTransfo(sansZeroDeTete(e.target.value))} className={champ} />
-            % de dossiers qui aboutissent
-            <span className="text-xs text-gray-400">
-              ({arbitres > 0 ? `observé : ${transfoObservee} %` : "aucune donnée"})
-            </span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="0" step="0.1" value={affProd} onChange={e => setProd(sansZeroDeTete(e.target.value))} className={champ} />
-            dossiers/mois par partenaire actif
-            <span className="text-xs text-gray-400">(1,00 = 12 par an)</span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="1" max="100" step="1" value={affActivation} onChange={e => setActivation(sansZeroDeTete(e.target.value))} className={champ} />
-            % de partenaires qui produisent
-            <span className="text-xs text-gray-400">
-              ({vivants.length > 0 ? `observé : ${activationObservee} %` : "aucune donnée"})
-            </span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="number" onFocus={selectionTotale} min="0" step="10000" value={objectifLibre} onChange={e => setObjectifLibre(sansZeroDeTete(e.target.value))}
-              placeholder="0" className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
-            objectif personnalisé (€)
-          </label>
-        </div>
+      {/* La période : trois raccourcis, ou deux dates. */}
+      <div className="flex items-center gap-2 flex-wrap mb-2">
+        <span className="text-sm font-bold fa-navy">Période</span>
+        {modes.map(m => (
+          <button key={m.id} type="button" aria-pressed={reg.mode === m.id}
+            onClick={() => maj(m.id === "perso" ? { mode: "perso" } : { mode: m.id, debut: m.debut, fin: m.fin })}
+            className={puce(reg.mode === m.id)}>
+            {m.label}
+          </button>
+        ))}
+        <span className="w-full sm:w-auto sm:flex-1 sm:min-w-0 sm:text-right text-xs text-gray-500">
+          {per.valide ? <>du {fmtDate(debutJour(per.debut))} au {per.finLisible}</> : "dates à corriger"}
+        </span>
       </div>
 
-      {!calculable ? (
-        <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
-          Renseignez les quatre hypothèses pour obtenir le tableau.
+      {perso && (
+        <div className="flex items-center gap-2 flex-wrap fa-bg-offwhite border border-gray-200 rounded-xl px-3 py-2.5 mb-3">
+          <label className="flex items-center gap-1.5 text-xs text-gray-500">
+            Du
+            <input type="date" value={reg.debut} onChange={e => maj({ debut: e.target.value })} className={dateChamp} />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-500">
+            au
+            <input type="date" value={reg.fin} onChange={e => maj({ fin: e.target.value })} className={dateChamp} />
+          </label>
+          <span className={`text-xs ${per.valide ? "text-gray-500" : "text-red-700 font-semibold"}`}>
+            {per.valide
+              ? `${(Math.round(per.total * 10) / 10).toLocaleString("fr-FR")} mois de période`
+              : "La date de fin doit suivre celle de début."}
+          </span>
+        </div>
+      )}
+
+      {/* L'objectif : un palier, ou un montant libre. */}
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        <span className="text-sm font-bold fa-navy">Objectif</span>
+        {PALIERS_OBJECTIF.map(m => {
+          const ici = montantLibre === 0 && reg.cible === m;
+          return (
+            <button key={m} type="button" onClick={() => maj({ cible: m, libre: "" })} aria-pressed={ici}
+              className={`fa-tap text-sm font-bold px-4 py-2 rounded-full border transition ${
+                ici ? "bg-slate-800 text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-teal-300"}`}>
+              {m / 1000} k€
+            </button>
+          );
+        })}
+        <label className="flex items-center gap-1.5 text-xs text-gray-500">
+          ou
+          <input type="number" min="0" step="10000" onFocus={selectionTotale} value={reg.libre}
+            onChange={e => maj({ libre: sansZeroDeTete(e.target.value) })} placeholder="autre"
+            className="w-28 text-sm border border-gray-300 rounded-lg px-2 py-2 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
+          €
+        </label>
+      </div>
+
+      {!per.valide ? (
+        <div className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-lg px-3 py-3">
+          La date de fin doit suivre celle de début. Corrige les deux dates ci-dessus pour retrouver le calcul.
         </div>
       ) : (
         <>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-gray-400 text-left border-b border-gray-200">
-                  <th className="font-medium py-2">C.A. visé</th>
-                  <th className="font-medium py-2 text-right">Dossiers gagnés</th>
-                  <th className="font-medium py-2 text-right">Dossiers déposés</th>
-                  <th className="font-medium py-2 text-right">Par mois</th>
-                  <th className="font-medium py-2 text-right">Partenaires actifs</th>
-                  <th className="font-medium py-2 text-right">Partenaires à avoir</th>
-                </tr>
-              </thead>
-              <tbody>
-                {liste.map((cible, i) => {
-                  const b = besoinsPour(cible);
-                  const manquants = Math.max(0, arrondi(b.partenairesTotal) - vivants.length);
-                  return (
-                    <tr key={cible} className={i % 2 ? "fa-bg-offwhite" : ""}>
-                      <td className="py-2 font-bold fa-navy">{fmtEuro(cible)}</td>
-                      <td className="py-2 text-right text-gray-600">{arrondi(b.dossiersGagnes)}</td>
-                      <td className="py-2 text-right text-gray-600">{arrondi(b.dossiersDeposes)}</td>
-                      <td className="py-2 text-right text-gray-600">{b.parMois.toFixed(1)}</td>
-                      <td className="py-2 text-right fa-navy font-medium">{arrondi(b.partenairesActifs)}</td>
-                      <td className="py-2 text-right">
-                        <span className="fa-navy font-bold">{arrondi(b.partenairesTotal)}</span>
-                        {manquants > 0 && <span className="text-xs text-amber-700 block">+{manquants} à recruter</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          {/* Où on en est : l'encaissé de la période contre l'objectif. */}
+          <div className="fa-bg-offwhite border border-gray-200 rounded-xl px-4 py-3 mb-3">
+            <div className="flex items-baseline gap-2 flex-wrap mb-2">
+              <span className="font-display text-xl font-bold text-emerald-700">{fmtEuro(encaisse)}</span>
+              <span className="text-sm text-gray-600">encaissés sur la période</span>
+              <span className="w-full sm:w-auto sm:flex-1 sm:min-w-0 sm:text-right text-sm text-gray-500">
+                reste <strong className="fa-navy">{reste > 0 ? fmtEuro(reste) : "rien"}</strong>
+                {" · "}{per.libelleRestant}
+              </span>
+            </div>
+            <div className="h-3 rounded-full bg-gray-200 overflow-hidden">
+              <div className="h-full bg-emerald-600 rounded-full transition-all" style={{ width: pct + "%" }} />
+            </div>
+            <div className="text-[11px] text-gray-400 mt-1.5">
+              {pct} % de l'objectif
+              {!per.aVenir && !per.close && encaisse > 0 && (
+                <> · au rythme tenu depuis le début de la période, elle finirait à {fmtEuro(tendance)}</>
+              )}
+            </div>
           </div>
 
-          <div className="text-xs text-gray-500 mt-3 space-y-1">
-            <div>
-              <strong className="fa-navy">Comment lire :</strong> pour {fmtEuro(liste[1] || liste[0])}, il faut
-              {" "}{arrondi(besoinsPour(liste[1] || liste[0]).dossiersGagnes)} dossiers gagnés, donc
-              {" "}{arrondi(besoinsPour(liste[1] || liste[0]).dossiersDeposes)} déposés puisque
-              {" "}{100 - vTransfo} % n'aboutissent pas — soit {besoinsPour(liste[1] || liste[0]).parMois.toFixed(1)} par mois,
-              ce qui demande {arrondi(besoinsPour(liste[1] || liste[0]).partenairesActifs)} partenaires qui produisent,
-              et donc {arrondi(besoinsPour(liste[1] || liste[0]).partenairesTotal)} partenaires au total
-              puisque {100 - vActivation} % ne déposeront jamais.
+          {per.close ? (
+            <div className="text-sm text-gray-700 bg-slate-50 border border-gray-200 rounded-lg px-3.5 py-3">
+              Période close le {per.finLisible} : {fmtEuro(encaisse)} encaissés sur {fmtEuro(objectif)} visés,
+              soit {pct} %. Choisis une nouvelle période pour repartir sur un objectif à tenir.
             </div>
-            <div className="text-gray-400">
-              Vous avez aujourd'hui {vivants.length} partenaire{vivants.length > 1 ? "s" : ""} dont {actifs.length} actif{actifs.length > 1 ? "s" : ""}.
+          ) : b === null ? (
+            <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
+              Une hypothèse est à zéro : le calcul n'a plus de sens. Remets une valeur ci-dessous.
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="grid sm:grid-cols-2 gap-3 mb-3">
+                <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3.5">
+                  <div className="text-[11px] font-bold text-teal-800 uppercase tracking-wide">Le rythme qu'il reste à tenir</div>
+                  <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
+                    {b.atteint ? "0" : nb(b.parMois.toLocaleString("fr-FR"))}
+                  </div>
+                  <div className="text-sm font-bold fa-navy -mt-0.5">dossiers déposés par mois</div>
+                  <div className="text-xs text-gray-600 mt-1.5">
+                    {b.atteint
+                      ? "Plus rien à déposer pour tenir l'objectif."
+                      : <>{nb(b.deposes)} dossiers à déposer d'ici {per.moisDeFin}, dont {nb(b.gagnes)} qui aboutiront</>}
+                  </div>
+                </div>
+
+                <div className="fa-bg-gold border border-amber-300 rounded-xl px-4 py-3.5">
+                  <div className="text-[11px] font-bold text-amber-900 uppercase tracking-wide">Le réseau qu'il faut</div>
+                  <div className="font-display text-4xl font-bold fa-navy leading-tight mt-1">
+                    {b.atteint ? "—" : nb(b.total)}
+                  </div>
+                  <div className="text-sm font-bold fa-navy -mt-0.5">partenaires inscrits</div>
+                  <div className="text-xs text-teal-900/70 mt-1.5">
+                    {b.atteint ? "Objectif déjà couvert." : <>dont {nb(b.actifs)} qui produisent vraiment</>}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 bg-slate-800 rounded-xl px-4 py-3.5 mb-3">
+                <span className="sm:flex-1 sm:min-w-0">
+                  <span className="block text-[11px] text-white/60">Ce qu'il te manque</span>
+                  <span className="block font-display text-2xl font-bold" style={{ color: "var(--fa-gold)" }}>
+                    {b.atteint ? "Objectif déjà atteint"
+                      : b.manque > 0 ? <>{nb(b.manque)} partenaire{b.manque > 1 ? "s" : ""} à recruter</>
+                      : "Aucun — ton réseau suffit"}
+                  </span>
+                </span>
+                <span className="text-xs text-white/75 sm:text-right border-t border-white/10 pt-2 sm:border-0 sm:pt-0">
+                  Aujourd'hui : {nb(vivants.length)} partenaire{vivants.length > 1 ? "s" : ""},
+                  {" "}dont {nb(actifsAujourdhui.length)} {actifsAujourdhui.length > 1 ? "produisent" : "produit"}
+                </span>
+              </div>
+
+              <div className="text-xs text-gray-600 leading-relaxed fa-bg-offwhite border-l-[3px] border-teal-200 rounded-r-lg px-3.5 py-2.5">
+                {b.atteint ? (
+                  <>Objectif atteint : les {fmtEuro(encaisse)} encaissés sur la période dépassent déjà la cible. Vise plus haut pour voir ce que ça demanderait.</>
+                ) : (
+                  <>
+                    Il reste {fmtEuro(reste)} à faire d'ici le {per.finLisible}, soit
+                    {" "}{(Math.round(per.restants * 10) / 10).toLocaleString("fr-FR")} mois. À {fmtEuro(vCa)} le dossier, ce sont
+                    {" "}{nb(b.gagnes)} dossiers gagnés, donc {nb(b.deposes)} déposés puisque {100 - vTransfo} % n'aboutissent pas —
+                    soit {nb(b.parMois.toLocaleString("fr-FR"))} par mois, ce qui demande {nb(b.actifs)} partenaires qui produisent,
+                    et {nb(b.total)} inscrits puisque seuls {vActivation} % déposent.
+                  </>
+                )}
+              </div>
+            </>
+          )}
         </>
+      )}
+
+      {/* Les hypothèses, repliées : justes par défaut, on ne les ouvre que
+          pour tester autre chose. */}
+      <div className="flex items-center gap-3 flex-wrap border-t border-gray-100 mt-3 pt-3">
+        <span className="flex-1 min-w-0 text-xs text-gray-400">
+          {fmtEuro(vCa)} par dossier · {vTransfo} % aboutissent · {vProd} dossier/mois par partenaire actif · {vActivation} % des partenaires produisent
+        </span>
+        <button onClick={() => setOuvert(v => !v)}
+          className="fa-tap text-xs font-bold fa-teal-text border border-teal-200 rounded-lg px-3.5 py-2 hover:bg-teal-50 transition">
+          {ouvert ? "Replier" : "Ajuster les hypothèses"}
+        </button>
+      </div>
+
+      {ouvert && (
+        <div className="bg-teal-50/60 border border-teal-200 rounded-xl px-4 py-3.5 mt-2">
+          <div className="text-xs font-bold fa-navy mb-2.5">Hypothèses — reprises de ce que le CRM observe</div>
+          <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="0" step="10" onFocus={selectionTotale} value={affCa}
+                onChange={e => setCa(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">€ de C.A. par dossier gagné</span>
+                <span className="block text-[11px] text-gray-400">
+                  {avecMontant.length > 0 ? `observé : ${caObserve} €` : "aucune donnée, valeur à fixer"}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="1" max="100" step="1" onFocus={selectionTotale} value={affTransfo}
+                onChange={e => setTransfo(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">% de dossiers qui aboutissent</span>
+                <span className="block text-[11px] text-gray-400">
+                  {arbitres > 0 ? `observé : ${transfoObservee} %` : "aucune donnée"}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="0" step="0.1" onFocus={selectionTotale} value={prod}
+                onChange={e => setProd(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">dossiers par mois et par partenaire actif</span>
+                <span className="block text-[11px] text-gray-400">1,00 = 12 par an</span>
+              </span>
+            </label>
+            <label className="flex items-center gap-2.5">
+              <input type="number" min="1" max="100" step="1" onFocus={selectionTotale} value={affActivation}
+                onChange={e => setActivation(sansZeroDeTete(e.target.value))} className={champ} />
+              <span className="flex-1 min-w-0">
+                <span className="block text-[13px] text-gray-700">% de partenaires qui produisent</span>
+                <span className="block text-[11px] text-gray-400">
+                  {vivants.length > 0 ? `observé : ${activationObservee} %` : "aucune donnée"}
+                </span>
+              </span>
+            </label>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -12555,6 +13391,9 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
   // La liste peut compter des dizaines de lignes : on doit pouvoir la replier
   // pour retrouver le reste de l'onglet sans faire défiler tout l'écran.
   const [replie, setReplie] = useState(false);
+  // Avant de payer, on veut pouvoir vérifier de quels clients se compose la
+  // somme. Un seul détail ouvert à la fois.
+  const [detailId, setDetailId] = useState(null);   // "partnerId|mois"
   const champ = useRef(null);
 
   const aujourdhui = () => new Date().toISOString().slice(0, 10);
@@ -12579,7 +13418,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
         }))
       : calendrierRetrocession(p, siens).mois.map(m => ({
           cle: m.cle, libelle: m.libelle, montant: m.montant + (m.bonus || 0), bonus: m.bonus || 0,
-          etat: m.etat, versement: m.versement, detail: null,
+          etat: m.etat, versement: m.versement, detail: null, lignes: m.lignes,
         }));
     for (const it of items) {
       if (arrete && it.etat !== "regle") continue;
@@ -12625,7 +13464,7 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
         <div className="text-sm text-gray-400 mb-3">Rien à régler pour l'instant.</div>
       ) : (
         <div className="space-y-1.5">
-          {lignes.map(({ p, m }) => {
+          {lignes.map(({ p, m, forfait }) => {
             const cle = p.id + "|" + m.cle;
             const ouvert = ouvertId === cle;
             return (
@@ -12641,7 +13480,13 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
                       dont ⚡ {fmtEuroPrecis(m.bonus)} de prime
                     </span>
                   )}
-                  <span className="text-sm font-bold fa-navy ml-auto">{fmtEuroPrecis(m.montant)}</span>
+                  {!forfait && (
+                    <span className="ml-auto">
+                      <PastilleDetail nb={(m.lignes || []).length} ouvert={detailId === cle}
+                        onClick={() => setDetailId(detailId === cle ? null : cle)} />
+                    </span>
+                  )}
+                  <span className={`text-sm font-bold fa-navy ${forfait ? "ml-auto" : ""}`}>{fmtEuroPrecis(m.montant)}</span>
                   {!ouvert && (
                     <button onClick={() => { setOuvertId(cle); setDate(aujourdhui()); setFichier(null); setMode(modeParDefaut(p)); }}
                       className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition">
@@ -12673,6 +13518,9 @@ function VersementsPartenaires({ data, onVirement, onAnnuler, busy }) {
                     <button onClick={() => { setOuvertId(null); setFichier(null); }}
                       className="text-xs text-teal-900/60 hover:text-teal-900 px-2">Annuler</button>
                   </div>
+                )}
+                {!forfait && detailId === cle && (
+                  <DetailRetrocession mois={m} titre={nomDe(p) + " — " + m.libelle} />
                 )}
               </div>
             );
@@ -13521,7 +14369,7 @@ function resultatsRecherche(data, texte) {
   return out;
 }
 
-function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
+function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire, invite }) {
   const [q, setQ] = useState("");
   const [ouvert, setOuvert] = useState(false);
   const [actif, setActif] = useState(0);
@@ -13551,7 +14399,7 @@ function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
   };
 
   return (
-    <div className="relative w-full sm:w-80 shrink-0">
+    <div className="relative w-full">
       <input
         value={q}
         onChange={e => { setQ(e.target.value); setOuvert(true); setActif(0); }}
@@ -13560,7 +14408,7 @@ function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
            clic d'arriver avant de fermer la liste. */
         onBlur={() => setTimeout(() => setOuvert(false), 160)}
         onKeyDown={clavier}
-        placeholder="Chercher un partenaire, un client, un mandataire…"
+        placeholder={invite || "Partenaire, client, mandataire…"}
         aria-label="Recherche"
         className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">⌕</span>
@@ -13572,7 +14420,7 @@ function RechercheGlobale({ data, onPartenaire, onDossier, onMandataire }) {
       )}
 
       {ouvert && cleComparaison(q).length >= 2 && (
-        <div className="absolute z-30 mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
+        <div className="absolute z-30 mt-1 left-0 right-0 lg:left-auto lg:w-[22rem] bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
           {vus.length === 0 ? (
             <div className="px-3 py-2.5 text-xs text-gray-400">Rien trouvé pour « {q} ».</div>
           ) : (<>
@@ -14637,7 +15485,7 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onUpdateDossierSimulation, onAnalyzeDossierIA, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -14654,7 +15502,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     return CATEGORIES_ADMIN.some(c => c.feuillets.some(f => f.id === cible)) ? cible : "accueil";
   });
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:adminTab", t); };
-  useEffect(() => { if ((tab === "mandataires" || tab === "assureurs") && !isFullAdmin) setTab("accueil"); }, []);
+  useEffect(() => { if (["mandataires", "assureurs", "banques"].includes(tab) && !isFullAdmin) setTab("accueil"); }, []);
   // Sauts de navigation offerts à tout l'espace admin via NavAdmin : un clic
   // sur un nom, où qu'il apparaisse, ouvre la fiche correspondante. On passe
   // par la recherche déjà en place, qui déplie au passage le bon groupe.
@@ -14709,8 +15557,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "challengesPartenaires", label: "Challenges partenaires", defaut: "challenge", rendu: () => <ChallengePartenaires data={data} onAjouter={onAjouterChallenge} onMaj={onMajChallenge} onSupprimer={onSupprimerChallenge} canEdit={isFullAdmin} /> },
     { id: "challengeBoard", label: "Tableau des objectifs", defaut: "challenge", rendu: () => <ChallengeBoard data={data} commerciaux={COMMERCIAUX} onSetGoals={onSetChallengeGoals} canEdit={isFullAdmin} /> },
     { id: "facturation", label: "Facturation et versements", defaut: "facturation", rendu: () => <FacturationAdmin data={data} onSetStatut={onSetFactureStatut} onAddVersement={onAddVersementParrainage} onMajVersement={onMajVersementParrainage} onSupprimerVersement={onSupprimerVersementParrainage} onVirementPartenaire={onVirementPartenaire} onAnnulerVirement={onAnnulerVirement} busy={busy} /> },
+    { id: "exportCompta", label: "Relevé pour le comptable", defaut: "facturation", fullAdmin: true, rendu: () => <ExportCompta data={data} /> },
     { id: "compagnies", label: "Compagnies partenaires", defaut: "assureurs", fullAdmin: true, rendu: () => <AssureursPanel data={data} onSet={onSetAssureurs} canEdit={isFullAdmin} busy={busy} /> },
     { id: "productionAssureur", label: "Production par assureur", defaut: "assureurs", fullAdmin: true, rendu: () => <ProductionParAssureur data={data} dossiers={data.dossiers} /> },
+    { id: "banques", label: "Banques prêteuses", defaut: "banques", fullAdmin: true, rendu: () => <BanquesPanel data={data} onSet={onSetBanques} canEdit={isFullAdmin} busy={busy} /> },
     { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
     { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} /> },
     { id: "sauvegardes", label: "Sauvegarde et restauration", defaut: "journal", fullAdmin: true, rendu: () => <SauvegardesPanel onExporter={onExporterSauvegarde} onRestaurer={onRestaurerSauvegarde} onVerifier={onVerifierSauvegarde} busy={busy} /> },
@@ -14844,29 +15694,31 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [notesOpenId, setNotesOpenId] = useState(null);
   const [simOpenId, setSimOpenId] = useState(null);
   const [simDraft, setSimDraft] = useState({});
-  const [simAnalyzing, setSimAnalyzing] = useState(null);
-  const [simAnalysisResult, setSimAnalysisResult] = useState(null);
-  const [simAutoReclassified, setSimAutoReclassified] = useState(false);
-  const [simAnalyzeError, setSimAnalyzeError] = useState("");
   function openSim(d) {
     setSimOpenId(d.id);
-    setSimAnalyzeError("");
-    setSimAnalysisResult(null);
-    setSimAutoReclassified(false);
     setSimDraft({
       crd: d.simulation?.crd ?? "", crdDate: d.simulation?.crdDate ?? "",
       assuranceRestante: d.simulation?.assuranceRestante ?? "", dureeRestanteMois: d.simulation?.dureeRestanteMois ?? "",
             devisAssurance: d.simulation?.devisAssurance ?? "",
     });
   }
-  function saveSim(id) {
-    onUpdateDossierSimulation(id, {
+  // Enregistrer la simulation, c'est aussi fixer ce qu'on facture : les
+  // honoraires sont 10 % du gain, et la rétrocession suit la règle du
+  // partenaire. On ne recalcule QUE tant que personne n'a corrigé à la main —
+  // une valeur saisie ne se fait jamais écraser par une nouvelle simulation.
+  async function saveSim(id) {
+    const simulation = {
       crd: simDraft.crd === "" ? null : Number(simDraft.crd),
       crdDate: simDraft.crdDate,
       assuranceRestante: simDraft.assuranceRestante === "" ? null : Number(simDraft.assuranceRestante),
-            devisAssurance: simDraft.devisAssurance === "" ? null : Number(simDraft.devisAssurance),
+      devisAssurance: simDraft.devisAssurance === "" ? null : Number(simDraft.devisAssurance),
       dureeRestanteMois: simDraft.dureeRestanteMois === "" ? null : Number(simDraft.dureeRestanteMois),
-    });
+    };
+    await onUpdateDossierSimulation(id, simulation);
+
+    const d = data.dossiers.find(x => x.id === id);
+    const reprise = repriseHonoraires(d, simulation, data.partners.find(p => p.id === d?.partnerId), data.dossiers);
+    if (reprise) await onUpdateDossierClient(id, reprise);
     setSimOpenId(null);
   }
   const [notesDraft, setNotesDraft] = useState("");
@@ -14996,6 +15848,16 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 onChange={e => e.target.files?.[0] && onAdminUploadDoc(d.id, k, e.target.files[0])} />
             </label>
           ))}
+          {/* L'offre et le tableau arrivent régulièrement inversés. Le
+              reclassement se faisait tout seul du temps de l'analyse
+              automatique ; il se fait maintenant d'un clic. */}
+          {(d.docs?.offre || d.docs?.tableau) && (
+            <button onClick={() => onSwapDocs(d.id, "offre", "tableau")}
+              title="Intervertir l'offre de prêt et le tableau d'amortissement"
+              className="fa-tap text-xs bg-white border border-gray-200 hover:border-teal-300 text-gray-500 hover:fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1 transition">
+              <ArrowLeftRight size={12} /> Intervertir offre / tableau
+            </button>
+          )}
           {(d.extraDocs || []).map((ed, i) => (
             <span key={i} className="text-xs bg-teal-50 border border-teal-200 fa-teal-text px-2.5 py-1 rounded-full flex items-center gap-1">
               <button onClick={() => previewStoredFile(ed.key)} title="Ouvrir le document"
@@ -15092,8 +15954,16 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   function openFinance(d) {
     setFinanceOpenId(d.id);
     const geste = Number(d.gesteCommercial) || 0;
-    const brut = d.honorairesBruts != null ? d.honorairesBruts : (d.caAmount != null ? d.caAmount + geste : "");
-    setFinanceDraft({ caAmount: brut ?? "", commissionAmount: d.commissionAmount ?? "", geste: geste ? String(geste) : "", motif: d.motifHonorairesReduits || "" });
+    let brut = d.honorairesBruts != null ? d.honorairesBruts : (d.caAmount != null ? d.caAmount + geste : "");
+    let commission = d.commissionAmount ?? "";
+    // Rien de saisi et une simulation qui a tourné : on ouvre l'écran déjà
+    // rempli. Ce n'est pas encore enregistré — il reste maître de la valeur.
+    if ((brut === "" || brut == null) && honorairesSimules(d) > 0) {
+      const partner = data.partners.find(p => p.id === d.partnerId);
+      brut = honorairesSimules(d);
+      commission = retrocessionSelonRegle(partner, data.dossiers, Math.max(0, brut - geste));
+    }
+    setFinanceDraft({ caAmount: brut ?? "", commissionAmount: commission, geste: geste ? String(geste) : "", motif: d.motifHonorairesReduits || "" });
   }
   async function saveFinance(id) {
     const brut = financeDraft.caAmount === "" ? null : Number(financeDraft.caAmount);
@@ -15105,6 +15975,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
       gesteCommercial: geste || null,
       motifHonorairesReduits: brut !== null && brut < HONORAIRES_SEUIL_MOTIF ? financeDraft.motif : null,
       commissionAmount: financeDraft.commissionAmount === "" ? null : Number(financeDraft.commissionAmount),
+      // Validé à la main : à partir d'ici, plus aucune simulation ne vient
+      // réécrire ce montant par-dessus.
+      honorairesAuto: null,
     });
     setFinanceOpenId(null);
   }
@@ -15215,6 +16088,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           };
           const feuillets = feuilletsVisibles(active, isFullAdmin);
 
+          const champRecherche = (invite) => (
+            <RechercheGlobale data={data} invite={invite}
+              onPartenaire={(pa) => { navAdmin.ouvrirPartenaire(pa); setViewingPartnerId(pa.id); setViewingPartnerTab("analytique"); }}
+              onDossier={navAdmin.ouvrirDossier}
+              onMandataire={navAdmin.ouvrirMandataire} />
+          );
+          const rechercheCourte = champRecherche("Partenaire, client…");
+          const recherche = champRecherche();
+
           const puce = "text-xs font-bold rounded-full min-w-[19px] h-[19px] px-1.5 flex items-center justify-center";
           // Compteurs d'alerte, remontés au niveau de la famille : on doit voir
           // qu'il y a quelque chose à traiter sans avoir à ouvrir l'onglet.
@@ -15249,7 +16131,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
           return (
             <div className="mb-7">
-              <div className="flex gap-1 items-center border-b border-gray-200 overflow-x-auto -mx-1 px-1">
+              {/* La recherche vit avec les onglets, pas dans l'accueil : elle
+                  est présente sur tous les écrans, à portée à tout moment. La
+                  bande d'onglets défile de son côté — la liste de résultats
+                  serait rognée si elle était dedans. */}
+              <div className="flex items-end gap-2 border-b border-gray-200">
+              <div className="flex gap-1 items-center overflow-x-auto flex-1 min-w-0 -mx-1 px-1">
                 {familles.map((c, i) => {
                   const Icone = c.icone ? ICONES_ONGLETS[c.icone] : null;
                   const ici = active.id === c.id;
@@ -15276,7 +16163,11 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     </div>
                   );
                 })}
-                <div className="flex items-center gap-1 shrink-0 ml-auto pb-1">
+              </div>
+                <div className="flex items-center gap-1.5 shrink-0 pb-1">
+                  <span className="hidden lg:block w-56">
+                    {rechercheCourte}
+                  </span>
                   <button onClick={() => {
                       if (!modeDemo && discret) basculerDiscret();
                       onBasculerDemo();
@@ -15297,6 +16188,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                   </button>
                 </div>
               </div>
+              {/* Sur téléphone, la recherche passe sous les onglets : à côté
+                  d'eux elle ne laisserait la place à aucun libellé. */}
+              <div className="lg:hidden mt-2">{recherche}</div>
 
               {/* Les écrans de la famille active. Masqués quand il n'y en a
                   qu'un : afficher « Pilotage » tout seul n'apprend rien. */}
@@ -15450,28 +16344,14 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           // Encaissé ce mois : les échéances effectivement reçues, pas les
           // dossiers souscrits. Un dossier réglé en douze fois ne gonfle plus
           // le mois de la signature.
-          const caduMois = liveDossiers.filter(d => d.status !== "KO").reduce((s, d) => {
-            const ech = echeancesDe(d);
-            const parts = repartir(d.caAmount || 0, ech.length);
-            return s + ech.reduce((s2, e, i) => {
-              const quand = e.encaisseLe ? new Date(e.encaisseLe + "T12:00:00").getTime()
-                : (e.payeSansDate ? (d.paymentDate ? new Date(d.paymentDate).getTime() : d.updatedAt) : null);
-              return s2 + (quand !== null && quand >= monthStart ? parts[i] : 0);
-            }, 0);
-          }, 0);
+          const caduMois = caEncaisseDepuis(liveDossiers, monthStart);
           const partenairesActifs = data.partners.filter(p => !p.deleted && p.active !== false).length;
 
           return (
             <div className="space-y-6">
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div className="min-w-0">
-                  <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
-                  <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
-                </div>
-                <RechercheGlobale data={data}
-                  onPartenaire={(pa) => { navAdmin.ouvrirPartenaire(pa); setViewingPartnerId(pa.id); setViewingPartnerTab("analytique"); }}
-                  onDossier={navAdmin.ouvrirDossier}
-                  onMandataire={navAdmin.ouvrirMandataire} />
+              <div className="min-w-0">
+                <h1 className="font-display text-xl font-semibold fa-navy">Bonjour {viewerLabel} 👋</h1>
+                <p className="text-sm text-gray-500">Voici où en est votre activité aujourd'hui.</p>
               </div>
 
               {/* Bloc héros : le seul élément sombre de l'écran, celui sur
@@ -15689,8 +16569,16 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 return d.status === dossierFilter;
               };
               const matchesSearch = (d) => matchesFilter(d) && (!searchTerm || `${d.clientFirstName} ${d.clientLastName}`.toLowerCase().includes(searchTerm));
+              // Le filtre commercial s'applique au dossier, pas au partenaire.
+              const suitLeFiltre = (d) => commercialFilter === "tous" || commercialDuDossier(d, data.partners) === commercialFilter;
+              const partenaireRetenu = (p) => {
+                if (commercialFilter === "tous") return true;
+                const siens = data.dossiers.filter(d => d.partnerId === p.id);
+                if (siens.length === 0) return p.commercial === commercialFilter;
+                return siens.some(suitLeFiltre);
+              };
               const deptGroups = {};
-              data.partners.filter(p => !p.deleted && (commercialFilter === "tous" || p.commercial === commercialFilter)).forEach(p => {
+              data.partners.filter(p => !p.deleted && partenaireRetenu(p)).forEach(p => {
                 const key = p.departement || "Non renseigné";
                 if (!deptGroups[key]) deptGroups[key] = [];
                 deptGroups[key].push(p);
@@ -15700,15 +16588,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               const POT = "__pot__";
               const idsConnus = new Set(data.partners.map(x => x.id));
               const anciens = data.partners
-                .filter(x => x.deleted && (commercialFilter === "tous" || x.commercial === commercialFilter) && data.dossiers.some(d => d.partnerId === x.id))
+                .filter(x => x.deleted && partenaireRetenu(x) && data.dossiers.some(d => d.partnerId === x.id))
                 .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
               if (commercialFilter === "tous" && data.dossiers.some(d => !idsConnus.has(d.partnerId))) {
                 anciens.push({ id: "__inconnu__", name: "Partenaire introuvable", firstName: "", deleted: true, _inconnu: true });
               }
               if (anciens.length > 0) deptGroups[POT] = anciens;
-              const dossiersDe = (x) => x._inconnu
+              const dossiersDe = (x) => (x._inconnu
                 ? data.dossiers.filter(d => !idsConnus.has(d.partnerId))
-                : data.dossiers.filter(d => d.partnerId === x.id);
+                : data.dossiers.filter(d => d.partnerId === x.id)).filter(suitLeFiltre);
               const deptKeys = Object.keys(deptGroups).sort((a, b) => {
                 if (a === POT) return -1;
                 if (b === POT) return 1;
@@ -15716,80 +16604,40 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 if (b === "Non renseigné") return -1;
                 return a.localeCompare(b, undefined, { numeric: true });
               });
-              return deptKeys.map(deptKey => {
-                const estPot = deptKey === POT;
-                const partnersInDeptAll = estPot ? deptGroups[deptKey] : [...deptGroups[deptKey]].sort((a, b) => (a.ville || "").localeCompare(b.ville || ""));
-                const filterActive = !!searchTerm || dossierFilter !== "tous";
-                const partnersInDept = filterActive
-                  ? partnersInDeptAll.filter(p => dossiersDe(p).some(d => matchesSearch(d)))
-                  : partnersInDeptAll;
-                if (filterActive && partnersInDept.length === 0) return null;
-                const deptDossiers = partnersInDeptAll.flatMap(p => dossiersDe(p));
-                const deptNewCount = deptDossiers.filter(d => d.status === "Déposé").length;
-                const deptFolderKey = "dept:" + deptKey;
-                const isDeptCollapsed = filterActive ? false : estPlie(deptFolderKey);
+              // Une seule liste, à plat. Deux dossiers à ouvrir avant
+              // d'atteindre un client coûtaient plus de temps qu'ils n'en
+              // faisaient gagner : passé quelques dizaines de dossiers, on ne
+              // voit plus rien. Le département disparaît de l'affichage — il
+              // reste sur la fiche du partenaire — et le partenaire comme le
+              // commercial passent sur la ligne du client.
+              const filterActive = !!searchTerm || dossierFilter !== "tous";
+              const lignesDossiers = [];
+              for (const deptKey of deptKeys) {
+                for (const p of deptGroups[deptKey]) {
+                  for (const d of dossiersDe(p)) {
+                    if (filterActive && !matchesSearch(d)) continue;
+                    lignesDossiers.push({ d, p });
+                  }
+                }
+              }
+              lignesDossiers.sort((a, b) => b.d.createdAt - a.d.createdAt);
+              if (lignesDossiers.length === 0) {
                 return (
-                  <div key={deptFolderKey} className={`rounded-2xl overflow-hidden border-2 shadow-sm ${estPot ? "border-violet-200" : "border-teal-100"}`}>
-                    <button onClick={() => toggleFolder(deptFolderKey)}
-                      className={`w-full flex items-center justify-between px-5 py-4 hover:brightness-95 transition ${estPot ? "bg-violet-50" : "fa-bg-pink"}`}>
-                      <div className="flex items-center gap-3">
-                        {estPot ? <span className="text-xl leading-none">🗂️</span> : isDeptCollapsed ? <Folder className="fa-navy" size={22} /> : <FolderOpen className="fa-navy" size={22} />}
-                        <div className="text-left">
-                          <div className={`font-display font-bold ${estPot ? "text-violet-700" : "fa-navy"}`}>
-                            {estPot ? "Pot commun" : deptKey === "Non renseigné" ? "Département non renseigné" : `Département ${deptKey}`}
-                          </div>
-                          {estPot ? (
-                            <div className="text-xs text-gray-500">{deptDossiers.length} client{deptDossiers.length !== 1 ? "s" : ""} d'anciens partenaires · {partnersInDeptAll.length} partenaire{partnersInDeptAll.length !== 1 ? "s" : ""} supprimé{partnersInDeptAll.length !== 1 ? "s" : ""}</div>
-                          ) : (
-                          <div className="text-xs text-teal-900/70">{partnersInDeptAll.length} partenaire{partnersInDeptAll.length !== 1 ? "s" : ""} · {deptDossiers.length} dossier{deptDossiers.length !== 1 ? "s" : ""}</div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2.5">
-                        {deptNewCount > 0 && <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{deptNewCount}</span>}
-                        <ChevronDown size={16} className={`fa-navy transition-transform ${isDeptCollapsed ? "" : "rotate-180"}`} />
-                      </div>
-                    </button>
-
-                    {!isDeptCollapsed && (
-                      <div className="fa-bg-offwhite p-2.5 sm:p-4 space-y-4">
-                        {partnersInDept.map(p => {
-                          const partnerDossiersAll = dossiersDe(p).sort((a, b) => b.createdAt - a.createdAt);
-                          const partnerDossiers = filterActive ? partnerDossiersAll.filter(matchesSearch) : partnerDossiersAll;
-                          const newCount = partnerDossiersAll.filter(d => d.status === "Déposé").length;
-                          const isCollapsed = filterActive ? false : estPlie(p.id);
-                          return (
-                            <div key={p.id} className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm">
-                              <button onClick={() => toggleFolder(p.id)}
-                                className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition">
-                                <div className="flex items-center gap-3">
-                                  {isCollapsed ? <Folder className="fa-teal-text" size={20} /> : <FolderOpen className="fa-teal-text" size={20} />}
-                                  <div className="text-left">
-                                    <div className="font-display font-semibold fa-navy flex items-center gap-2">
-                                      {p.deleted
-                                        ? <span className="font-bold line-through decoration-violet-300">{nomPartenaire(p)}</span>
-                                        : <LienPartenaire p={p} dansUnBouton className="font-bold" />}
-                                      {p.deleted && !p._inconnu && <span className="text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 rounded-full">supprimé{p.deletedAt ? ` le ${fmtDate(p.deletedAt)}` : ""}</span>}
-                                      {!p.deleted && p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
-                                    </div>
-                                    <div className="text-xs text-gray-400 flex items-center flex-wrap gap-1.5">{p.company || "—"} {p.ville && `· ${p.ville}`} · Commercial : <span className="text-white text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[p.commercial] || "#999" }}>{commercialLabel(p.commercial) || "—"}</span> · {masqueNb(partnerDossiers.length)} dossier{partnerDossiers.length !== 1 ? "s" : ""}
-                                      {!p.deleted && (() => { const c = derniereConnexion(p.lastLoginAt); return <span className={c.teinte} title={c.long}>· {c.jamais ? "jamais connecté" : `vu ${c.court}`}</span>; })()}</div>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-2.5">
-                                  {newCount > 0 && <span className="fa-bg-gold fa-navy text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">{newCount}</span>}
-                                  <ChevronDown size={16} className={`text-gray-400 transition-transform ${isCollapsed ? "" : "rotate-180"}`} />
-                                </div>
-                              </button>
-
-                              {!isCollapsed && (
-                                <div className="border-t border-gray-100 fa-bg-offwhite p-2.5 sm:p-4 space-y-4">
-                                  {partnerDossiers.length === 0 && (
-                                    <div className="text-center text-gray-400 text-sm py-8">Aucun dossier déposé par ce partenaire.</div>
-                                  )}
-                                  {partnerDossiers.map(d => (
-                                    <div key={d.id} className="bg-white border border-gray-200 rounded-2xl p-3.5 sm:p-5 shadow-sm">
-                                      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                  <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">
+                    Aucun dossier ne correspond à ce filtre.
+                  </div>
+                );
+              }
+              // Un seul résultat : inutile de réclamer un clic de plus.
+              const seulDossier = lignesDossiers.length === 1;
+              return (
+                <div className="space-y-2.5">
+                  {lignesDossiers.map(({ d, p }) => {
+                    const cleCarte = "d:" + d.id;
+                    const carteOuverte = seulDossier ? !ouverts.has(cleCarte) : ouverts.has(cleCarte);
+                    return (
+                                    <div key={d.id} className={`bg-white border border-gray-200 rounded-2xl shadow-sm ${carteOuverte ? "p-3.5 sm:p-5" : "px-3.5 py-2.5 sm:px-5 sm:py-3"}`}>
+                                      <div className={`flex items-center justify-between flex-wrap gap-2 ${carteOuverte ? "mb-3" : ""}`}>
                                         {editingDossierId === d.id ? (
                                           <div className="w-full space-y-2">
                                             <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
@@ -15830,7 +16678,11 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         ) : (
                                           <div>
                                             <div className="font-bold fa-navy flex items-center gap-2 flex-wrap">
-                                              {clientName(d)}
+                                              <button type="button" onClick={() => toggleFolder(cleCarte)}
+                                                title={carteOuverte ? "Replier ce dossier" : "Ouvrir ce dossier"}
+                                                className="fa-tap font-bold fa-navy hover:fa-teal-text transition text-left">
+                                                {clientName(d)}
+                                              </button>
                                               <CoEmprunteurBadge d={d} />
                                               <button onClick={() => startEditDossier(d)} className="fa-tap text-xs fa-teal-text hover:underline font-normal">Modifier</button>
                                               {findDuplicates(d).length > 0 && (
@@ -15867,16 +16719,106 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             )}
                                           </div>
                                         )}
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex items-center gap-2 flex-wrap ml-auto">
                                           {isStale(d) && (
                                             <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full flex items-center gap-1">
                                               <Clock size={11} /> {staleHours(d)}h sans changement
                                             </span>
                                           )}
+                                          {/* Le partenaire et son commercial, là où se trouvaient
+                                              les dossiers qu'il fallait ouvrir pour les connaître. */}
+                                          {p.deleted
+                                            ? <span className="text-xs text-violet-700 line-through decoration-violet-300 max-w-[10rem] truncate" title={nomPartenaire(p)}>{nomPartenaire(p)}</span>
+                                            : <LienPartenaire p={p} className="text-xs font-semibold text-gray-600 underline decoration-dotted decoration-gray-300 underline-offset-2 max-w-[10rem] truncate" />}
+                                          {(() => {
+                                            const suivi = commercialDuDossier(d, data.partners);
+                                            const apart = dossierReaffecte(d, data.partners);
+                                            return (
+                                              <span className="text-white text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap"
+                                                style={{
+                                                  backgroundColor: COMMERCIAL_COLORS[suivi] || "#999",
+                                                  border: apart ? "2px solid var(--fa-gold)" : "2px solid transparent",
+                                                }}
+                                                title={apart
+                                                  ? `Dossier réaffecté à ${commercialLabel(suivi) || suivi} — le partenaire est suivi par ${commercialLabel(p.commercial) || "personne"}`
+                                                  : "Commercial qui suit ce dossier"}>
+                                                {apart && "→ "}{commercialLabel(suivi) || "—"}
+                                              </span>
+                                            );
+                                          })()}
                                           <StatusBadge status={d.status} />
                                           <PaiementBadge dossier={d} />
+                                          <button type="button" onClick={() => toggleFolder(cleCarte)}
+                                            title={carteOuverte ? "Replier ce dossier" : "Ouvrir ce dossier"}
+                                            className="fa-tap text-gray-400 hover:fa-teal-text transition">
+                                            <ChevronDown size={16} className={carteOuverte ? "rotate-180 transition-transform" : "transition-transform"} />
+                                          </button>
                                         </div>
                                       </div>
+                                      {carteOuverte && (<>
+                                      {/* Qui suit ce dossier. Par défaut le commercial du
+                                          partenaire ; on peut le reprendre sans déplacer le
+                                          partenaire lui-même. Réservé au gérant : la part
+                                          mandataire ne se décide pas tout seul. */}
+                                      {(() => {
+                                        const suivi = commercialDuDossier(d, data.partners);
+                                        const apart = dossierReaffecte(d, data.partners);
+                                        if (!isFullAdmin) {
+                                          if (!apart) return null;
+                                          return (
+                                            <div className="text-xs text-gray-600 fa-bg-offwhite border border-gray-200 rounded-lg px-3 py-2 mt-3">
+                                              Dossier réaffecté à <strong className="fa-navy">{commercialLabel(suivi) || suivi}</strong>
+                                              {" — "}le partenaire reste suivi par {commercialLabel(p.commercial) || "personne"}.
+                                            </div>
+                                          );
+                                        }
+                                        return (
+                                          <div className="fa-bg-offwhite border border-gray-200 rounded-xl px-3.5 py-3 mt-3">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                              <span className="text-sm font-bold fa-navy">Suivi par</span>
+                                              {COMMERCIAUX.map(c => {
+                                                const ici = suivi === c;
+                                                return (
+                                                  <button key={c} type="button" aria-pressed={ici} disabled={busy}
+                                                    onClick={() => onReaffecterDossier(d.id, c)}
+                                                    className="fa-tap text-sm font-bold px-4 py-2 rounded-full border transition disabled:opacity-50"
+                                                    style={ici
+                                                      ? { backgroundColor: COMMERCIAL_COLORS[c], borderColor: COMMERCIAL_COLORS[c], color: "#fff" }
+                                                      : { backgroundColor: "#fff", borderColor: "#d1d5db", color: "#4b5563" }}>
+                                                    {commercialLabel(c) || c}
+                                                  </button>
+                                                );
+                                              })}
+                                              <span className="flex-1 min-w-0" />
+                                              {apart && (
+                                                <button type="button" disabled={busy}
+                                                  onClick={() => onReaffecterDossier(d.id, null)}
+                                                  className="fa-tap text-xs font-bold fa-teal-text bg-white border border-teal-200 rounded-lg px-3.5 py-2 hover:bg-teal-50 transition disabled:opacity-50">
+                                                  Revenir au partenaire
+                                                </button>
+                                              )}
+                                            </div>
+                                            <div className="text-xs text-gray-500 mt-2 leading-relaxed">
+                                              {apart
+                                                ? <>Exception sur ce dossier seulement. {nomPartenaire(p)} reste un partenaire de {commercialLabel(p.commercial) || "personne"} : ses autres dossiers ne bougent pas.</>
+                                                : <>Suit le partenaire. {nomPartenaire(p)} relève de {commercialLabel(p.commercial) || "personne"}, donc ce dossier aussi.</>}
+                                            </div>
+                                            {apart && (
+                                              <div className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2 leading-relaxed">
+                                                {suivi === NOM_GERANT ? (
+                                                  <>Ce qui suit {commercialLabel(suivi) || suivi} : la part mandataire de 50 % sur les honoraires,
+                                                  le point au challenge du mois, et la ligne au tableau des objectifs. Sur la récurrence, la maison
+                                                  garde tout — aucune part n'est prélevée sur les dossiers du gérant.</>
+                                                ) : (
+                                                  <>Ce qui suit {commercialLabel(suivi) || suivi} : la part mandataire de 50 % sur les honoraires
+                                                  et sur la récurrence, le point au challenge du mois, et la ligne au tableau des objectifs.</>
+                                                )}
+                                                {" "}La rétrocession reste à {nomPartenaire(p)}.
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      })()}
                                       <Stepper status={d.status} />
                                       {d.status === "Bordereau émis" && (() => {
                                         const bAt = getBordereauAt(d);
@@ -15983,7 +16925,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} assureurs={listeAssureurs(data)} />
                                       )}
 
-                                      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-gray-100">
+                                      {/* Six actions sur une ligne : sur téléphone elles
+                                          débordaient de l'écran. Elles passent maintenant à la
+                                          ligne au lieu de sortir de la carte. */}
+                                      <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap mt-3 pt-3 border-t border-gray-100">
                                         <button onClick={() => simOpenId === d.id ? setSimOpenId(null) : openSim(d)}
                                           className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
                                           <Sparkles size={13} /> Simulation client {d.simulation?.crd != null && <span className="fa-bg-gold fa-navy rounded-full w-1.5 h-1.5" />}
@@ -16015,6 +16960,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           <button onClick={() => financeOpenId === d.id ? setFinanceOpenId(null) : openFinance(d)}
                                             className="fa-tap text-xs gap-1 text-gray-500 hover:fa-teal-text transition">
                                             💶 Rémunération {(d.caAmount || d.commissionAmount) && <span className="fa-bg-gold fa-navy rounded-full w-1.5 h-1.5" />}
+                                            {d.honorairesAuto && <span className="text-[10px] font-semibold bg-teal-50 fa-teal-text border border-teal-200 px-1.5 py-0.5 rounded-full">repris de la simulation</span>}
+                                            {motifManquant(d) && <span className="text-[10px] font-semibold bg-red-50 text-red-700 border border-red-300 px-1.5 py-0.5 rounded-full">motif à choisir</span>}
                                             {d.motifHonorairesReduits && <span className="text-[10px] font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-1.5 py-0.5 rounded-full">{d.motifHonorairesReduits}</span>}
                                             {d.gesteCommercial > 0 && <span className="text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded-full">geste −{fmtEuro(d.gesteCommercial)}</span>}
                                           </button>
@@ -16038,7 +16985,23 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                         <div className="mt-2 bg-gray-50 rounded-lg p-3">
                                           <div className="grid sm:grid-cols-2 gap-3">
                                             <div>
-                                              <label className="block text-xs text-gray-500 mb-1">Honoraires facturés (€) — interne</label>
+                                              <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between gap-2">
+                                                <span>Honoraires facturés (€) — interne</span>
+                                                {honorairesSimules(d) > 0 && (
+                                                  Number(financeDraft.caAmount) === honorairesSimules(d)
+                                                    ? <span className="fa-teal-text font-normal normal-case shrink-0">= simulation</span>
+                                                    : <button type="button"
+                                                        onClick={() => setFinanceDraft(f => {
+                                                          const brut = honorairesSimules(d);
+                                                          const net = Math.max(0, brut - (Number(f.geste) || 0));
+                                                          return { ...f, caAmount: String(brut), commissionAmount: String(retrocessionSelonRegle(p, data.dossiers, net)) };
+                                                        })}
+                                                        title={`10 % du gain client calculé dans la simulation (${fmtEuroPrecis(honorairesSimules(d))})`}
+                                                        className="fa-teal-text hover:underline font-normal normal-case shrink-0">
+                                                        Simulation {fmtEuroPrecis(honorairesSimules(d))}
+                                                      </button>
+                                                )}
+                                              </label>
                                               <input type="number" onFocus={selectionTotale} value={financeDraft.caAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, caAmount: e.target.value }))}
                                                 placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
@@ -16067,15 +17030,18 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between">
                                                 Rétrocession partenaire (€)
-                                                {p.flatFee ? (
-                                                  <button type="button"
-                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: String(p.flatFee) }))}
-                                                    className="fa-teal-text hover:underline font-normal normal-case">Forfait {p.flatFee}€</button>
-                                                ) : (
-                                                  <button type="button"
-                                                    onClick={() => setFinanceDraft(f => ({ ...f, commissionAmount: f.caAmount ? (Math.max(0, Number(f.caAmount) - (Number(f.geste) || 0)) / 2).toString() : f.commissionAmount }))}
-                                                    className="fa-teal-text hover:underline font-normal normal-case">50% auto</button>
-                                                )}
+                                                {/* Un seul bouton, qui applique la règle réelle du partenaire :
+                                                    son forfait, ou le taux qu'on lui applique sur ses dossiers. */}
+                                                <button type="button"
+                                                  onClick={() => setFinanceDraft(f => ({
+                                                    ...f,
+                                                    commissionAmount: String(retrocessionSelonRegle(
+                                                      p, data.dossiers, Math.max(0, (Number(f.caAmount) || 0) - (Number(f.geste) || 0)))),
+                                                  }))}
+                                                  title="Appliquer sa règle de rémunération"
+                                                  className="fa-teal-text hover:underline font-normal normal-case">
+                                                  {libelleRegleRetrocession(p, data.dossiers)}
+                                                </button>
                                               </label>
                                               <input type="number" onFocus={selectionTotale} value={financeDraft.commissionAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, commissionAmount: e.target.value }))}
@@ -16096,7 +17062,15 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                                   <div className="flex justify-between"><span>CA généré après geste commercial ({fmtEuro(brutSaisi)} − {fmtEuro(geste)})</span><span className="font-semibold fa-navy">{fmtEuro(ca)}</span></div>
                                                 )}
                                                 <div className="flex justify-between"><span>CA réel Frangola (après apporteur)</span><span className="font-semibold fa-navy">{fmtEuro(caReel)}</span></div>
-                                                <div className="flex justify-between"><span>Part {p.commercial || "commercial"} (mandataire, 50%)</span><span className="font-semibold" style={{ color: COMMERCIAL_COLORS[p.commercial] }}>{fmtEuro(mandataireCut)}</span></div>
+                                                {(() => {
+                                                  const suivi = commercialDuDossier(d, data.partners);
+                                                  return (
+                                                    <div className="flex justify-between">
+                                                      <span>Part {commercialLabel(suivi) || "commercial"} (mandataire, 50%){dossierReaffecte(d, data.partners) && <span className="text-gray-400"> · réaffecté</span>}</span>
+                                                      <span className="font-semibold" style={{ color: COMMERCIAL_COLORS[suivi] }}>{fmtEuro(mandataireCut)}</span>
+                                                    </div>
+                                                  );
+                                                })()}
                                                 <div className="flex justify-between"><span>Marge nette finale Frangola</span><span className="font-bold text-emerald-700">{fmtEuro(margeNette)}</span></div>
                                               </div>
                                             );
@@ -16113,126 +17087,24 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
                                       {simOpenId === d.id && (
                                         <div className="mt-2 bg-white border border-gray-200 rounded-xl p-4">
-                                          <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
-                                            <div className="flex items-center gap-2">
-                                              <Sparkles size={15} className="fa-teal-text" />
-                                              <span className="text-sm font-semibold fa-navy">Simulation client</span>
-                                            </div>
-                                            {(d.docs?.offre || d.docs?.tableau) && (
-                                              <button onClick={async () => {
-                                                setSimAnalyzing(d.id); setSimAnalyzeError(""); setSimAnalysisResult(null); setSimAutoReclassified(false);
-                                                const { result, error } = await onAnalyzeDossierIA(d.id);
-                                                // Banque et cotisation actuelle servent aussi au suivi back-office.
-                                                if (result && (result.banque || result.cotisationMensuelleActuelle)) {
-                                                  onUpdateDossierSimulation(d.id, {
-                                                    ...(result.banque ? { banqueDetectee: result.banque } : {}),
-                                                    ...(result.cotisationMensuelleActuelle ? { cotisationActuelle: result.cotisationMensuelleActuelle } : {}),
-                                                  });
-                                                }
-                                                setSimAnalyzing(null);
-                                                if (error) { setSimAnalyzeError(error); return; }
-                                                const misclassified =
-                                                  (result.offreSlotDetecte === "tableau" && result.tableauSlotDetecte === "offre") ||
-                                                  (result.offreSlotDetecte === "tableau" && !d.docs?.tableau) ||
-                                                  (result.tableauSlotDetecte === "offre" && !d.docs?.offre);
-                                                if (misclassified) {
-                                                  await onSwapDocs(d.id, "offre", "tableau");
-                                                  setSimAutoReclassified(true);
-                                                }
-                                                setSimAnalysisResult(result);
-                                                if (!d.clientLastName && result.clientNom) {
-  await onUpdateDossierClient(d.id, {
-    clientLastName: result.clientNom,
-    clientFirstName: result.clientPrenom || "",
-  });
-}
-                                                setSimDraft({
-                                                  crd: result.crdMontant ?? "", crdDate: result.crdDate ?? "",
-                                                  assuranceRestante: result.assuranceRestanteTotal ?? "",
-                                                  dureeRestanteMois: result.dureeRestanteMois ?? "",
-                                                });
-                                              }} disabled={simAnalyzing === d.id}
-                                                className="flex items-center gap-1.5 text-xs font-medium fa-bg-teal disabled:opacity-50 px-3 py-1.5 rounded-lg transition">
-                                                <Sparkles size={12} /> {simAnalyzing === d.id ? "Analyse en cours…" : "Analyser avec l'IA"}
-                                              </button>
-                                            )}
+                                          <div className="flex items-center gap-2 mb-3">
+                                            <Sparkles size={15} className="fa-teal-text" />
+                                            <span className="text-sm font-semibold fa-navy">Simulation client</span>
                                           </div>
-                                          {simAnalyzing === d.id && (
-                                            <p className="text-xs text-gray-400 mb-3">Peut prendre jusqu'à 2 minutes sur des documents volumineux — tu peux continuer à travailler en parallèle, ça tourne en arrière-plan.</p>
-                                          )}
                                           {!d.docs?.tableau && (
                                             <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
                                               <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
                                               <span className="text-xs text-amber-800">Tableau d'amortissement manquant — le CRD, le coût d'assurance restant et la durée restante ne pourront pas être calculés tant qu'il n'est pas déposé.</span>
                                             </div>
                                           )}
-                                          {simAnalyzeError && (
-                                            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
-                                              <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
-                                              <span className="text-xs text-red-700">{simAnalyzeError}</span>
-                                            </div>
-                                          )}
-                                          {simAutoReclassified && (
-                                            <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">
-                                              <Check size={14} className="text-emerald-600 shrink-0 mt-0.5" />
-                                              <span className="text-xs text-emerald-800">"Offre de prêt" et "Tableau d'amortissement" étaient mal classés — reclassés automatiquement.</span>
-                                            </div>
-                                          )}
-                                          {simAnalysisResult?.noteExplicative && (
-                                            <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-3">
-                                              <Sparkles size={14} className="text-sky-600 shrink-0 mt-0.5" />
-                                              <span className="text-xs text-sky-800"><strong>Note de l'analyse :</strong> {simAnalysisResult.noteExplicative}</span>
-                                            </div>
-                                          )}
-
                                           <div className="flex items-center justify-between text-xs mb-1 px-0.5">
-                                            <span className="text-gray-500">Client identifié</span>
-                                            <span className="fa-navy font-medium flex items-center gap-1"><Check size={12} className="text-emerald-600" />{clientName(d)}</span>
+                                            <span className="text-gray-500">Client</span>
+                                            <span className="fa-navy font-medium">{clientName(d)}</span>
                                           </div>
                                           {d.hasCoEmprunteur && (
                                             <div className="flex items-center justify-between text-xs mb-3 px-0.5">
                                               <span className="text-gray-500">Co-emprunteur</span>
                                               <span className="fa-navy font-medium">{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim()}</span>
-                                            </div>
-                                          )}
-
-                                          {simAnalysisResult && simAnalysisResult.clientNom && (
-                                            (simAnalysisResult.clientNom.toUpperCase() !== (d.clientLastName || "").toUpperCase()
-                                              || (simAnalysisResult.clientPrenom || "").toLowerCase() !== (d.clientFirstName || "").toLowerCase()) && (
-                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 flex-wrap">
-                                                <span className="text-xs text-amber-800">
-                                                  ⚠️ Le document indique <strong>{simAnalysisResult.clientNom.toUpperCase()} {simAnalysisResult.clientPrenom}</strong>, le partenaire avait saisi <strong>{clientName(d)}</strong>.
-                                                </span>
-                                                <button onClick={() => onUpdateDossierClient(d.id, { clientLastName: simAnalysisResult.clientNom, clientFirstName: simAnalysisResult.clientPrenom })}
-                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
-                                                  Corriger
-                                                </button>
-                                              </div>
-                                            )
-                                          )}
-                                          {simAnalysisResult && d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
-                                            (simAnalysisResult.coEmprunteurNom.toUpperCase() !== (d.coClientLastName || "").toUpperCase()
-                                              || (simAnalysisResult.coEmprunteurPrenom || "").toLowerCase() !== (d.coClientFirstName || "").toLowerCase()) && (
-                                              <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
-                                                <span className="text-xs text-amber-800">
-                                                  ⚠️ Le document indique un co-emprunteur <strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>, le partenaire avait saisi <strong>{`${(d.coClientLastName || "").toUpperCase()} ${d.coClientFirstName || ""}`.trim() || "aucun"}</strong>.
-                                                </span>
-                                                <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
-                                                  className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
-                                                  Corriger
-                                                </button>
-                                              </div>
-                                            )
-                                          )}
-                                          {simAnalysisResult && !d.hasCoEmprunteur && simAnalysisResult.coEmprunteurNom && (
-                                            <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 flex-wrap">
-                                              <span className="text-xs text-amber-800">
-                                                ⚠️ Les documents mentionnent un co-emprunteur (<strong>{simAnalysisResult.coEmprunteurNom.toUpperCase()} {simAnalysisResult.coEmprunteurPrenom}</strong>) non déclaré par le partenaire.
-                                              </span>
-                                              <button onClick={() => onUpdateDossierClient(d.id, { hasCoEmprunteur: true, coClientLastName: simAnalysisResult.coEmprunteurNom, coClientFirstName: simAnalysisResult.coEmprunteurPrenom })}
-                                                className="text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg transition shrink-0">
-                                                Ajouter
-                                              </button>
                                             </div>
                                           )}
 
@@ -16262,12 +17134,6 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                             </div>
                                           </div>
 
-                                    {simAnalysisResult?.syntheseCrd && (
-  <div className="flex items-start gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-2">
-    <Sparkles size={14} className="text-sky-600 shrink-0 mt-0.5" />
-    <span className="text-xs text-sky-800"><strong>Comment ce CRD a été trouvé :</strong> {simAnalysisResult.syntheseCrd}</span>
-  </div>
-)}
                                           {simDraft.assuranceRestante && simDraft.dureeRestanteMois && Number(simDraft.dureeRestanteMois) > 0 && (
                                             <div className="fa-bg-offwhite rounded-lg px-3 py-2 mb-3 flex items-center justify-between">
                                               <span className="text-xs text-gray-500">Mensualité moyenne (linéaire)</span>
@@ -16356,18 +17222,12 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           {(!d.history || d.history.length === 0) && <div className="text-xs text-gray-400">Pas d'historique disponible pour ce dossier.</div>}
                                         </div>
                                       )}
+                                      </>)}
                                     </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              });
+                    );
+                  })}
+                </div>
+              );
             })()}
           </div>
         )}
@@ -17861,6 +18721,13 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           <div>
             <h2 className="font-display text-lg font-semibold fa-navy">Assureurs</h2>
             <p className="text-sm text-gray-500">Les compagnies partenaires, leurs logos et leurs couleurs — et ce que chacune pèse dans ta production.</p>
+          </div>
+        )}
+
+        {tab === "banques" && isFullAdmin && (
+          <div>
+            <h2 className="font-display text-lg font-semibold fa-navy">Banques</h2>
+            <p className="text-sm text-gray-500">Les banques prêteuses que tu retrouves sur les dossiers : leur logo, leur couleur, et ce que chacune représente.</p>
           </div>
         )}
 
