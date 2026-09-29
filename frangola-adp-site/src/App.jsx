@@ -586,6 +586,46 @@ function cleComparaison(t) {
     .toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// ─── Chercher, c'est un mode ────────────────────────────────────────────
+// Taper dans une barre de recherche, c'est avoir quelqu'un en tête. L'écran
+// doit alors ne montrer que lui : le reste — priorités du jour, pastilles de
+// statut, blocs de haut de page — s'efface, et revient dès qu'on sort de la
+// recherche. Sans ça, le résultat se trouve sous une page entière à faire
+// défiler, et la recherche ne fait pas gagner le temps qu'elle promet.
+//
+// Et on cherche dans plusieurs champs à la fois, comme la barre globale :
+// le client, le co-emprunteur, un numéro de téléphone, le partenaire qui a
+// apporté le dossier. Chaque mot tapé doit se retrouver quelque part, pas
+// forcément dans le même champ : « fiona fondjo » trouve « FONDJO Fiona ».
+function motsRecherche(texte) {
+  return String(texte || "").split(/\s+/).map(cleComparaison).filter(Boolean);
+}
+
+function correspondAuxMots(mots, champs) {
+  if (!mots.length) return true;
+  const cles = (champs || []).filter(Boolean).map(cleComparaison);
+  return mots.every(m => cles.some(c => c.includes(m)));
+}
+
+function dossierCorrespond(d, texte, partners) {
+  const mots = motsRecherche(texte);
+  if (!mots.length) return true;
+  const p = (partners || []).find(x => x.id === d.partnerId);
+  return correspondAuxMots(mots, [
+    d.clientFirstName, d.clientLastName, d.coClientFirstName, d.coClientLastName,
+    d.clientPhone, d.coClientPhone,
+    p && p.firstName, p && p.name, p && p.company,
+  ]);
+}
+
+function partenaireCorrespond(p, texte) {
+  const mots = motsRecherche(texte);
+  if (!mots.length) return true;
+  return correspondAuxMots(mots, [
+    p.firstName, p.name, p.company, p.ville, p.postalCode, p.email, p.telephone,
+  ]);
+}
+
 function detecterDoublon(decl) {
   if (!_colorDataRef) return { niveau: null, messages: [], partenaires: [] };
   const messages = [];
@@ -16337,6 +16377,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
   const [corbeilleSearch, setCorbeilleSearch] = useState("");
     const [partnerSearch, setPartnerSearch] = useState("");
+  const enRecherchePartenaire = partnerSearch.trim().length > 0;
   const [corbeilleMandataireSearch, setCorbeilleMandataireSearch] = useState("");
   const [confirmDeleteMandataireId, setConfirmDeleteMandataireId] = useState(null);
   const [contratASupprimer, setContratASupprimer] = useState(null);
@@ -16365,6 +16406,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [dossierSearch, setDossierSearch] = useState("");
   const [dossierFilter, setDossierFilter] = useState("tous");
   const [commercialFilter, setCommercialFilter] = useState("tous");
+  // Dès qu'il y a du texte, l'écran Dossiers passe en mode recherche.
+  const enRecherche = dossierSearch.trim().length > 0;
   // La fusion en cours : l'id de la fiche depuis laquelle on a ouvert le
   // panneau, et celle qu'on a désignée comme doublon.
   const [fusionDe, setFusionDe] = useState(null);
@@ -17171,6 +17214,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
         {tab === "dossiers" && (
           <div className="space-y-4">
             {(() => {
+              // Ce bloc grandit avec le nombre de dossiers en retard : à 22
+              // lignes il remplit l'écran. Pendant une recherche il n'a rien
+              // à y faire, on cherche quelqu'un de précis.
+              if (enRecherche) return null;
               const priorityItems = data.dossiers
                 .map(d => ({ d, reasons: actionReasons(d) }))
                 .filter(x => x.reasons.length > 0)
@@ -17193,6 +17240,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </div>
               );
             })()}
+            {!enRecherche && (
             <div className="flex gap-1.5 mb-1 overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
               {[
                 ["tous", "Tous", liveDossiers.length],
@@ -17215,46 +17263,64 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </button>
               ))}
             </div>
-            <div className="flex items-center flex-wrap gap-2 mb-2">
+            )}
+            {/* La barre de recherche. En mode recherche elle prend le haut de
+                l'écran, annonce ce qu'elle a trouvé et offre une sortie
+                visible : la croix seule se rate, et on se demande alors
+                pourquoi l'écran est vide. */}
+            <div className={`flex items-center flex-wrap gap-2 mb-2 ${enRecherche ? "bg-white border-2 border-teal-500 rounded-xl p-2.5" : ""}`}>
               <div className="relative flex-1 min-w-[12rem]">
                 <input value={dossierSearch} onChange={e => setDossierSearch(e.target.value)}
-                  placeholder="Rechercher un client par nom ou prénom…"
+                  onKeyDown={e => { if (e.key === "Escape") { setDossierSearch(""); e.currentTarget.blur(); } }}
+                  placeholder="Rechercher : client, co-emprunteur, téléphone, partenaire…"
                   className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
                 {dossierSearch && (
-                  <button onClick={() => setDossierSearch("")}
+                  <button onClick={() => setDossierSearch("")} title="Effacer (Échap)"
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
                     <X size={15} />
                   </button>
                 )}
               </div>
-              <select value={commercialFilter} onChange={e => setCommercialFilter(e.target.value)}
-                style={commercialFilter !== "tous" ? { backgroundColor: COMMERCIAL_COLORS[commercialFilter], color: "#fff" } : {}}
-                className="text-sm font-medium border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
-                <option value="tous">Tous les commerciaux</option>
-                {COMMERCIAUX.map(c => <option key={c} value={c}>{commercialLabel(c)}</option>)}
-              </select>
-              <button onClick={() => exportDossiersCsv(data.dossiers, data.partners)}
-                className="text-sm font-medium bg-white border border-gray-200 hover:border-teal-300 fa-teal-text px-4 py-2.5 rounded-lg transition whitespace-nowrap">
-                Exporter CSV
-              </button>
+              {enRecherche ? (
+                <button onClick={() => setDossierSearch("")}
+                  className="fa-tap text-sm font-bold fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition whitespace-nowrap">
+                  Quitter la recherche
+                </button>
+              ) : (<>
+                <select value={commercialFilter} onChange={e => setCommercialFilter(e.target.value)}
+                  style={commercialFilter !== "tous" ? { backgroundColor: COMMERCIAL_COLORS[commercialFilter], color: "#fff" } : {}}
+                  className="text-sm font-medium border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                  <option value="tous">Tous les commerciaux</option>
+                  {COMMERCIAUX.map(c => <option key={c} value={c}>{commercialLabel(c)}</option>)}
+                </select>
+                <button onClick={() => exportDossiersCsv(data.dossiers, data.partners)}
+                  className="text-sm font-medium bg-white border border-gray-200 hover:border-teal-300 fa-teal-text px-4 py-2.5 rounded-lg transition whitespace-nowrap">
+                  Exporter CSV
+                </button>
+              </>)}
             </div>
             {data.partners.filter(p => !p.deleted).length === 0 && (
               <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">Aucun partenaire pour l'instant — crée-en un dans l'onglet "Partenaires".</div>
             )}
             {(() => {
-              const searchTerm = dossierSearch.trim().toLowerCase();
+              // Pendant une recherche, la recherche gagne : ni la pastille de
+              // statut laissée il y a dix minutes ni le filtre commercial ne
+              // doivent cacher le client qu'on cherche. Chercher un dossier
+              // qui existe et lire « aucun dossier » est la pire réponse
+              // possible — l'un des deux filtres était resté sans qu'on le
+              // voie. On les met de côté, et on le dit.
               const matchesFilter = (d) => {
-                if (dossierFilter === "tous") return true;
+                if (enRecherche || dossierFilter === "tous") return true;
                 if (dossierFilter === "action") return actionReasons(d).length > 0;
                 if (dossierFilter === "backoffice") return !!alerteBackOffice(d);
                 return d.status === dossierFilter;
               };
-              const matchesSearch = (d) => matchesFilter(d) && (!searchTerm || `${d.clientFirstName} ${d.clientLastName}`.toLowerCase().includes(searchTerm));
+              const matchesSearch = (d) => matchesFilter(d) && dossierCorrespond(d, dossierSearch, data.partners);
               // Le filtre commercial s'applique au dossier, pas au partenaire.
-              const suitLeFiltre = (d) => commercialFilter === "tous" || commercialDuDossier(d, data.partners) === commercialFilter;
+              const suitLeFiltre = (d) => enRecherche || commercialFilter === "tous" || commercialDuDossier(d, data.partners) === commercialFilter;
               const partenaireRetenu = (p) => {
-                if (commercialFilter === "tous") return true;
+                if (enRecherche || commercialFilter === "tous") return true;
                 const siens = data.dossiers.filter(d => d.partnerId === p.id);
                 if (siens.length === 0) return p.commercial === commercialFilter;
                 return siens.some(suitLeFiltre);
@@ -17272,7 +17338,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               const anciens = data.partners
                 .filter(x => x.deleted && partenaireRetenu(x) && data.dossiers.some(d => d.partnerId === x.id))
                 .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
-              if (commercialFilter === "tous" && data.dossiers.some(d => !idsConnus.has(d.partnerId))) {
+              if ((enRecherche || commercialFilter === "tous") && data.dossiers.some(d => !idsConnus.has(d.partnerId))) {
                 anciens.push({ id: "__inconnu__", name: "Partenaire introuvable", firstName: "", deleted: true, _inconnu: true });
               }
               if (anciens.length > 0) deptGroups[POT] = anciens;
@@ -17292,7 +17358,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               // voit plus rien. Le département disparaît de l'affichage — il
               // reste sur la fiche du partenaire — et le partenaire comme le
               // commercial passent sur la ligne du client.
-              const filterActive = !!searchTerm || dossierFilter !== "tous";
+              const filterActive = enRecherche || dossierFilter !== "tous";
               const lignesDossiers = [];
               for (const deptKey of deptKeys) {
                 for (const p of deptGroups[deptKey]) {
@@ -17303,17 +17369,40 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 }
               }
               lignesDossiers.sort((a, b) => b.d.createdAt - a.d.createdAt);
+              // Ce qu'on a mis de côté pour ne montrer que le résultat :
+              // dit une fois, sinon on cherche pourquoi le compte a changé.
+              const ecartes = !enRecherche ? [] : [
+                dossierFilter !== "tous" ? `filtre « ${dossierFilter === "action" ? "Nécessite une action" : dossierFilter === "backoffice" ? "Back-office à relancer" : dossierFilter} »` : null,
+                commercialFilter !== "tous" ? `commercial « ${commercialLabel(commercialFilter)} »` : null,
+              ].filter(Boolean);
+              const enTeteRecherche = enRecherche && (
+                <div className="flex items-center flex-wrap gap-x-2 gap-y-1 text-xs text-gray-500 -mt-1 mb-1">
+                  <span className="font-bold fa-navy">
+                    {lignesDossiers.length} résultat{lignesDossiers.length > 1 ? "s" : ""} pour « {dossierSearch.trim()} »
+                  </span>
+                  {ecartes.length > 0 && (
+                    <span className="text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+                      {ecartes.join(" et ")} mis de côté
+                    </span>
+                  )}
+                  <span className="text-gray-400">· Échap pour sortir</span>
+                </div>
+              );
               if (lignesDossiers.length === 0) {
-                return (
+                return (<>
+                  {enTeteRecherche}
                   <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">
-                    Aucun dossier ne correspond à ce filtre.
+                    {enRecherche
+                      ? <>Aucun dossier ne correspond à « {dossierSearch.trim()} ».</>
+                      : <>Aucun dossier ne correspond à ce filtre.</>}
                   </div>
-                );
+                </>);
               }
               // Un seul résultat : inutile de réclamer un clic de plus.
               const seulDossier = lignesDossiers.length === 1;
               return (
                 <div className="space-y-2.5">
+                  {enTeteRecherche}
                   {lignesDossiers.map(({ d, p }) => {
                     const cleCarte = "d:" + d.id;
                     const carteOuverte = seulDossier ? !ouverts.has(cleCarte) : ouverts.has(cleCarte);
@@ -17916,13 +18005,18 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
         {tab === "partenaires" && (
           <div>
-                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onRattacher={onRattacherParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} onAnnuler={onAnnulerParrainage} busy={busy} />
+            {/* Même règle que sur l'écran Dossiers : pendant une recherche,
+                tout ce qui n'est pas le résultat s'efface. Ici c'est encore
+                plus net — registre, contrat type et fiches à compléter
+                repoussaient la liste sous deux écrans de défilement. */}
+            {!enRecherchePartenaire && (<>
+            <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onRattacher={onRattacherParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} onAnnuler={onAnnulerParrainage} busy={busy} />
 
             <ContratTypePanel contrat={data.settings?.contratType} partners={data.partners}
               onUpload={onUploadContratType} canEdit={isFullAdmin} busy={busy} />
+            </>)}
 
-
-            {(() => {
+            {!enRecherchePartenaire && (() => {
               // Les fiches créées depuis une déclaration de parrainage arrivent
               // incomplètes et sans département : sans ce raccourci elles se
               // perdent dans un dossier replié.
@@ -17966,6 +18060,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </div>
               );
             })()}
+            {!enRecherchePartenaire && (
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Partenaires</h2>
               <div className="flex items-center gap-2">
@@ -17979,8 +18074,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </button>
               </div>
             </div>
+            )}
 
-            {showAddPartnerForm && (
+            {!enRecherchePartenaire && showAddPartnerForm && (
             <div className="bg-white border border-gray-200 rounded-2xl p-6 mb-6 shadow-sm">
               <div className="flex items-start justify-between gap-2 mb-4">
                 <h3 className="font-display font-semibold fa-navy flex items-center gap-2"><Landmark size={17} className="fa-teal-text" /> Ajouter un partenaire</h3>
@@ -18070,32 +18166,58 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             )}
 
             <div className="space-y-3">
-                           <div className="relative mb-2">
-                <input value={partnerSearch} onChange={e => setPartnerSearch(e.target.value)}
-                  placeholder="Rechercher un partenaire, une agence, une ville…"
-                  className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
-                {partnerSearch && (
+              <div className={`flex items-center flex-wrap gap-2 mb-2 ${enRecherchePartenaire ? "bg-white border-2 border-teal-500 rounded-xl p-2.5" : ""}`}>
+                <div className="relative flex-1 min-w-[12rem]">
+                  <input value={partnerSearch} onChange={e => setPartnerSearch(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Escape") { setPartnerSearch(""); e.currentTarget.blur(); } }}
+                    placeholder="Rechercher un partenaire, une agence, une ville…"
+                    className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
+                  {partnerSearch && (
+                    <button onClick={() => setPartnerSearch("")} title="Effacer (Échap)"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
+                      <X size={15} />
+                    </button>
+                  )}
+                </div>
+                {enRecherchePartenaire && (
                   <button onClick={() => setPartnerSearch("")}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
-                    <X size={15} />
+                    className="fa-tap text-sm font-bold fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition whitespace-nowrap">
+                    Quitter la recherche
                   </button>
                 )}
               </div>
               {data.partners.filter(p => !p.deleted).length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun partenaire pour l'instant.</div>}
+              {enRecherchePartenaire && (() => {
+                const n = data.partners.filter(p => !p.deleted && partenaireCorrespond(p, partnerSearch)).length;
+                return (<>
+                  <div className="flex items-center flex-wrap gap-x-2 text-xs text-gray-500 -mt-1">
+                    <span className="font-bold fa-navy">
+                      {n} résultat{n > 1 ? "s" : ""} pour « {partnerSearch.trim()} »
+                    </span>
+                    <span className="text-gray-400">· Échap pour sortir</span>
+                  </div>
+                  {n === 0 && (
+                    <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">
+                      Aucun partenaire ne correspond à « {partnerSearch.trim()} ».
+                    </div>
+                  )}
+                </>);
+              })()}
                          {(() => {
-                const q = partnerSearch.trim().toLowerCase();
-                const filtreActif = q.length > 0;
+                const filtreActif = enRecherchePartenaire;
                 const cles = (p) => [p.commercial || "Sans commercial", p.departement || "Sans département"];
-                const vivants = data.partners.filter(p => !p.deleted).filter(p =>
-                  !filtreActif || `${p.firstName || ""} ${p.name || ""} ${p.company || ""} ${p.ville || ""} ${p.email || ""}`.toLowerCase().includes(q)
-                );
+                const vivants = data.partners.filter(p => !p.deleted)
+                  .filter(p => partenaireCorrespond(p, partnerSearch));
                 const tri = vivants.slice().sort((a, b) => {
                   const [ca, da] = cles(a), [cb, db] = cles(b);
                   if (ca !== cb) return ca.localeCompare(cb);
                   if (da !== db) return da.localeCompare(db, undefined, { numeric: true });
                   return (a.name || "").localeCompare(b.name || "");
                 });
+                // En recherche, les dossiers « commercial » et « département »
+                // au-dessus de chaque fiche sont du bruit : on veut la fiche.
+                if (filtreActif) return tri;
                 const lignes = [];
                 let comCourant = null, depCourant = null;
                 for (const p of tri) {
