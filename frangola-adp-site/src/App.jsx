@@ -7209,6 +7209,81 @@ function etapesBackOffice(d, maintenant = Date.now()) {
       detail: d.dateEffet ? (effetPasse ? null : `effet ${fmtJourCourt(d.dateEffet)}`) : "date d'effet à saisir" },
   ];
 }
+// Le point d'avancement à envoyer au client, rédigé à partir des cinq étapes
+// du back-office. Ce qu'un emprunteur veut savoir tient en deux questions :
+// la banque a-t-elle dit oui, et suis-je couvert. Le reste — honoraires,
+// rétrocession, commission — ne le regarde pas et ne figure nulle part ici.
+function messageAvancement(dossier, expediteur = "Sébastien Lesne", telephone = "") {
+  if (!dossier) return null;
+  const etapes = etapesBackOffice(dossier);
+  const faite = (id) => etapes.find(e => e.id === id)?.fait;
+  const bo = backOfficeDe(dossier);
+  const refus = bo.reponse === "refusee";
+  const banque = banqueDuDossier(dossier) || "votre banque";
+  const nom = `${(dossier.clientLastName || "").toUpperCase()}`.trim();
+  const civilite = nom ? `M. ${nom}` : "Madame, Monsieur";
+  const jour = (iso) => iso ? fmtDate(debutJour(iso)) : null;
+  const effet = dossier.dateEffet ? fmtDate(debutJour(dossier.dateEffet)) : null;
+  const sansAncienne = bo.ancienneAssurance === "aucune";
+
+  const signature = `\n\n${expediteur} — FRANGOLA${telephone ? `\n${telephone}` : ""}`;
+  const debut = `Bonjour ${civilite},\n\n`;
+  const fin = (corps) => ({
+    corps: debut + corps + signature,
+    etat: etatCourant,
+  });
+
+  let etatCourant = "attente";
+  let corps;
+
+  if (refus) {
+    etatCourant = "refus";
+    corps = `${banque} n'a pas retenu notre proposition${bo.reponseLe ? ` le ${jour(bo.reponseLe)}` : ""}. `
+      + `Je reprends le dossier pour vous proposer une solution qui réponde à ses exigences, et je reviens vers vous rapidement.`;
+  } else if (faite("vigueur")) {
+    etatCourant = "termine";
+    const gain = gainSimulation(dossier);
+    corps = `votre nouveau contrat est en vigueur${effet ? ` depuis le ${effet}` : ""}`
+      + (sansAncienne ? "." : ", et votre ancienne assurance est résiliée.")
+      + (gain > 0 ? `\n\nVous économisez ${fmtEuro(gain)} sur la durée restante de votre prêt.` : "")
+      + `\n\nMerci de votre confiance. Je reste joignable si vous avez la moindre question.`;
+  } else if (faite("resiliation") && faite("avenant")) {
+    etatCourant = "bouclé";
+    corps = `tout est en ordre`
+      + (sansAncienne ? "" : " : votre ancien contrat est résilié")
+      + (effet ? ` et votre nouvelle couverture prend effet le ${effet}` : "")
+      + `. Vous n'avez plus rien à faire.`
+      + (sansAncienne ? "" : `\n\nVous restez couvert sans interruption entre les deux contrats.`);
+  } else if (faite("avenant")) {
+    etatCourant = "resiliation";
+    corps = `l'avenant est signé, merci. Il me reste à faire résilier votre ancien contrat`
+      + (bo.resiliationDemandeeLe ? `, la demande est partie le ${jour(bo.resiliationDemandeeLe)}` : "")
+      + `.`
+      + (effet ? `\n\nVotre nouvelle couverture prend effet le ${effet}.` : "");
+  } else if (faite("reponse")) {
+    etatCourant = "avenant";
+    corps = `bonne nouvelle : ${banque} a accepté votre nouveau contrat`
+      + (bo.reponseLe ? ` le ${jour(bo.reponseLe)}` : "") + `.`
+      + `\n\nProchaine étape, l'avenant que la banque doit m'envoyer`
+      + (bo.avenantRecuLe ? ` — je vous le transmets à signer.` : ` — je vous le transmets à signer dès que je l'ai.`);
+  } else if (faite("demande")) {
+    etatCourant = "banque";
+    const pieces = (bo.echanges || []).some(x => x.type === "pieces" && !(bo.echanges || []).some(y => y.type === "pieces_envoyees"));
+    corps = `votre dossier d'assurance de prêt est parti à ${banque}`
+      + (bo.demandeLe ? ` le ${jour(bo.demandeLe)}` : "") + `. `
+      + (pieces
+        ? `La banque a demandé une pièce complémentaire, je m'en occupe.`
+        : `Elle dispose de dix jours ouvrés pour répondre.`)
+      + `\n\nJe reviens vers vous dès que j'ai sa réponse, vous n'avez rien à faire d'ici là.`;
+  } else {
+    etatCourant = "preparation";
+    corps = `votre dossier d'assurance de prêt est en cours de préparation. `
+      + `Je l'envoie à ${banque} dès qu'il est complet, et je vous préviens à ce moment-là.`;
+  }
+
+  return fin(corps);
+}
+
 function progressionBackOffice(d, maintenant = Date.now()) {
   return etapesBackOffice(d, maintenant).filter(e => e.fait).length;
 }
@@ -7314,7 +7389,7 @@ function MiniJaugeBackOffice({ dossier, large = "w-20" }) {
   );
 }
 
-function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefaut = false }) {
+function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefaut = false, expediteur, telephone }) {
   const bo = backOfficeDe(dossier);
   const alerte = alerteBackOffice(dossier);
   const etapes = etapesBackOffice(dossier);
@@ -7325,8 +7400,21 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
   const [formOuvert, setFormOuvert] = useState(false);
   const [form, setForm] = useState({ type: "envoi", le: isoAujourdhui(), texte: "" });
   const [fichier, setFichier] = useState(null);
+  const [copiePoint, setCopiePoint] = useState(false);
   const inputConfirmation = useRef(null);
   const inputPiece = useRef(null);
+
+  // Le point d'avancement à envoyer au client. Copier n'est pas envoyer,
+  // mais c'en est toujours la suite : on note la date pour savoir quand il a
+  // été prévenu la dernière fois.
+  const point = messageAvancement(dossier, expediteur || "Sébastien Lesne", telephone || "");
+  async function copierPoint() {
+    if (!point) return;
+    const ok = await copierRiche(messageEnHtml(point.corps), point.corps);
+    setCopiePoint(ok ? true : false);
+    setTimeout(() => setCopiePoint(false), 3500);
+    if (ok) onUpdate(dossier.id, { clientPrevenuLe: Date.now(), clientPrevenuEtat: point.etat });
+  }
 
   const maj = (champs) => onUpdate(dossier.id, { backOffice: { ...bo, ...champs } });
   const sansAncienne = bo.ancienneAssurance === "aucune";
@@ -7418,6 +7506,29 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
       {ouvert && (
         <div className="mt-2 bg-white border border-gray-200 rounded-xl p-3 sm:p-4">
           <div className="text-[11px] text-gray-400 mb-3">🔒 Réservé à Frangola — le partenaire ne voit qu'un résumé : en attente de la banque, validé, en vigueur.</div>
+
+          {/* Le point d'avancement pour le client : rédigé depuis les cinq
+              étapes ci-dessous, sans rien d'interne. C'est ce qui évite
+              l'appel « où en est mon dossier ? ». */}
+          {point && (
+            <div className="fa-bg-offwhite border border-gray-200 rounded-lg px-3 py-2.5 mb-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold fa-navy">Prévenir le client</span>
+                <button type="button" onClick={copierPoint} disabled={busy}
+                  className={`fa-tap text-[11px] font-bold px-3 py-1.5 rounded-lg transition disabled:opacity-50 ${
+                    copiePoint ? "bg-emerald-100 text-emerald-800 border border-emerald-300" : "fa-navy fa-bg-gold"}`}>
+                  {copiePoint ? "✓ Copié" : "Copier le point d'avancement"}
+                </button>
+                <span className="flex-1 min-w-0" />
+                <span className="text-[11px] text-gray-400">
+                  {dossier.clientPrevenuLe
+                    ? `prévenu le ${fmtDate(dossier.clientPrevenuLe)}${dossier.clientPrevenuEtat === point.etat ? "" : " · le dossier a avancé depuis"}`
+                    : "jamais prévenu"}
+                </span>
+              </div>
+              <pre className="mt-2 text-[11px] text-gray-600 whitespace-pre-wrap font-sans bg-white border border-gray-200 rounded-lg px-3 py-2 max-h-40 overflow-y-auto">{point.corps}</pre>
+            </div>
+          )}
 
           {/* Jauge en cinq étapes */}
           <div className="grid grid-cols-5 gap-0 mb-1">
@@ -15771,7 +15882,7 @@ function etapeCouranteBO(d) {
 
 // Onglet Production → Back-office : tous les dossiers entre souscription et
 // effet, filtrés par étape comme l'onglet Dossiers l'est par statut.
-function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
+function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy, expediteur, telephone }) {
   const [filtre, setFiltre] = useState("tous");
   const [ouvertId, setOuvertId] = useState(null);
   const [recherche, setRecherche] = useState("");
@@ -15853,7 +15964,7 @@ function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
                     <div className="flex justify-end mb-1">
                       <LienClient d={d} className="text-xs font-semibold fa-teal-text">Ouvrir le dossier complet de {clientName(d)} →</LienClient>
                     </div>
-                    <SuiviBackOffice dossier={d} onUpdate={onUpdate} onUploadPiece={onUploadPiece} busy={busy} ouvertParDefaut />
+                    <SuiviBackOffice dossier={d} onUpdate={onUpdate} onUploadPiece={onUploadPiece} busy={busy} ouvertParDefaut expediteur={expediteur} telephone={telephone} />
                   </div>
                 )}
               </div>
@@ -16127,7 +16238,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "productionAssureur", label: "Production par assureur", defaut: "assureurs", fullAdmin: true, rendu: () => <ProductionParAssureur data={data} dossiers={data.dossiers} /> },
     { id: "banques", label: "Banques prêteuses", defaut: "banques", fullAdmin: true, rendu: () => <BanquesPanel data={data} onSet={onSetBanques} canEdit={isFullAdmin} busy={busy} /> },
     { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
-    { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} /> },
+    { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} expediteur={viewerLabel} telephone={viewerTelephone} /> },
     { id: "sauvegardes", label: "Sauvegarde et restauration", defaut: "journal", fullAdmin: true, rendu: () => <SauvegardesPanel onExporter={onExporterSauvegarde} onRestaurer={onRestaurerSauvegarde} onVerifier={onVerifierSauvegarde} busy={busy} /> },
     { id: "connexions", label: "Dernières connexions", defaut: "journal", rendu: () => <BlocConnexions data={data} /> },
     { id: "journal", label: "Journal d'activité", defaut: "journal", rendu: () => <BlocJournal data={data} /> },
@@ -17483,7 +17594,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
                                       {["Souscrit", "Bordereau émis", "Payé"].includes(d.status) && (
                                         <>
-                                          <SuiviBackOffice dossier={d} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} />
+                                          <SuiviBackOffice dossier={d} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} expediteur={viewerLabel} telephone={viewerTelephone} />
                                           <EcheancierDossier dossier={d} onUpdate={onUpdateDossierClient} />
                                         </>
                                       )}
