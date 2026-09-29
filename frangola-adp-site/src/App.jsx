@@ -7722,7 +7722,7 @@ function BackOfficeARelancer({ dossiers, nomDuPartenaire, onOuvrir }) {
   );
 }
 
-function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
+function RecurrenceDossier({ dossier, onUpdate, assureurs, dossiers }) {
   const [ouvert, setOuvert] = useState(false);
   // On affiche ce qui est saisi, même avant la souscription : c'est le seul
   // moyen de relire ce qu'on a tapé. Ce qui est saisi d'avance n'entre dans
@@ -7734,6 +7734,7 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
   const court = contratEnCours(dossier);
   const gagne = STATUTS_CONTRAT_VIVANT.includes(dossier?.status);
   const petitChamp = "text-xs border border-gray-300 rounded-lg px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-teal-500";
+  const moyCotisation = cotisationMoyenne(dossiers);
 
   return (
     <div className="mt-2">
@@ -7787,12 +7788,23 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs }) {
                   : <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: a?.couleur || "#999" }} />;
               })()}
             </label>
-            <label className="text-xs text-gray-600 flex items-center gap-1.5">
+            <label className="text-xs text-gray-600 flex items-center gap-1.5 flex-wrap">
               Cotisation du client
               <input type="number" onFocus={selectionTotale} min="0" step="0.01" value={dossier.cotisationMensuelle ?? ""}
                 onChange={e => onUpdate(dossier.id, { cotisationMensuelle: e.target.value === "" ? null : Number(e.target.value) })}
                 placeholder="€ / mois" className={petitChamp} />
               € / mois
+              {/* La moyenne maison, en un clic. Proposée, jamais écrite d'office :
+                  la cotisation nourrit toute la récurrence, une valeur posée sans
+                  que personne la choisisse fausserait les projections en silence. */}
+              {(dossier.cotisationMensuelle == null || dossier.cotisationMensuelle === "") && moyCotisation.assez && (
+                <button type="button"
+                  onClick={() => onUpdate(dossier.id, { cotisationMensuelle: moyCotisation.moyenne })}
+                  title={`Moyenne des ${moyCotisation.echantillon} contrats signés — à corriger si ce client paie autre chose`}
+                  className="fa-tap text-[11px] font-bold fa-navy fa-bg-gold px-2.5 py-1 rounded-lg transition">
+                  moyenne {fmtEuroPrecis(moyCotisation.moyenne)}
+                </button>
+              )}
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
               Commission 1<sup>re</sup> année
@@ -8227,6 +8239,24 @@ function recurrencePercueDetaillee(dossiers) {
     if (b > 0) contratsAuDela += 1; else contratsEnAn1 += 1;
   }
   return { an1, apres, moisAn1, moisApres, contratsEnAn1, contratsAuDela, total: an1 + apres };
+}
+
+// La cotisation moyenne des contrats déjà signés, pour la proposer d'un clic
+// au lieu de la retaper. En dessous de trois contrats, il n'y a pas de
+// moyenne : sur un seul dossier, « la moyenne » c'est ce dossier-là, et la
+// proposer partout reviendrait à recopier un cas particulier sur tous les
+// suivants. Mieux vaut ne rien proposer que proposer un chiffre inventé.
+const MIN_ECHANTILLON_COTISATION = 3;
+function cotisationMoyenne(dossiers) {
+  const src = dossiers || _colorDataRef?.dossiers || [];
+  const valeurs = (src || [])
+    .filter(d => STATUTS_CONTRAT_VIVANT.includes(d.status))
+    .map(d => Number(d.cotisationMensuelle) || 0)
+    .filter(v => v > 0);
+  const echantillon = valeurs.length;
+  if (echantillon < MIN_ECHANTILLON_COTISATION) return { moyenne: 0, echantillon, assez: false };
+  const somme = valeurs.reduce((s, v) => s + v, 0);
+  return { moyenne: Math.round((somme / echantillon) * 100) / 100, echantillon, assez: true };
 }
 
 // Rythme observé de signature de contrats porteurs de récurrence, et montants
@@ -15568,31 +15598,46 @@ function etapesIntegration(p) {
   ];
   return etapes.map(e => ({ ...e, fait: !!e.date || dOffice }));
 }
-function piecesConformite(p) {
+// Le RIB n'a de sens qu'au moment de payer. Le réclamer à l'inscription, à
+// quelqu'un qui n'a encore rien déposé, c'est une case rouge qui ne veut rien
+// dire — et à force, plus personne ne regarde les cases rouges. Il devient
+// exigible dès le premier dossier : à ce moment-là, sans RIB, pas de
+// paiement. Un dossier KO ne compte pas : il ne sera jamais payé.
+function dossiersAPayerDe(partnerId, data) {
+  const src = data || _colorDataRef;
+  return (src?.dossiers || []).filter(d => d.partnerId === partnerId && d.status !== "KO").length;
+}
+
+function piecesConformite(p, data) {
   const contrats = contratsDe(p);
+  const nbDossiers = dossiersAPayerDe(p?.id, data);
+  const ribRequis = nbDossiers > 0;
   const pieces = [
-    { id: "contrat", label: "Contrat de partenariat signé",
+    { id: "contrat", label: "Contrat de partenariat signé", requis: true,
       ok: !!p?.contratAccepteLe || contrats.some(c => c.libelle === TYPES_CONTRAT[0]),
       detail: p?.contratAccepteLe ? `accepté en ligne le ${fmtDate(p.contratAccepteLe)}` : (contrats.some(c => c.libelle === TYPES_CONTRAT[0]) ? "déposé dans sa fiche" : "à déposer dans « Contrat & RIB »") },
-    { id: "rib", label: "RIB pour le payer", ok: !!p?.ribFile,
-      detail: p?.ribFile ? `fourni le ${fmtDate(p.ribFile.uploadedAt)}` : "à fournir (il peut le déposer lui-même dans son espace)" },
+    { id: "rib", label: "RIB pour le payer", requis: ribRequis, ok: !!p?.ribFile,
+      detail: p?.ribFile ? `fourni le ${fmtDate(p.ribFile.uploadedAt)}`
+        : ribRequis ? `à fournir — il a ${nbDossiers} dossier${nbDossiers > 1 ? "s" : ""} en cours, sans RIB tu ne peux pas le payer`
+        : "pas encore nécessaire — il le faudra dès son premier dossier" },
   ];
   if (annexeParrainageConcernee(p)) {
     const ok = contrats.some(c => c.libelle === TYPES_CONTRAT[1]);
-    pieces.push({ id: "annexe", label: "Annexe parrainage signée", ok, detail: ok ? "déposée dans sa fiche" : "à déposer dans « Contrat & RIB »" });
+    pieces.push({ id: "annexe", label: "Annexe parrainage signée", requis: true, ok, detail: ok ? "déposée dans sa fiche" : "à déposer dans « Contrat & RIB »" });
   }
   return pieces;
 }
-function bilanIntegration(p) {
+function bilanIntegration(p, data) {
   const etapes = etapesIntegration(p);
-  const pieces = piecesConformite(p);
+  const pieces = piecesConformite(p, data);
   const faites = etapes.filter(e => e.fait).length;
-  const manquantes = pieces.filter(x => !x.ok);
+  // Une pièce qui n'est pas encore exigible ne manque pas : elle attend.
+  const manquantes = pieces.filter(x => x.requis !== false && !x.ok);
   return { etapes, pieces, faites, total: etapes.length, integre: faites === etapes.length, conforme: manquantes.length === 0, manquantes, dOffice: integrePartenaireAvantSuivi(p) };
 }
 
-function BadgeIntegration({ p }) {
-  const b = bilanIntegration(p);
+function BadgeIntegration({ p, data }) {
+  const b = bilanIntegration(p, data);
   if (!b.integre) return (
     <span className="text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-full inline-flex items-center gap-1.5"
       title="Intégration en cours — détail dans sa fiche (Voir)">
@@ -15613,8 +15658,8 @@ function BadgeIntegration({ p }) {
   return null;
 }
 
-function IntegrationPartenaire({ p, onUpdate, viewerLabel }) {
-  const b = bilanIntegration(p);
+function IntegrationPartenaire({ p, onUpdate, viewerLabel, data }) {
+  const b = bilanIntegration(p, data);
   const [ouvert, setOuvert] = useState(!b.integre || !b.conforme);
   const [pret, setPret] = useState(null);
   const i = p.integration || {};
@@ -15692,17 +15737,23 @@ function IntegrationPartenaire({ p, onUpdate, viewerLabel }) {
           </div>
           <div>
             <div className="text-xs font-bold fa-navy mb-1">Dossier conforme — pièces pour le payer</div>
-            {b.pieces.map(x => (
-              <div key={x.id} className="flex items-start gap-2.5 py-2 border-t border-gray-200/70 first:border-t-0 text-sm">
-                <span className={`mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${x.ok ? "bg-emerald-500 border-emerald-500 text-white" : "border-red-300 bg-white text-red-500"}`}>
-                  {x.ok ? <Check size={12} /> : <span className="text-[11px] font-bold">!</span>}
-                </span>
-                <span className="flex-1 min-w-0">
-                  <span className={x.ok ? "fa-navy" : "text-red-700 font-semibold"}>{x.label}</span>
-                  <span className="block text-[11px] text-gray-500">{x.detail}</span>
-                </span>
-              </div>
-            ))}
+            {b.pieces.map(x => {
+              const attente = x.requis === false && !x.ok;
+              return (
+                <div key={x.id} className="flex items-start gap-2.5 py-2 border-t border-gray-200/70 first:border-t-0 text-sm">
+                  <span className={`mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${
+                    x.ok ? "bg-emerald-500 border-emerald-500 text-white"
+                    : attente ? "border-gray-300 bg-white text-gray-400"
+                    : "border-red-300 bg-white text-red-500"}`}>
+                    {x.ok ? <Check size={12} /> : <span className="text-[11px] font-bold">{attente ? "·" : "!"}</span>}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className={x.ok ? "fa-navy" : attente ? "text-gray-500" : "text-red-700 font-semibold"}>{x.label}</span>
+                    <span className="block text-[11px] text-gray-500">{x.detail}</span>
+                  </span>
+                </div>
+              );
+            })}
             <div className="text-[11px] text-gray-400 mt-2">Ces pièces se déposent dans l'onglet « Contrat &amp; RIB » ci-dessous ; la case se coche d'elle-même.</div>
           </div>
         </div>
@@ -15816,11 +15867,11 @@ function BackOfficeOnglet({ data, onUpdate, onUploadPiece, busy }) {
 
 // Tableau d'intégration de l'Accueil : une ligne par partenaire à mettre en
 // ordre, les envois cliquables, les pièces en lecture.
-function TableauIntegration({ partners, onUpdatePartner, onOuvrir }) {
+function TableauIntegration({ partners, onUpdatePartner, onOuvrir, data }) {
   const [tout, setTout] = useState(false);
   const LIMITE = 8;
   const toutes = partners.filter(p => !p.deleted)
-    .map(p => ({ p, b: bilanIntegration(p) }))
+    .map(p => ({ p, b: bilanIntegration(p, data) }))
     .filter(x => !x.b.integre || !x.b.conforme)
     .sort((a, b) => (dateEntreeDe(b.p) || 0) - (dateEntreeDe(a.p) || 0));
   const lignes = tout ? toutes : toutes.slice(0, LIMITE);
@@ -15876,7 +15927,9 @@ function TableauIntegration({ partners, onUpdatePartner, onOuvrir }) {
                       <td key={k} className={`text-center px-1 ${i === 0 ? "border-l-2 border-gray-200" : ""}`}>
                         {!x ? <span className="text-gray-300">—</span>
                           : <button onClick={() => onOuvrir(p)} title={x.detail}
-                              className={`${rond} ${x.ok ? "bg-emerald-500 text-white" : "border-2 border-red-300 bg-red-50 text-red-600"}`}>{x.ok ? "✓" : "!"}</button>}
+                              className={`${rond} ${x.ok ? "bg-emerald-500 text-white"
+                                : x.requis === false ? "border-2 border-gray-200 bg-white text-gray-400"
+                                : "border-2 border-red-300 bg-red-50 text-red-600"}`}>{x.ok ? "✓" : x.requis === false ? "·" : "!"}</button>}
                       </td>
                     );
                   })}
@@ -16830,7 +16883,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             })),
             // Intégration inachevée ou pièces manquantes : une seule ligne par
             // partenaire, qui dit exactement ce qui reste.
-            ...data.partners.filter(p => !p.deleted).map(p => ({ p, b: bilanIntegration(p) }))
+            ...data.partners.filter(p => !p.deleted).map(p => ({ p, b: bilanIntegration(p, data) }))
               .filter(x => !x.b.integre || !x.b.conforme)
               .map(({ p, b }) => ({
                 cle: "int-" + p.id,
@@ -16905,7 +16958,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 const itemsFiches = fileAttente.filter(x => x.cle.startsWith("i-"));
                 const alertesBO = liveDossiers.map(d => ({ d, a: alerteBackOffice(d) })).filter(x => x.a)
                   .sort((x, y) => x.a.tri - y.a.tri || x.a.depuis - y.a.depuis);
-                const nbPartenaires = data.partners.filter(p => !p.deleted).map(bilanIntegration).filter(b => !b.integre || !b.conforme).length;
+                const nbPartenaires = data.partners.filter(p => !p.deleted).map(p => bilanIntegration(p, data)).filter(b => !b.integre || !b.conforme).length;
                 // Récompenses du challenge de bienvenue à commander : l'objectif
                 // est atteint, le cadeau n'est pas encore parti.
                 const cadeaux = cadeauxBienvenueDus(data);
@@ -16964,7 +17017,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                         <span className={`text-xs font-bold rounded-full min-w-[22px] h-[22px] px-1.5 flex items-center justify-center ${nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length + cadeaux.length ? "bg-cyan-50 text-cyan-800" : "bg-gray-100 text-gray-500"}`}>{masqueNb(nbPartenaires + itemsParrainages.length + itemsPaiements.length + itemsFiches.length + cadeaux.length)}</span>
                       </div>
                       <p className="text-xs text-gray-500 mb-3">Intégration et pièces au dossier. Un clic sur un nom ouvre sa fiche.</p>
-                      <TableauIntegration partners={data.partners} onUpdatePartner={onUpdatePartner} onOuvrir={ouvrirPartenaire} />
+                      <TableauIntegration partners={data.partners} onUpdatePartner={onUpdatePartner} onOuvrir={ouvrirPartenaire} data={data} />
                       {itemsFiches.length > 0 && (
                         <Groupe titre="Fiches à compléter">{itemsFiches.map(item => <Ligne key={item.cle} item={item} />)}</Groupe>
                       )}
@@ -17440,7 +17493,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                                           et les retrouver trois semaines plus tard coûte un appel.
                                           Le montant n'est compté qu'à la souscription. */}
                                       {d.status !== "KO" && (
-                                        <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} assureurs={listeAssureurs(data)} />
+                                        <RecurrenceDossier dossier={d} onUpdate={onUpdateDossierClient} assureurs={listeAssureurs(data)} dossiers={data.dossiers} />
                                       )}
 
                                       {/* Six actions sur une ligne : sur téléphone elles
@@ -18089,7 +18142,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                               🤝 Filleul de {nomParrain(p.parrainId)}
                             </span>
                           )}
-                          <BadgeIntegration p={p} />
+                          <BadgeIntegration p={p} data={data} />
                           {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                           {p.active !== false && daysSinceLastDossier(p) > INACTIVITY_DAYS && (
                             <span className="text-xs font-semibold bg-orange-50 text-orange-700 border border-orange-200 px-2 py-0.5 rounded-full">
@@ -18405,7 +18458,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                     const transformRateP = (pDossiers.length - ko.length) > 0 ? Math.round((paid.length / (pDossiers.length - ko.length)) * 100) : 0;
                     return (
                       <div className="mt-4 pt-4 border-t border-gray-100">
-                        <IntegrationPartenaire p={p} onUpdate={onUpdatePartner} viewerLabel={viewerLabel} />
+                        <IntegrationPartenaire p={p} onUpdate={onUpdatePartner} viewerLabel={viewerLabel} data={data} />
                         <div className="flex gap-1.5 mb-4">
                           <button onClick={() => setViewingPartnerTab("analytique")}
                             className={`text-xs font-medium px-3 py-1.5 rounded-full transition ${viewingPartnerTab === "analytique" ? "fa-bg-teal" : "bg-gray-100 text-gray-600"}`}>
