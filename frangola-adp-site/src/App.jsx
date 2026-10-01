@@ -586,6 +586,46 @@ function cleComparaison(t) {
     .toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// ─── Chercher, c'est un mode ────────────────────────────────────────────
+// Taper dans une barre de recherche, c'est avoir quelqu'un en tête. L'écran
+// doit alors ne montrer que lui : le reste — priorités du jour, pastilles de
+// statut, blocs de haut de page — s'efface, et revient dès qu'on sort de la
+// recherche. Sans ça, le résultat se trouve sous une page entière à faire
+// défiler, et la recherche ne fait pas gagner le temps qu'elle promet.
+//
+// Et on cherche dans plusieurs champs à la fois, comme la barre globale :
+// le client, le co-emprunteur, un numéro de téléphone, le partenaire qui a
+// apporté le dossier. Chaque mot tapé doit se retrouver quelque part, pas
+// forcément dans le même champ : « fiona fondjo » trouve « FONDJO Fiona ».
+function motsRecherche(texte) {
+  return String(texte || "").split(/\s+/).map(cleComparaison).filter(Boolean);
+}
+
+function correspondAuxMots(mots, champs) {
+  if (!mots.length) return true;
+  const cles = (champs || []).filter(Boolean).map(cleComparaison);
+  return mots.every(m => cles.some(c => c.includes(m)));
+}
+
+function dossierCorrespond(d, texte, partners) {
+  const mots = motsRecherche(texte);
+  if (!mots.length) return true;
+  const p = (partners || []).find(x => x.id === d.partnerId);
+  return correspondAuxMots(mots, [
+    d.clientFirstName, d.clientLastName, d.coClientFirstName, d.coClientLastName,
+    d.clientPhone, d.coClientPhone,
+    p && p.firstName, p && p.name, p && p.company,
+  ]);
+}
+
+function partenaireCorrespond(p, texte) {
+  const mots = motsRecherche(texte);
+  if (!mots.length) return true;
+  return correspondAuxMots(mots, [
+    p.firstName, p.name, p.company, p.ville, p.postalCode, p.email, p.telephone,
+  ]);
+}
+
 function detecterDoublon(decl) {
   if (!_colorDataRef) return { niveau: null, messages: [], partenaires: [] };
   const messages = [];
@@ -1955,6 +1995,124 @@ function exportPartnersCsv(partners) {
   downloadCsv(`frangola-adp-partenaires-${new Date().toISOString().slice(0, 10)}.csv`, rows);
 }
 
+
+// ─── L'habillage saisonnier ─────────────────────────────────────────────
+// Un portail B2B est austère par nature : on vient y déposer des pièces et
+// vérifier ce qu'on va toucher. Un peu de décor fin octobre et en décembre ne
+// coûte rien et fait sourire les quelques personnes qui s'y connectent.
+//
+// Mais le décor s'arrête où commence l'argent. Quatre zones seulement sont
+// habillées — l'en-tête, la ligne d'accueil, le bandeau de challenge et la
+// jauge d'avancement — et aucune ne porte un montant, un statut, une date ou
+// une pièce. Un partenaire qui lit « 1 575 € » de travers à cause d'un fond
+// orange, c'est un appel désagréable et une confiance en moins.
+const THEMES_SAISON = [
+  { id: "halloween", nom: "Halloween", debut: "10-24", fin: "11-02",
+    accroche: "La chasse est ouverte." },
+  { id: "noel", nom: "Noël et Nouvel An", debut: "12-01", fin: "01-06",
+    accroche: "Belles fêtes de fin d'année." },
+];
+
+const SAISON_DEFAUT = {
+  actif: true,
+  // L'espace admin reste sobre par défaut : c'est un poste de travail, pas
+  // une vitrine. Frangola l'allume si elle veut.
+  admin: false,
+  themes: {
+    halloween: { actif: true, debut: "10-24", fin: "11-02" },
+    noel: { actif: true, debut: "12-01", fin: "01-06" },
+  },
+};
+
+function reglagesSaison(settings) {
+  const brut = (settings && settings.saison) || {};
+  const themes = {};
+  for (const t of THEMES_SAISON) {
+    const r = (brut.themes || {})[t.id] || {};
+    themes[t.id] = {
+      actif: r.actif !== false,
+      debut: jourValide(r.debut) ? r.debut : t.debut,
+      fin: jourValide(r.fin) ? r.fin : t.fin,
+    };
+  }
+  return { actif: brut.actif !== false, admin: brut.admin === true, themes };
+}
+
+// « MM-JJ », et un jour qui existe : un 02-31 saisi à la main fermerait la
+// fenêtre sans rien dire.
+function jourValide(mmjj) {
+  if (typeof mmjj !== "string" || !/^\d{2}-\d{2}$/.test(mmjj)) return false;
+  const m = Number(mmjj.slice(0, 2)), j = Number(mmjj.slice(3, 5));
+  if (m < 1 || m > 12 || j < 1) return false;
+  // 2024 est bissextile : un 29 février reste une date possible.
+  return j <= new Date(2024, m, 0).getDate();
+}
+
+// Une fenêtre peut enjamber le 1er janvier (1er décembre → 6 janvier).
+// Comparer les « MM-JJ » à plat la laisserait fermée du 2 janvier au
+// 30 novembre, c'est-à-dire tout le temps sauf jamais.
+function dansLaFenetre(debut, fin, jour) {
+  if (debut <= fin) return jour >= debut && jour <= fin;
+  return jour >= debut || jour <= fin;
+}
+
+function jourDeLAnnee(maintenant) {
+  const d = new Date(maintenant);
+  return String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+function themeSaisonPar(id) {
+  return THEMES_SAISON.find(t => t.id === id) || null;
+}
+
+// Le thème que les dates désignent aujourd'hui, d'après le réglage partagé.
+function themeSaisonActif(settings, maintenant = Date.now()) {
+  const reg = reglagesSaison(settings);
+  if (!reg.actif) return null;
+  const jour = jourDeLAnnee(maintenant);
+  for (const t of THEMES_SAISON) {
+    const r = reg.themes[t.id];
+    if (r && r.actif && dansLaFenetre(r.debut, r.fin, jour)) return t.id;
+  }
+  return null;
+}
+
+// Deux interrupteurs locaux à cet ordinateur, qui n'ont pas à voyager dans
+// les données : l'aperçu forcé, pour que Frangola voie le thème hors saison
+// sans l'imposer à personne, et le refus d'un partenaire qui n'aime pas ça.
+// Un outil de travail n'impose pas sa bonne humeur.
+const CLE_SAISON_APERCU = "adp:saisonApercu";
+const CLE_SAISON_REFUS = "adp:saisonRefus";
+
+function lireApercuSaison() {
+  try { return localStorage.getItem(CLE_SAISON_APERCU) || "auto"; } catch (e) { return "auto"; }
+}
+function ecrireApercuSaison(v) {
+  try { localStorage.setItem(CLE_SAISON_APERCU, v || "auto"); } catch (e) { /* ignore */ }
+}
+function lireRefusSaison() {
+  try { return localStorage.getItem(CLE_SAISON_REFUS) === "1"; } catch (e) { return false; }
+}
+function ecrireRefusSaison(v) {
+  try { localStorage.setItem(CLE_SAISON_REFUS, v ? "1" : "0"); } catch (e) { /* ignore */ }
+}
+
+// Ce que l'écran porte vraiment, une fois les trois sources arbitrées :
+// le refus ferme tout, l'aperçu l'emporte ensuite (c'est un outil de test),
+// et à défaut ce sont les dates qui décident.
+function saisonAffichee(settings, options) {
+  const o = options || {};
+  if (o.refus) return null;
+  const ap = o.apercu || "auto";
+  if (ap === "aucun") return null;
+  if (ap !== "auto") return themeSaisonPar(ap) ? ap : null;
+  return themeSaisonActif(settings, o.maintenant === undefined ? Date.now() : o.maintenant);
+}
+
+// Le thème courant, offert à tout l'écran : null = la charte Frangola.
+const SaisonCtx = createContext(null);
+function useSaison() { return useContext(SaisonCtx); }
+
 const BRAND_STYLES = `
 @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap');
 /* Mode discret : les graphiques n'ont pas de point de passage commun où
@@ -1996,6 +2154,54 @@ input, select, textarea{ font-size:16px; }
   input:not([type=checkbox]):not([type=radio]), select, textarea{ font-size:16px !important; }
 }
 
+
+/* ─── Habillage saisonnier ───────────────────────────────────────────────
+   Tout le décor passe par ces règles, et par rien d'autre. Elles ne visent
+   que des classes posées exprès : .fa-entete, .fa-accroche, .fa-challenge,
+   .fa-avancement et les pièces de la jauge. Aucune ne peut atteindre un
+   montant, un statut, une date ou une pièce — c'est la garantie, et elle
+   tient par construction, pas par vigilance. */
+[data-saison="halloween"]{ --sa-fond:#241A33; --sa-vif:#E8622C; --sa-texte:#B8431A; --sa-piste:#F1EDE6; }
+[data-saison="noel"]{ --sa-fond:#14402C; --sa-vif:#C8352E; --sa-texte:#9A2820; --sa-piste:#EDF1EE; }
+
+[data-saison] .fa-entete{ background-color:var(--sa-fond) !important; border-bottom-color:transparent !important; position:relative; }
+[data-saison="halloween"] .fa-entete{
+  background-image:url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80' fill='none'%3E%3Cg stroke='%23ffffff' stroke-opacity='.22' stroke-width='1.1'%3E%3Cpath d='M0 0 L96 64 M0 0 L74 74 M0 0 L46 86 M0 0 L104 40 M0 0 L112 16'/%3E%3Cpath d='M22 4 C18 14 13 19 4 22'/%3E%3Cpath d='M44 8 C36 28 26 38 7 45'/%3E%3Cpath d='M68 14 C56 42 41 56 12 68'/%3E%3Cpath d='M94 22 C78 58 57 74 20 88'/%3E%3C/g%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:left -4px top -10px; }
+[data-saison] .fa-entete .fa-navy,
+[data-saison] .fa-entete strong{ color:#fff !important; }
+[data-saison] .fa-entete .fa-teal-text{ color:var(--sa-vif) !important; }
+[data-saison] .fa-entete .text-gray-500,
+[data-saison] .fa-entete .text-gray-400{ color:rgba(255,255,255,.72) !important; }
+[data-saison] .fa-entete .hover\\:fa-teal-text:hover{ color:var(--fa-gold) !important; }
+
+/* Les coulures sous l'en-tête : dessinées en fond, elles ne prennent aucune
+   place dans le flux et ne peuvent donc rien décaler. */
+[data-saison] .fa-coulures{ height:11px; background-repeat:repeat-x; background-position:top left; }
+[data-saison="halloween"] .fa-coulures{
+  background-image:url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='11'%3E%3Cg fill='%23241A33'%3E%3Crect width='300' height='4'/%3E%3Cpath d='M12 0h12v5a6 6 0 0 1-12 0z'/%3E%3Cpath d='M52 0h8v3a4 4 0 0 1-8 0z'/%3E%3Cpath d='M90 0h14v6a7 7 0 0 1-14 0z'/%3E%3Cpath d='M134 0h9v3.5a4.5 4.5 0 0 1-9 0z'/%3E%3Cpath d='M172 0h11v4.5a5.5 5.5 0 0 1-11 0z'/%3E%3Cpath d='M210 0h7v2.5a3.5 3.5 0 0 1-7 0z'/%3E%3Cpath d='M246 0h13v5.5a6.5 6.5 0 0 1-13 0z'/%3E%3Cpath d='M282 0h9v3a4.5 4.5 0 0 1-9 0z'/%3E%3C/g%3E%3C/svg%3E"); }
+[data-saison="noel"] .fa-coulures{
+  background-image:url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='11'%3E%3Cg fill='%2314402C'%3E%3Crect width='300' height='4'/%3E%3Cpath d='M12 0h12v5a6 6 0 0 1-12 0z'/%3E%3Cpath d='M52 0h8v3a4 4 0 0 1-8 0z'/%3E%3Cpath d='M90 0h14v6a7 7 0 0 1-14 0z'/%3E%3Cpath d='M134 0h9v3.5a4.5 4.5 0 0 1-9 0z'/%3E%3Cpath d='M172 0h11v4.5a5.5 5.5 0 0 1-11 0z'/%3E%3Cpath d='M210 0h7v2.5a3.5 3.5 0 0 1-7 0z'/%3E%3Cpath d='M246 0h13v5.5a6.5 6.5 0 0 1-13 0z'/%3E%3Cpath d='M282 0h9v3a4.5 4.5 0 0 1-9 0z'/%3E%3C/g%3E%3C/svg%3E"); }
+
+[data-saison] .fa-challenge{ background:var(--sa-fond) !important; }
+[data-saison] .fa-challenge .fa-navy,
+[data-saison] .fa-challenge strong{ color:#fff !important; }
+[data-saison] .fa-challenge .fa-titre-challenge{ color:var(--fa-gold) !important; }
+[data-saison] .fa-challenge .text-teal-900\\/70,
+[data-saison] .fa-challenge .text-teal-900\\/60{ color:rgba(255,255,255,.75) !important; }
+[data-saison] .fa-challenge .fa-bg-teal{ background:var(--sa-vif) !important; }
+[data-saison] .fa-challenge .bg-white\\/60{ background:rgba(255,255,255,.18) !important; }
+[data-saison] .fa-challenge .bg-white\\/70{ background:rgba(255,255,255,.1) !important; }
+
+[data-saison] .fa-avancement{ color:var(--sa-texte) !important; }
+[data-saison] .fa-etape-piste{ background:var(--sa-piste) !important; }
+[data-saison] .fa-etape-faite{ background:var(--sa-vif) !important; border-color:var(--sa-vif) !important; }
+[data-saison] .fa-etape-barre{ background:var(--sa-vif) !important; }
+[data-saison] .fa-etape-ici{ box-shadow:0 0 0 4px var(--fa-gold); }
+
+/* Le décor ne s'imprime pas et ne s'anime pas pour qui ne le souhaite pas. */
+@media print{ [data-saison] .fa-coulures, [data-saison] .fa-pendu{ display:none !important; } }
+
 /* Confort mobile : cibles tactiles plus généreuses pour les petits boutons texte */
 .fa-tap{ padding-top:8px; padding-bottom:8px; min-height:36px; display:inline-flex; align-items:center; }
 @media (max-width: 639px){
@@ -2026,11 +2232,122 @@ function SunburstLogo({ size = 34 }) {
   );
 }
 
+
+// La citrouille et le sapin, dessinés plutôt qu'en emoji : un emoji change de
+// tête selon le système et jure avec le reste.
+function MarqueSaison({ saison, size = 30 }) {
+  if (saison === "halloween") {
+    return (
+      <svg width={size} height={size} viewBox="0 0 28 28" fill="none" aria-hidden="true" className="shrink-0">
+        <path d="M14 8.5c-1.3 0-2.2.5-2.8 1.2-.7-.5-1.5-.8-2.4-.8C5.9 8.9 3.6 11.9 3.6 16.4S5.9 23.9 8.8 23.9c.9 0 1.7-.3 2.4-.8.6.7 1.5 1.2 2.8 1.2s2.2-.5 2.8-1.2c.7.5 1.5.8 2.4.8 2.9 0 5.2-3 5.2-7.5s-2.3-7.5-5.2-7.5c-.9 0-1.7.3-2.4.8-.6-.7-1.5-1.2-2.8-1.2Z" fill="#E8622C" />
+        <path d="M14 8.5V4.9c0-1.1.9-2 2-2" stroke="#8FBF4D" strokeWidth="2" strokeLinecap="round" />
+        <path d="M10.4 14.6h3.2l-1.6 2.9z" fill="#241A33" />
+        <path d="M15.6 14.6h3.2l-1.6 2.9z" fill="#241A33" />
+        <path d="M9.9 19.4l1.9 1.4 1.9-1.4 1.9 1.4 1.9-1.4" stroke="#241A33" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      </svg>
+    );
+  }
+  if (saison === "noel") {
+    return (
+      <svg width={size} height={size} viewBox="0 0 28 28" fill="none" aria-hidden="true" className="shrink-0">
+        <path d="M14 3.5 7.5 12h3.6L5.8 19.3h6.9V25h2.6v-5.7h6.9L17 12h3.6z" fill="#1F7A4D" />
+        <rect x="12.6" y="24.2" width="2.8" height="2.6" rx="0.6" fill="#8B5E34" />
+        <circle cx="10.6" cy="15.4" r="1.4" fill="#C8352E" />
+        <circle cx="17.4" cy="17.6" r="1.4" fill="#FCD947" />
+        <circle cx="14" cy="9.6" r="1.2" fill="#C8352E" />
+      </svg>
+    );
+  }
+  return null;
+}
+
+// L'araignée qui pend sous l'en-tête. Elle sort du bandeau, ne reçoit aucun
+// clic et ne s'affiche qu'au large, là où la colonne centrale laisse du vide.
+function PenduSaison({ saison }) {
+  if (saison !== "halloween") return null;
+  return (
+    <svg width="40" height="78" viewBox="0 0 40 78" fill="none" aria-hidden="true"
+      className="fa-pendu pointer-events-none absolute right-10 top-full hidden lg:block">
+      <path d="M20 0v38" stroke="#241A33" strokeWidth="1.2" />
+      <g stroke="#241A33" strokeWidth="1.6" strokeLinecap="round">
+        <path d="M14 46l-7-5-3 5M14 50l-8 1-2 6M26 46l7-5 3 5M26 50l8 1 2 6M15 54l-5 5M25 54l5 5M16 42l-5-7M24 42l5-7" />
+      </g>
+      <ellipse cx="20" cy="52" rx="7.5" ry="6.5" fill="#241A33" />
+      <circle cx="20" cy="43" r="4.5" fill="#241A33" />
+      <circle cx="18.2" cy="42.4" r="1.25" fill="#FCD947" />
+      <circle cx="21.8" cy="42.4" r="1.25" fill="#FCD947" />
+    </svg>
+  );
+}
+
+// Un jeton de la jauge de challenge : une case par dossier attendu, en
+// citrouille ou en boule selon la saison. Le compte ne change pas, seul son
+// dessin change.
+function JetonSaison({ saison, allume, titre }) {
+  const commun = { width: 26, height: 26, viewBox: "0 0 28 28", fill: "none", className: "shrink-0" };
+  if (saison === "noel") {
+    return (
+      <svg {...commun} role="img" aria-label={titre}><title>{titre}</title>
+        <path d="M12.4 4.6h3.2v2.6h-3.2z" fill={allume ? "#FCD947" : "rgba(255,255,255,.45)"} />
+        <circle cx="14" cy="16.4" r="7.6" fill={allume ? "#C8352E" : "none"}
+          stroke={allume ? "#C8352E" : "rgba(255,255,255,.45)"} strokeWidth="1.5" />
+        {allume && <circle cx="11.4" cy="13.6" r="1.6" fill="rgba(255,255,255,.55)" />}
+      </svg>
+    );
+  }
+  return (
+    <svg {...commun} role="img" aria-label={titre}><title>{titre}</title>
+      <path d="M14 7.5c-1.2 0-2.1.5-2.6 1.1-.7-.5-1.4-.7-2.3-.7C6.4 7.9 4.3 10.7 4.3 15s2.1 7.1 4.8 7.1c.9 0 1.6-.2 2.3-.7.5.6 1.4 1.1 2.6 1.1s2.1-.5 2.6-1.1c.7.5 1.4.7 2.3.7 2.7 0 4.8-2.8 4.8-7.1s-2.1-7.1-4.8-7.1c-.9 0-1.6.2-2.3.7-.5-.6-1.4-1.1-2.6-1.1Z"
+        fill={allume ? "#E8622C" : "none"} stroke={allume ? "#E8622C" : "rgba(255,255,255,.45)"} strokeWidth="1.5" />
+      <path d="M14 7.5V4.1c0-1 .8-1.8 1.8-1.8"
+        stroke={allume ? "#8FBF4D" : "rgba(255,255,255,.45)"} strokeWidth="1.8" strokeLinecap="round" />
+      {allume && <>
+        <path d="M10.6 13.3h3l-1.5 2.7z" fill="#241A33" />
+        <path d="M15.4 13.3h3l-1.5 2.7z" fill="#241A33" />
+        <path d="M10.2 18l1.8 1.3 1.8-1.3 1.8 1.3 1.8-1.3" stroke="#241A33" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      </>}
+    </svg>
+  );
+}
+
 function Logo({ size = "text-2xl", withMark = true }) {
+  const saison = useSaison();
+  const px = size === "text-lg" ? 26 : 34;
   return (
     <div className={`font-display font-semibold ${size} tracking-tight fa-navy flex items-center gap-2`}>
-      {withMark && <SunburstLogo size={size === "text-lg" ? 26 : 34} />}
+      {withMark && (saison
+        ? <MarqueSaison saison={saison} size={px} />
+        : <SunburstLogo size={px} />)}
       <span>Frangola <span className="fa-teal-text">ADP</span></span>
+    </div>
+  );
+}
+
+// La ligne d'accueil, et la seule porte de sortie offerte au partenaire : un
+// outil de travail n'impose pas sa bonne humeur. Masqué, le thème laisse une
+// ligne discrète pour revenir en arrière — sinon le geste serait sans retour.
+function AccrocheSaison({ prenom, saison, refus, onRefus }) {
+  const t = themeSaisonPar(saison);
+  if (!t) return null;
+  if (refus) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-gray-400 mb-4">
+        Habillage de saison masqué.
+        <button onClick={() => onRefus(false)} className="fa-tap fa-teal-text hover:underline font-medium">Le réafficher</button>
+      </div>
+    );
+  }
+  const heure = new Date().getHours();
+  return (
+    <div className="fa-accroche flex items-center gap-2 flex-wrap mb-4">
+      <MarqueSaison saison={saison} size={22} />
+      <span className="font-display font-semibold fa-navy">
+        {heure >= 18 || heure < 5 ? "Bonsoir" : "Bonjour"}{prenom ? ` ${prenom}` : ""}.
+      </span>
+      <span className="text-sm text-gray-500">{t.accroche}</span>
+      <span className="flex-1" />
+      <button onClick={() => onRefus(true)} title="Revenir à l'affichage habituel"
+        className="fa-tap text-xs text-gray-400 hover:text-gray-600">Masquer</button>
     </div>
   );
 }
@@ -2129,11 +2446,11 @@ function Stepper({ status }) {
   return (
     <div>
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs font-semibold fa-teal-text">Avancement du dossier</span>
-        <span className="text-xs font-semibold fa-teal-text">{progress}%</span>
+        <span className="text-xs font-semibold fa-teal-text fa-avancement">Avancement du dossier</span>
+        <span className="text-xs font-semibold fa-teal-text fa-avancement">{progress}%</span>
       </div>
-      <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden mb-3">
-        <div className="h-full fa-bg-teal transition-all" style={{ width: `${progress}%` }} />
+      <div className="w-full h-1.5 bg-gray-100 fa-etape-piste rounded-full overflow-hidden mb-3">
+        <div className="h-full fa-bg-teal fa-etape-barre transition-all" style={{ width: `${progress}%` }} />
       </div>
       {/* Sur téléphone, six libellés côte à côte ne tiennent pas : 64 px par
           étape font 384 px, l'écran en offre 350 une fois les marges ôtées.
@@ -2143,19 +2460,19 @@ function Stepper({ status }) {
         <div key={s} className="flex items-center flex-1 last:flex-none min-w-0">
           <div className="flex flex-col items-center gap-1 min-w-0 sm:min-w-[64px]">
             <div className={`w-6 h-6 sm:w-7 sm:h-7 shrink-0 rounded-full flex items-center justify-center text-[11px] sm:text-xs font-bold border-2
-              ${i === idx ? "ring-2 ring-teal-200 sm:ring-0" : ""}
-              ${i <= idx ? "bg-teal-700 border-teal-700 text-white" : "bg-white border-gray-300 text-gray-400"}`}>
+              ${i === idx ? "ring-2 ring-teal-200 sm:ring-0 fa-etape-ici" : ""}
+              ${i <= idx ? "bg-teal-700 border-teal-700 text-white fa-etape-faite" : "bg-white border-gray-300 text-gray-400"}`}>
               {i < idx ? <Check size={14} /> : i + 1}
             </div>
-            <span className={`hidden sm:block text-[10px] text-center leading-tight ${i <= idx ? "fa-teal-text font-medium" : "text-gray-400"}`}>{s}</span>
+            <span className={`hidden sm:block text-[10px] text-center leading-tight ${i <= idx ? "fa-teal-text fa-avancement font-medium" : "text-gray-400"}`}>{s}</span>
           </div>
           {i < STATUS_STEPS.length - 1 && (
-            <div className={`h-0.5 flex-1 mx-0.5 sm:mx-1 min-w-[6px] ${i < idx ? "bg-teal-700" : "bg-gray-200"}`} />
+            <div className={`h-0.5 flex-1 mx-0.5 sm:mx-1 min-w-[6px] ${i < idx ? "bg-teal-700 fa-etape-barre" : "bg-gray-200"}`} />
           )}
         </div>
       ))}
       </div>
-      <div className="sm:hidden text-xs text-center mt-2 fa-teal-text font-medium">
+      <div className="sm:hidden text-xs text-center mt-2 fa-teal-text fa-avancement font-medium">
         Étape {Math.min(idx, STATUS_STEPS.length - 1) + 1} sur {STATUS_STEPS.length} · {STATUS_STEPS[Math.max(0, Math.min(idx, STATUS_STEPS.length - 1))]}
       </div>
     </div>
@@ -2213,6 +2530,20 @@ export default function App() {
 
   const [loadError, setLoadError] = useState(false);
   useEffect(() => { if (data) setColorDataRef(data); }, [data]);
+
+  // ── Habillage saisonnier ──────────────────────────────────────────────
+  // Les dates décident, l'aperçu local permet de regarder hors saison, et le
+  // refus d'un partenaire ferme le décor pour lui seul. Les deux derniers
+  // vivent dans le navigateur : ce sont des réglages de confort propres à un
+  // ordinateur, ils n'ont pas à voyager dans les données.
+  const [apercuSaison, setApercuSaison] = useState(lireApercuSaison);
+  const [refusSaison, setRefusSaison] = useState(lireRefusSaison);
+  const majApercuSaison = (v) => { setApercuSaison(v); ecrireApercuSaison(v); };
+  const majRefusSaison = (v) => { setRefusSaison(v); ecrireRefusSaison(v); };
+  // Le refus n'entre pas ici : l'accroche doit rester capable de proposer un
+  // retour en arrière, et pour cela elle a besoin de savoir qu'une saison est
+  // en cours même quand elle est masquée.
+  const saison = saisonAffichee(data && data.settings, { apercu: apercuSaison });
 
   // ── Mode démonstration ────────────────────────────────────────────────────
   // Les vraies données sont mises de côté et remplacées par le jeu fictif.
@@ -2872,6 +3203,23 @@ export default function App() {
   // Challenge de bienvenue : un réglage unique pour tout le monde, et une
   // inscription par partenaire. Cocher une case, c'est lancer une course —
   // donc le journal en garde trace, comme de la remise du cadeau.
+  // Le réglage partagé : il voyage dans les données, puisqu'il décide de ce
+  // que voient les partenaires. Les deux interrupteurs locaux (aperçu, refus)
+  // restent, eux, dans le navigateur.
+  async function majSaison(patch) {
+    await mutateData(base => {
+      const avant = reglagesSaison(base.settings);
+      const themes = { ...avant.themes };
+      for (const [id, t] of Object.entries(patch.themes || {})) {
+        themes[id] = { ...(themes[id] || {}), ...t };
+      }
+      return {
+        ...base,
+        settings: { ...base.settings, saison: { ...avant, ...patch, themes } },
+      };
+    });
+  }
+
   async function majChallengeBienvenue(fields) {
     await mutateData(base => ({
       ...base,
@@ -3664,6 +4012,7 @@ export default function App() {
             </div>
             <PartnerDashboard
               key={cible.id + (ed ? "-ed" : "-ro")}
+              saison={saison} refusSaison={refusSaison} onRefusSaison={majRefusSaison}
               partner={cible}
               dossiers={data.dossiers.filter(d => d.partnerId === cible.id)}
               challenges={challengesDe(data)}
@@ -3687,6 +4036,7 @@ export default function App() {
       })()}
       {view === "partnerDash" && currentPartner && (
         <PartnerDashboard
+          saison={saison} refusSaison={refusSaison} onRefusSaison={majRefusSaison}
           partner={data.partners.find(p => p.id === currentPartner.id) || currentPartner}
           dossiers={data.dossiers.filter(d => d.partnerId === currentPartner.id)}
           challenges={challengesDe(data)}
@@ -3714,6 +4064,7 @@ export default function App() {
         }
         return (
         <AdminDashboard
+          saison={saison} apercuSaison={apercuSaison} onApercuSaison={majApercuSaison} onMajSaison={majSaison}
           data={data}
           modeDemo={modeDemo}
           onBasculerDemo={basculerDemo}
@@ -3789,6 +4140,7 @@ export default function App() {
       })()}
       {view === "adminDash" && (
         <AdminDashboard
+          saison={saison} apercuSaison={apercuSaison} onApercuSaison={majApercuSaison} onMajSaison={majSaison}
           data={data}
           modeDemo={modeDemo}
           onBasculerDemo={basculerDemo}
@@ -5092,6 +5444,7 @@ function BanniereBoost({ challenge, partner, dossiers, debut, fin, detail, setDe
 
 function BanniereChallenge({ challenge, partner, dossiers }) {
   const [detail, setDetail] = useState(false);
+  const saison = useSaison();
   if (!challengeVisible(challenge)) return null;
   const debut = new Date(challenge.debut + "T00:00:00").getTime();
   const fin = new Date(challenge.fin + "T23:59:59").getTime();
@@ -5117,10 +5470,11 @@ function BanniereChallenge({ challenge, partner, dossiers }) {
   const dateFin = new Date(fin).toLocaleDateString("fr-FR", { day: "numeric", month: "long" });
 
   return (
-    <div className={`rounded-2xl p-5 mb-6 ${gagne ? "bg-emerald-50 border border-emerald-300" : "fa-bg-gold"}`}>
+    <div className={`rounded-2xl p-5 mb-6 ${gagne ? "bg-emerald-50 border border-emerald-300" : (saison ? "fa-challenge" : "fa-bg-gold")}`}>
       <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
-        <span className="font-display font-semibold fa-navy">
-          {gagne ? "🏆 Objectif atteint !" : "🎯 " + (challenge.titre || "Challenge en cours")}
+        <span className="font-display font-semibold fa-navy fa-titre-challenge flex items-center gap-2">
+          {!gagne && saison && <MarqueSaison saison={saison} size={20} />}
+          {gagne ? "🏆 Objectif atteint !" : (saison ? "" : "🎯 ") + (challenge.titre || "Challenge en cours")}
         </span>
         <span className="text-xs text-teal-900/70">
           jusqu'au {dateFin} · {jours} jour{jours > 1 ? "s" : ""} restant{jours > 1 ? "s" : ""}
@@ -5136,7 +5490,14 @@ function BanniereChallenge({ challenge, partner, dossiers }) {
       {/* Une case par dossier attendu : d'un coup d'œil on voit le chemin
           parcouru et ce qu'il reste, mieux qu'un pourcentage. Au-delà de dix
           on repasse à une barre, sinon la ligne devient illisible. */}
-      {objectif <= 10 ? (
+      {objectif <= 10 && saison && !gagne ? (
+        <div className="flex gap-1.5 flex-wrap items-center">
+          {Array.from({ length: objectif }, (_, i) => (
+            <JetonSaison key={i} saison={saison} allume={i < n}
+              titre={i < n ? `Dossier ${i + 1} souscrit` : "À souscrire"} />
+          ))}
+        </div>
+      ) : objectif <= 10 ? (
         <div className="flex gap-1.5 flex-wrap">
           {Array.from({ length: objectif }, (_, i) => (
             <div key={i} title={i < n ? `Dossier ${i + 1} souscrit` : "À souscrire"}
@@ -5178,7 +5539,7 @@ function BanniereChallenge({ challenge, partner, dossiers }) {
   );
 }
 
-function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
+function PartnerDashboard({ saison: saisonBrute, refusSaison, onRefusSaison, partner, dossiers, challenges, bienvenue, onLogout, onCreateDossier, onDeclarerParrainage, onAddExtraDoc, onUploadDocToSlot, onRemoveDoc, onRemoveExtraDoc, onUploadRib, onUploadFacture, onSetGoal, onMarkMessageRead, onUpdateDossierClient, busy }) {
   const [tab, setTabRaw] = useState(() => getStoredTab("adp:partnerTab", "encours"));
   const setTab = (t) => { setTabRaw(t); setStoredTab("adp:partnerTab", t); };
   const [showForm, setShowForm] = useState(false);
@@ -5280,9 +5641,13 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
     setEditingGoal(false);
   }
 
+  // Le refus du partenaire ferme le décor pour lui seul, sur cet ordinateur.
+  const saison = refusSaison ? null : (saisonBrute || null);
   return (
-    <div className="min-h-screen">
-      <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
+    <SaisonCtx.Provider value={saison}>
+    <div className="min-h-screen" data-saison={saison || undefined}>
+      <header className="fa-entete px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
+        <PenduSaison saison={saison} />
         <Logo size="text-lg" />
         <div className="flex items-center gap-4">
           <div className="text-right hidden sm:block">
@@ -5301,6 +5666,7 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
           <button onClick={onLogout} className="text-gray-400 hover:text-red-600"><LogOut size={18} /></button>
         </div>
       </header>
+      {saison && <div className="fa-coulures" aria-hidden="true" />}
 
       {/* Marge basse sur téléphone : la barre d'onglets fixe ne doit jamais
           recouvrir le dernier élément de la page. */}
@@ -5385,6 +5751,7 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
           );
         })()}
 
+        <AccrocheSaison prenom={partner.firstName} saison={saisonBrute} refus={refusSaison} onRefus={onRefusSaison} />
         <BanniereBienvenue bienvenue={bienvenue} dossiers={dossiers} />
         <BannieresChallenges challenges={challenges} partner={partner} dossiers={dossiers} />
 
@@ -6281,6 +6648,7 @@ function PartnerDashboard({ partner, dossiers, challenges, bienvenue, onLogout, 
         )}
       </main>
     </div>
+    </SaisonCtx.Provider>
   );
 }
 
@@ -6378,7 +6746,7 @@ function MandataireDashboard({ mandataire, data, onLogout }) {
 
   return (
     <div className="min-h-screen">
-      <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
+      <header className="fa-entete px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
           <span className="text-white text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: COMMERCIAL_COLORS[mandataire.name] }}>{commercialLabel(mandataire.name)}</span>
@@ -16161,7 +16529,125 @@ function ConnexionsPartenaires({ partners }) {
   );
 }
 
-function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, onFusionnerPartenaires, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onRattacherParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+
+// Un jour « MM-JJ » rendu lisible : « 10-24 » → « 24 octobre ».
+const MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin",
+  "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+function libelleJour(mmjj) {
+  if (!jourValide(mmjj)) return "—";
+  const m = Number(mmjj.slice(0, 2)), j = Number(mmjj.slice(3, 5));
+  return `${j === 1 ? "1er" : j} ${MOIS_FR[m - 1]}`;
+}
+
+function ReglagesSaison({ data, apercu, onApercu, onMaj, canEdit, busy }) {
+  const reg = reglagesSaison(data.settings);
+  // Ce que les dates désignent vraiment, indépendamment de l'aperçu local :
+  // c'est ce que voient les partenaires en ce moment.
+  const reel = themeSaisonActif(data.settings);
+  const vu = saisonAffichee(data.settings, { apercu });
+  const majTheme = (id, patch) => onMaj({ themes: { [id]: patch } });
+  // Le sélecteur de date porte une année de façade : seule la partie MM-JJ
+  // est conservée. 2000 est bissextile, un 29 février reste donc saisissable.
+  const champJour = (id, cle, valeur, libelle) => (
+    <label className="flex-1 min-w-[8rem]">
+      <span className="block text-[10px] uppercase tracking-wide text-gray-400 mb-1">{libelle}</span>
+      <input type="date" value={`2000-${valeur}`} disabled={!canEdit || busy}
+        onChange={e => { const v = (e.target.value || "").slice(5); if (jourValide(v)) majTheme(id, { [cle]: v }); }}
+        className="w-full border border-gray-300 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-50" />
+    </label>
+  );
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
+        <h3 className="font-display font-semibold fa-navy flex items-center gap-2">
+          <MarqueSaison saison={reel || "halloween"} size={22} /> Thème saisonnier
+        </h3>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={reg.actif} disabled={!canEdit || busy}
+            onChange={e => onMaj({ actif: e.target.checked })}
+            className="rounded border-gray-300 w-4 h-4" />
+          <span className="font-medium fa-navy">Activé</span>
+        </label>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        Un peu de décor fin octobre et en décembre dans l'espace partenaire. Les dates l'allument
+        et l'éteignent toutes seules. Rien n'habille jamais un montant, un statut, une date ou une pièce.
+      </p>
+
+      <div className={`rounded-xl px-4 py-3 mb-4 text-sm ${reel ? "fa-bg-offwhite" : "bg-gray-50"}`}>
+        {reel
+          ? <>Vos partenaires voient en ce moment le thème <strong className="fa-navy">{themeSaisonPar(reel).nom}</strong>,
+              jusqu'au {libelleJour(reg.themes[reel].fin)}.</>
+          : <span className="text-gray-500">Aucun thème en ce moment : vos partenaires voient la charte Frangola.</span>}
+      </div>
+
+      <div className="space-y-2.5">
+        {THEMES_SAISON.map(t => {
+          const r = reg.themes[t.id];
+          return (
+            <div key={t.id} className={`border rounded-xl p-3.5 ${reel === t.id ? "border-teal-300 bg-teal-50/40" : "border-gray-200"}`}>
+              <div className="flex items-center gap-3 flex-wrap">
+                <MarqueSaison saison={t.id} size={26} />
+                <span className="min-w-0">
+                  <span className="block text-sm font-bold fa-navy">{t.nom}</span>
+                  <span className="block text-xs text-gray-500">
+                    du {libelleJour(r.debut)} au {libelleJour(r.fin)}
+                  </span>
+                </span>
+                <span className="flex-1" />
+                <label className="flex items-center gap-2 text-xs">
+                  <input type="checkbox" checked={r.actif} disabled={!canEdit || busy || !reg.actif}
+                    onChange={e => majTheme(t.id, { actif: e.target.checked })}
+                    className="rounded border-gray-300 w-4 h-4" />
+                  <span className="font-medium text-gray-600">{r.actif ? "Activé" : "Désactivé"}</span>
+                </label>
+              </div>
+              {canEdit && (
+                <div className="flex gap-2 flex-wrap mt-3">
+                  {champJour(t.id, "debut", r.debut, "Début")}
+                  {champJour(t.id, "fin", r.fin, "Fin")}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-3 mt-4">
+        <label className="block">
+          <span className="block text-xs font-semibold text-gray-500 mb-1">Forcer un thème — sur cet ordinateur seulement</span>
+          <select value={apercu} onChange={e => onApercu(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500">
+            <option value="auto">Suivre les dates (normal)</option>
+            {THEMES_SAISON.map(t => <option key={t.id} value={t.id}>{t.nom}</option>)}
+            <option value="aucun">Aucun thème</option>
+          </select>
+          <span className="block text-[11px] text-gray-400 mt-1">
+            {apercu === "auto"
+              ? "Vos partenaires et vous voyez la même chose."
+              : <>Aperçu : vous voyez {vu ? themeSaisonPar(vu).nom : "aucun thème"}, vos partenaires continuent de suivre les dates.</>}
+          </span>
+        </label>
+        <label className="flex items-start gap-2.5 text-sm bg-gray-50 rounded-lg px-3.5 py-3">
+          <input type="checkbox" checked={reg.admin} disabled={!canEdit || busy}
+            onChange={e => onMaj({ admin: e.target.checked })}
+            className="rounded border-gray-300 w-4 h-4 mt-0.5" />
+          <span>
+            <span className="block font-medium fa-navy">Habiller aussi l'espace admin</span>
+            <span className="block text-xs text-gray-500">Le vôtre et celui de Nelson. Décoché, votre poste de travail reste sobre.</span>
+          </span>
+        </label>
+      </div>
+
+      <p className="text-xs text-gray-400 mt-4">
+        Un partenaire que ça dérange peut masquer l'habillage depuis son espace, pour lui seul.
+      </p>
+    </div>
+  );
+}
+
+function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, onMajSaison, data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, onFusionnerPartenaires, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onRattacherParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -16239,6 +16725,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     { id: "banques", label: "Banques prêteuses", defaut: "banques", fullAdmin: true, rendu: () => <BanquesPanel data={data} onSet={onSetBanques} canEdit={isFullAdmin} busy={busy} /> },
     { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
     { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} expediteur={viewerLabel} telephone={viewerTelephone} /> },
+    { id: "saison", label: "Thème saisonnier", defaut: "journal", fullAdmin: true, rendu: () => <ReglagesSaison data={data} apercu={apercuSaison} onApercu={onApercuSaison} onMaj={onMajSaison} canEdit={isFullAdmin} busy={busy} /> },
     { id: "sauvegardes", label: "Sauvegarde et restauration", defaut: "journal", fullAdmin: true, rendu: () => <SauvegardesPanel onExporter={onExporterSauvegarde} onRestaurer={onRestaurerSauvegarde} onVerifier={onVerifierSauvegarde} busy={busy} /> },
     { id: "connexions", label: "Dernières connexions", defaut: "journal", rendu: () => <BlocConnexions data={data} /> },
     { id: "journal", label: "Journal d'activité", defaut: "journal", rendu: () => <BlocJournal data={data} /> },
@@ -16337,6 +16824,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [showAddPartnerForm, setShowAddPartnerForm] = useState(false);
   const [corbeilleSearch, setCorbeilleSearch] = useState("");
     const [partnerSearch, setPartnerSearch] = useState("");
+  const enRecherchePartenaire = partnerSearch.trim().length > 0;
   const [corbeilleMandataireSearch, setCorbeilleMandataireSearch] = useState("");
   const [confirmDeleteMandataireId, setConfirmDeleteMandataireId] = useState(null);
   const [contratASupprimer, setContratASupprimer] = useState(null);
@@ -16365,6 +16853,8 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
   const [dossierSearch, setDossierSearch] = useState("");
   const [dossierFilter, setDossierFilter] = useState("tous");
   const [commercialFilter, setCommercialFilter] = useState("tous");
+  // Dès qu'il y a du texte, l'écran Dossiers passe en mode recherche.
+  const enRecherche = dossierSearch.trim().length > 0;
   // La fusion en cours : l'id de la fiche depuis laquelle on a ouvert le
   // panneau, et celle qu'on a désignée comme doublon.
   const [fusionDe, setFusionDe] = useState(null);
@@ -16722,10 +17212,14 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
     setCopiedId(id); setTimeout(() => setCopiedId(null), 1500);
   }
 
+  // L'espace admin reste sobre sauf si Frangola l'allume : c'est un poste de
+  // travail, pas une vitrine. Le réglage est partagé, l'interrupteur aussi.
+  const saison = reglagesSaison(data.settings).admin ? (saisonGlobale || null) : null;
   return (
+    <SaisonCtx.Provider value={saison}>
     <NavAdmin.Provider value={navAdmin}>
-    <div className={`min-h-screen ${discret ? "mode-discret" : ""} ${modeDemo ? "mode-demo" : ""}`}>
-      <header className="px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
+    <div className={`min-h-screen ${discret ? "mode-discret" : ""} ${modeDemo ? "mode-demo" : ""}`} data-saison={saison || undefined}>
+      <header className="fa-entete px-6 py-4 flex items-center justify-between border-b border-gray-100 bg-white">
         <Logo size="text-lg" />
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-500 hidden sm:inline">Connecté : <strong className="fa-navy">{viewerLabel}</strong></span>
@@ -16738,6 +17232,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
           <button onClick={onLogout} className="text-gray-400 hover:text-red-600"><LogOut size={18} /></button>
         </div>
       </header>
+      {saison && <div className="fa-coulures" aria-hidden="true" />}
 
       <main className="max-w-5xl mx-auto px-6 py-8">
         {(() => {
@@ -17171,6 +17666,10 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
         {tab === "dossiers" && (
           <div className="space-y-4">
             {(() => {
+              // Ce bloc grandit avec le nombre de dossiers en retard : à 22
+              // lignes il remplit l'écran. Pendant une recherche il n'a rien
+              // à y faire, on cherche quelqu'un de précis.
+              if (enRecherche) return null;
               const priorityItems = data.dossiers
                 .map(d => ({ d, reasons: actionReasons(d) }))
                 .filter(x => x.reasons.length > 0)
@@ -17193,6 +17692,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </div>
               );
             })()}
+            {!enRecherche && (
             <div className="flex gap-1.5 mb-1 overflow-x-auto pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible">
               {[
                 ["tous", "Tous", liveDossiers.length],
@@ -17215,46 +17715,64 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </button>
               ))}
             </div>
-            <div className="flex items-center flex-wrap gap-2 mb-2">
+            )}
+            {/* La barre de recherche. En mode recherche elle prend le haut de
+                l'écran, annonce ce qu'elle a trouvé et offre une sortie
+                visible : la croix seule se rate, et on se demande alors
+                pourquoi l'écran est vide. */}
+            <div className={`flex items-center flex-wrap gap-2 mb-2 ${enRecherche ? "bg-white border-2 border-teal-500 rounded-xl p-2.5" : ""}`}>
               <div className="relative flex-1 min-w-[12rem]">
                 <input value={dossierSearch} onChange={e => setDossierSearch(e.target.value)}
-                  placeholder="Rechercher un client par nom ou prénom…"
+                  onKeyDown={e => { if (e.key === "Escape") { setDossierSearch(""); e.currentTarget.blur(); } }}
+                  placeholder="Rechercher : client, co-emprunteur, téléphone, partenaire…"
                   className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
                 {dossierSearch && (
-                  <button onClick={() => setDossierSearch("")}
+                  <button onClick={() => setDossierSearch("")} title="Effacer (Échap)"
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
                     <X size={15} />
                   </button>
                 )}
               </div>
-              <select value={commercialFilter} onChange={e => setCommercialFilter(e.target.value)}
-                style={commercialFilter !== "tous" ? { backgroundColor: COMMERCIAL_COLORS[commercialFilter], color: "#fff" } : {}}
-                className="text-sm font-medium border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
-                <option value="tous">Tous les commerciaux</option>
-                {COMMERCIAUX.map(c => <option key={c} value={c}>{commercialLabel(c)}</option>)}
-              </select>
-              <button onClick={() => exportDossiersCsv(data.dossiers, data.partners)}
-                className="text-sm font-medium bg-white border border-gray-200 hover:border-teal-300 fa-teal-text px-4 py-2.5 rounded-lg transition whitespace-nowrap">
-                Exporter CSV
-              </button>
+              {enRecherche ? (
+                <button onClick={() => setDossierSearch("")}
+                  className="fa-tap text-sm font-bold fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition whitespace-nowrap">
+                  Quitter la recherche
+                </button>
+              ) : (<>
+                <select value={commercialFilter} onChange={e => setCommercialFilter(e.target.value)}
+                  style={commercialFilter !== "tous" ? { backgroundColor: COMMERCIAL_COLORS[commercialFilter], color: "#fff" } : {}}
+                  className="text-sm font-medium border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                  <option value="tous">Tous les commerciaux</option>
+                  {COMMERCIAUX.map(c => <option key={c} value={c}>{commercialLabel(c)}</option>)}
+                </select>
+                <button onClick={() => exportDossiersCsv(data.dossiers, data.partners)}
+                  className="text-sm font-medium bg-white border border-gray-200 hover:border-teal-300 fa-teal-text px-4 py-2.5 rounded-lg transition whitespace-nowrap">
+                  Exporter CSV
+                </button>
+              </>)}
             </div>
             {data.partners.filter(p => !p.deleted).length === 0 && (
               <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">Aucun partenaire pour l'instant — crée-en un dans l'onglet "Partenaires".</div>
             )}
             {(() => {
-              const searchTerm = dossierSearch.trim().toLowerCase();
+              // Pendant une recherche, la recherche gagne : ni la pastille de
+              // statut laissée il y a dix minutes ni le filtre commercial ne
+              // doivent cacher le client qu'on cherche. Chercher un dossier
+              // qui existe et lire « aucun dossier » est la pire réponse
+              // possible — l'un des deux filtres était resté sans qu'on le
+              // voie. On les met de côté, et on le dit.
               const matchesFilter = (d) => {
-                if (dossierFilter === "tous") return true;
+                if (enRecherche || dossierFilter === "tous") return true;
                 if (dossierFilter === "action") return actionReasons(d).length > 0;
                 if (dossierFilter === "backoffice") return !!alerteBackOffice(d);
                 return d.status === dossierFilter;
               };
-              const matchesSearch = (d) => matchesFilter(d) && (!searchTerm || `${d.clientFirstName} ${d.clientLastName}`.toLowerCase().includes(searchTerm));
+              const matchesSearch = (d) => matchesFilter(d) && dossierCorrespond(d, dossierSearch, data.partners);
               // Le filtre commercial s'applique au dossier, pas au partenaire.
-              const suitLeFiltre = (d) => commercialFilter === "tous" || commercialDuDossier(d, data.partners) === commercialFilter;
+              const suitLeFiltre = (d) => enRecherche || commercialFilter === "tous" || commercialDuDossier(d, data.partners) === commercialFilter;
               const partenaireRetenu = (p) => {
-                if (commercialFilter === "tous") return true;
+                if (enRecherche || commercialFilter === "tous") return true;
                 const siens = data.dossiers.filter(d => d.partnerId === p.id);
                 if (siens.length === 0) return p.commercial === commercialFilter;
                 return siens.some(suitLeFiltre);
@@ -17272,7 +17790,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               const anciens = data.partners
                 .filter(x => x.deleted && partenaireRetenu(x) && data.dossiers.some(d => d.partnerId === x.id))
                 .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
-              if (commercialFilter === "tous" && data.dossiers.some(d => !idsConnus.has(d.partnerId))) {
+              if ((enRecherche || commercialFilter === "tous") && data.dossiers.some(d => !idsConnus.has(d.partnerId))) {
                 anciens.push({ id: "__inconnu__", name: "Partenaire introuvable", firstName: "", deleted: true, _inconnu: true });
               }
               if (anciens.length > 0) deptGroups[POT] = anciens;
@@ -17292,7 +17810,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
               // voit plus rien. Le département disparaît de l'affichage — il
               // reste sur la fiche du partenaire — et le partenaire comme le
               // commercial passent sur la ligne du client.
-              const filterActive = !!searchTerm || dossierFilter !== "tous";
+              const filterActive = enRecherche || dossierFilter !== "tous";
               const lignesDossiers = [];
               for (const deptKey of deptKeys) {
                 for (const p of deptGroups[deptKey]) {
@@ -17303,17 +17821,40 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 }
               }
               lignesDossiers.sort((a, b) => b.d.createdAt - a.d.createdAt);
+              // Ce qu'on a mis de côté pour ne montrer que le résultat :
+              // dit une fois, sinon on cherche pourquoi le compte a changé.
+              const ecartes = !enRecherche ? [] : [
+                dossierFilter !== "tous" ? `filtre « ${dossierFilter === "action" ? "Nécessite une action" : dossierFilter === "backoffice" ? "Back-office à relancer" : dossierFilter} »` : null,
+                commercialFilter !== "tous" ? `commercial « ${commercialLabel(commercialFilter)} »` : null,
+              ].filter(Boolean);
+              const enTeteRecherche = enRecherche && (
+                <div className="flex items-center flex-wrap gap-x-2 gap-y-1 text-xs text-gray-500 -mt-1 mb-1">
+                  <span className="font-bold fa-navy">
+                    {lignesDossiers.length} résultat{lignesDossiers.length > 1 ? "s" : ""} pour « {dossierSearch.trim()} »
+                  </span>
+                  {ecartes.length > 0 && (
+                    <span className="text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+                      {ecartes.join(" et ")} mis de côté
+                    </span>
+                  )}
+                  <span className="text-gray-400">· Échap pour sortir</span>
+                </div>
+              );
               if (lignesDossiers.length === 0) {
-                return (
+                return (<>
+                  {enTeteRecherche}
                   <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">
-                    Aucun dossier ne correspond à ce filtre.
+                    {enRecherche
+                      ? <>Aucun dossier ne correspond à « {dossierSearch.trim()} ».</>
+                      : <>Aucun dossier ne correspond à ce filtre.</>}
                   </div>
-                );
+                </>);
               }
               // Un seul résultat : inutile de réclamer un clic de plus.
               const seulDossier = lignesDossiers.length === 1;
               return (
                 <div className="space-y-2.5">
+                  {enTeteRecherche}
                   {lignesDossiers.map(({ d, p }) => {
                     const cleCarte = "d:" + d.id;
                     const carteOuverte = seulDossier ? !ouverts.has(cleCarte) : ouverts.has(cleCarte);
@@ -17916,13 +18457,18 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
 
         {tab === "partenaires" && (
           <div>
-                        <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onRattacher={onRattacherParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} onAnnuler={onAnnulerParrainage} busy={busy} />
+            {/* Même règle que sur l'écran Dossiers : pendant une recherche,
+                tout ce qui n'est pas le résultat s'efface. Ici c'est encore
+                plus net — registre, contrat type et fiches à compléter
+                repoussaient la liste sous deux écrans de défilement. */}
+            {!enRecherchePartenaire && (<>
+            <RegistreParrainages data={data} onTraiter={onTraiterParrainage} onRattacher={onRattacherParrainage} onTraiterEnLot={onTraiterParrainagesEnLot} onAnnuler={onAnnulerParrainage} busy={busy} />
 
             <ContratTypePanel contrat={data.settings?.contratType} partners={data.partners}
               onUpload={onUploadContratType} canEdit={isFullAdmin} busy={busy} />
+            </>)}
 
-
-            {(() => {
+            {!enRecherchePartenaire && (() => {
               // Les fiches créées depuis une déclaration de parrainage arrivent
               // incomplètes et sans département : sans ce raccourci elles se
               // perdent dans un dossier replié.
@@ -17966,6 +18512,7 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </div>
               );
             })()}
+            {!enRecherchePartenaire && (
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
               <h2 className="font-display text-lg font-semibold fa-navy">Partenaires</h2>
               <div className="flex items-center gap-2">
@@ -17979,8 +18526,9 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
                 </button>
               </div>
             </div>
+            )}
 
-            {showAddPartnerForm && (
+            {!enRecherchePartenaire && showAddPartnerForm && (
             <div className="bg-white border border-gray-200 rounded-2xl p-6 mb-6 shadow-sm">
               <div className="flex items-start justify-between gap-2 mb-4">
                 <h3 className="font-display font-semibold fa-navy flex items-center gap-2"><Landmark size={17} className="fa-teal-text" /> Ajouter un partenaire</h3>
@@ -18070,32 +18618,58 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
             )}
 
             <div className="space-y-3">
-                           <div className="relative mb-2">
-                <input value={partnerSearch} onChange={e => setPartnerSearch(e.target.value)}
-                  placeholder="Rechercher un partenaire, une agence, une ville…"
-                  className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
-                {partnerSearch && (
+              <div className={`flex items-center flex-wrap gap-2 mb-2 ${enRecherchePartenaire ? "bg-white border-2 border-teal-500 rounded-xl p-2.5" : ""}`}>
+                <div className="relative flex-1 min-w-[12rem]">
+                  <input value={partnerSearch} onChange={e => setPartnerSearch(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Escape") { setPartnerSearch(""); e.currentTarget.blur(); } }}
+                    placeholder="Rechercher un partenaire, une agence, une ville…"
+                    className="w-full border border-gray-300 rounded-lg pl-9 pr-8 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">⌕</span>
+                  {partnerSearch && (
+                    <button onClick={() => setPartnerSearch("")} title="Effacer (Échap)"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
+                      <X size={15} />
+                    </button>
+                  )}
+                </div>
+                {enRecherchePartenaire && (
                   <button onClick={() => setPartnerSearch("")}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-600 transition">
-                    <X size={15} />
+                    className="fa-tap text-sm font-bold fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition whitespace-nowrap">
+                    Quitter la recherche
                   </button>
                 )}
               </div>
               {data.partners.filter(p => !p.deleted).length === 0 && <div className="text-center text-gray-400 text-sm py-10">Aucun partenaire pour l'instant.</div>}
+              {enRecherchePartenaire && (() => {
+                const n = data.partners.filter(p => !p.deleted && partenaireCorrespond(p, partnerSearch)).length;
+                return (<>
+                  <div className="flex items-center flex-wrap gap-x-2 text-xs text-gray-500 -mt-1">
+                    <span className="font-bold fa-navy">
+                      {n} résultat{n > 1 ? "s" : ""} pour « {partnerSearch.trim()} »
+                    </span>
+                    <span className="text-gray-400">· Échap pour sortir</span>
+                  </div>
+                  {n === 0 && (
+                    <div className="text-center text-gray-400 text-sm py-16 border border-dashed border-gray-200 rounded-2xl">
+                      Aucun partenaire ne correspond à « {partnerSearch.trim()} ».
+                    </div>
+                  )}
+                </>);
+              })()}
                          {(() => {
-                const q = partnerSearch.trim().toLowerCase();
-                const filtreActif = q.length > 0;
+                const filtreActif = enRecherchePartenaire;
                 const cles = (p) => [p.commercial || "Sans commercial", p.departement || "Sans département"];
-                const vivants = data.partners.filter(p => !p.deleted).filter(p =>
-                  !filtreActif || `${p.firstName || ""} ${p.name || ""} ${p.company || ""} ${p.ville || ""} ${p.email || ""}`.toLowerCase().includes(q)
-                );
+                const vivants = data.partners.filter(p => !p.deleted)
+                  .filter(p => partenaireCorrespond(p, partnerSearch));
                 const tri = vivants.slice().sort((a, b) => {
                   const [ca, da] = cles(a), [cb, db] = cles(b);
                   if (ca !== cb) return ca.localeCompare(cb);
                   if (da !== db) return da.localeCompare(db, undefined, { numeric: true });
                   return (a.name || "").localeCompare(b.name || "");
                 });
+                // En recherche, les dossiers « commercial » et « département »
+                // au-dessus de chaque fiche sont du bruit : on veut la fiche.
+                if (filtreActif) return tri;
                 const lignes = [];
                 let comCourant = null, depCourant = null;
                 for (const p of tri) {
@@ -19750,6 +20324,6 @@ function AdminDashboard({ data, modeDemo, onBasculerDemo, currentAdmin, isFullAd
       </main>
     </div>
     </NavAdmin.Provider>
-
+    </SaisonCtx.Provider>
   );
 }
