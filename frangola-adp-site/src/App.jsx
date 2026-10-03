@@ -847,7 +847,8 @@ function backOfficeDemo(d, maintenant, rang) {
     echanges: [],
   };
   if (!sansAncienne) {
-    bo.quiResilie = bo.ancienneAssurance === "groupe" ? "banque" : (r() < 0.7 ? "frangola" : "client");
+    bo.quiResilie = bo.ancienneAssurance === "groupe" ? "banque"
+      : r() < 0.5 ? "frangola" : r() < 0.6 ? "assureur" : "client";
     bo.ancienneCotisation = rnd(22, 95);
   }
   // Le parcours tient dans le temps entre souscription et effet : on
@@ -7474,7 +7475,19 @@ const ANCIENNES_ASSURANCES = [
   ["deleguee", "Délégation (autre assureur)"],
   ["aucune", "Aucune — nouveau prêt"],
 ];
-const QUI_RESILIE = [["banque", "La banque"], ["frangola", "Frangola"], ["client", "Le client"]];
+// Qui se charge d'envoyer la résiliation à l'ancien assureur. Le nouvel
+// assureur est souvent le quatrième larron : beaucoup de compagnies prennent
+// la substitution en charge, résiliation comprise. C'est alors eux qu'on
+// relance, pas la banque — d'où l'intérêt de le noter.
+const QUI_RESILIE = [["banque", "La banque"], ["frangola", "Frangola"], ["client", "Le client"], ["assureur", "Le nouvel assureur"]];
+
+// Le nom de la compagnie suit celui choisi sur le dossier plutôt que d'être
+// recopié ici : figé, il resterait faux le jour où l'on change d'assureur.
+function libelleQuiResilie(valeur, dossier) {
+  const base = (QUI_RESILIE.find(([v]) => v === valeur) || [])[1] || "";
+  if (valeur === "assureur" && dossier && dossier.assureur) return `${base} — ${dossier.assureur}`;
+  return base;
+}
 
 function isoAujourdhui() {
   const d = new Date();
@@ -7519,6 +7532,26 @@ function ancienneCotisationDuDossier(d) {
     return { valeur: Math.round(Number(sim.assuranceRestante) / Number(sim.dureeRestanteMois) * 100) / 100, source: "etude" };
   return { valeur: null, source: null };
 }
+// Écrire à la banque EST la demande de résiliation : chez Frangola c'est le
+// même courrier, le même jour. La case « Résiliation demandée » faisait donc
+// cocher deux fois la même chose. Elle disparaît de l'écran, mais la donnée
+// reste — le suivi, les relances et le message au client s'en servent — et
+// suit désormais la date d'envoi à la banque.
+//
+// Sans ancienne assurance il n'y a rien à résilier : la date est effacée,
+// sinon elle traînerait après un changement d'avis sur le dossier.
+function alignerResiliationDemandee(bo) {
+  if (!bo) return bo;
+  if (bo.ancienneAssurance === "aucune") {
+    return bo.resiliationDemandeeLe ? { ...bo, resiliationDemandeeLe: null } : bo;
+  }
+  if (bo.demandeLe) {
+    return bo.resiliationDemandeeLe === bo.demandeLe ? bo : { ...bo, resiliationDemandeeLe: bo.demandeLe };
+  }
+  // La demande retirée, la résiliation ne peut pas être partie avant elle.
+  return bo.resiliationDemandeeLe ? { ...bo, resiliationDemandeeLe: null } : bo;
+}
+
 // Jalons dans l'ordre : cocher l'un coche d'office ceux qui le précèdent.
 const ORDRE_JALONS_BO = ["demandeLe", "reponseLe", "avenantRecuLe", "avenantSigneLe", "resiliationDemandeeLe", "resiliationConfirmeeLe", "prelevementVerifieLe"];
 function cocherJalonEnCascade(bo, champ, date) {
@@ -7907,18 +7940,26 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
     if (ok) onUpdate(dossier.id, { clientPrevenuLe: Date.now(), clientPrevenuEtat: point.etat });
   }
 
-  const maj = (champs) => onUpdate(dossier.id, { backOffice: { ...bo, ...champs } });
+  // Une seule porte de sortie pour les écritures de ce panneau : la règle
+  // d'alignement s'y applique une fois, au lieu d'être répétée à chaque appel.
+  const ecrireBO = (n) => onUpdate(dossier.id, { backOffice: alignerResiliationDemandee(n) });
+  const maj = (champs) => ecrireBO({ ...bo, ...champs });
   const sansAncienne = bo.ancienneAssurance === "aucune";
   const cotis = ancienneCotisationDuDossier(dossier);
+  // Une information qu'on a vraiment se lit d'un coup d'œil ; un champ vide ou
+  // une valeur seulement déduite d'une étude reste en gris léger. Sans cette
+  // différence, une moyenne calculée a l'air d'un fait établi — et personne ne
+  // pense à la corriger avant d'envoyer la résiliation.
+  const tonChamp = (confirme) => confirme ? "fa-navy font-semibold" : "text-gray-600";
   // Cocher un jalon coche d'office ceux d'avant (à la même date, modifiable) ;
   // décocher n'efface que lui.
   const basculerJalon = (champ, coche) => {
     if (!coche) {
       const n = { ...bo, [champ]: null };
       if (champ === "reponseLe") n.reponse = null;
-      onUpdate(dossier.id, { backOffice: n });
+      ecrireBO(n);
     } else {
-      onUpdate(dossier.id, { backOffice: cocherJalonEnCascade(bo, champ, isoAujourdhui()) });
+      ecrireBO(cocherJalonEnCascade(bo, champ, isoAujourdhui()));
     }
   };
   // Clic sur un rond de la jauge : valide l'étape (et les précédentes).
@@ -7932,7 +7973,7 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
     }
     const ech = { id: uid(), le: form.le || isoAujourdhui(), type: form.type, texte: form.texte.trim(), at: Date.now() };
     if (piece) ech.fichier = piece;
-    onUpdate(dossier.id, { backOffice: appliquerEchangeBanque(bo, ech) });
+    ecrireBO(appliquerEchangeBanque(bo, ech));
     setForm({ type: "envoi", le: isoAujourdhui(), texte: "" });
     setFichier(null);
     setFormOuvert(false);
@@ -7941,7 +7982,7 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
     const piece = onUploadPiece ? await onUploadPiece(dossier.id, file) : null;
     if (!piece) return;
     const ech = { id: uid(), le: isoAujourdhui(), type: "resiliation", texte: "Confirmation écrite jointe", at: Date.now(), fichier: piece };
-    onUpdate(dossier.id, { backOffice: appliquerEchangeBanque(bo, ech) });
+    ecrireBO(appliquerEchangeBanque(bo, ech));
   }
   function supprimerEchange(id) {
     onUpdate(dossier.id, { backOffice: { ...bo, echanges: (bo.echanges || []).filter(x => x.id !== id) } });
@@ -8154,7 +8195,7 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
                     <input list="fa-banques" key={"b" + banqueDuDossier(dossier)} defaultValue={banqueDuDossier(dossier)}
                       placeholder="ex. Crédit Agricole"
                       onBlur={e => e.target.value.trim() !== banqueDuDossier(dossier) && maj({ banque: e.target.value.trim() })}
-                      className="flex-1 min-w-0 text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                      className={`flex-1 min-w-0 text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500 ${tonChamp(!!bo.banque)}`} />
                   </span>
                   <datalist id="fa-banques">
                     {listeBanques(_colorDataRef).map(b => <option key={b.id || b.nom} value={b.nom} />)}
@@ -8162,7 +8203,7 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
                 </label>
                 <label className="text-[11px] text-gray-500">Ancienne assurance
                   <select value={bo.ancienneAssurance || ""} onChange={e => maj({ ancienneAssurance: e.target.value || null })}
-                    className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                    className={`mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500 ${tonChamp(!!bo.ancienneAssurance)}`}>
                     <option value="">à préciser…</option>
                     {ANCIENNES_ASSURANCES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
@@ -8170,10 +8211,15 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
                 {!sansAncienne ? (
                   <label className="text-[11px] text-gray-500">Qui résilie
                     <select value={bo.quiResilie || ""} onChange={e => maj({ quiResilie: e.target.value || null })}
-                      className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                      className={`mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500 ${tonChamp(!!bo.quiResilie)}`}>
                       <option value="">à préciser…</option>
-                      {QUI_RESILIE.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                      {QUI_RESILIE.map(([v]) => <option key={v} value={v}>{libelleQuiResilie(v, dossier)}</option>)}
                     </select>
+                    {/* Compter sur le nouvel assureur sans savoir lequel, c'est
+                        une relance sans destinataire le jour venu. */}
+                    {bo.quiResilie === "assureur" && !dossier.assureur && (
+                      <span className="block mt-0.5 text-amber-700">Assureur non renseigné sur le dossier.</span>
+                    )}
                   </label>
                 ) : <span />}
                 {!sansAncienne && (
@@ -8185,7 +8231,7 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
                         const v = e.target.value === "" ? null : Number(e.target.value);
                         if (v !== (cotis.valeur ?? null)) maj({ ancienneCotisation: v });
                       }}
-                      className="mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                      className={`mt-0.5 w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-teal-500 ${tonChamp(cotis.source === "saisie")}`} />
                   </label>
                 )}
               </div>
@@ -8196,7 +8242,6 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
               {jalon({ champ: "avenantRecuLe", libelle: "Avenant reçu" })}
               {jalon({ champ: "avenantSigneLe", libelle: "Avenant signé par le client" })}
               {!sansAncienne && <>
-                {jalon({ champ: "resiliationDemandeeLe", libelle: "Résiliation demandée" })}
                 {jalon({ champ: "resiliationConfirmeeLe", libelle: "Résiliation confirmée par écrit", alerteRouge: effetProche })}
                 {jalon({ champ: "prelevementVerifieLe", libelle: "Plus de prélèvement de l'ancienne assurance (vérifié avec le client)" })}
               </>}
