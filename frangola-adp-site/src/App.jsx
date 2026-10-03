@@ -7757,6 +7757,129 @@ function MiniJaugeBackOffice({ dossier, large = "w-20" }) {
   );
 }
 
+
+// ─── Les champs qui n'enregistrent qu'une fois ──────────────────────────
+// Un <input> contrôlé dont le onChange part au serveur écrit à CHAQUE touche.
+//
+// Sur une date, taper « 2026 » dans l'année produit successivement les années
+// 2, 20, 202 puis 2026 : quatre enregistrements, quatre allers-retours, quatre
+// re-rendus — et le champ se réécrit sous les doigts. C'est ce qui affichait
+// « 05/12/0006 » et faisait sauter le curseur. Pire, l'échéancier se
+// régénérait à chaque étape avec des dates de l'an 3, et si l'on quittait la
+// page au milieu, le dossier gardait cette date-là.
+//
+// Sur un nombre, « 31,4 » passe par « 31 », puis par une valeur VIDE au moment
+// du séparateur — le champ s'efface tout seul et un null part au serveur. Et
+// un <input type="number"> refuse la virgule du pavé numérique français, ce
+// qui achève la saisie.
+//
+// Le remède est le même : la frappe reste locale tant que le champ a le focus,
+// et l'enregistrement part à la sortie, ou sur Entrée. Un enregistrement par
+// valeur saisie, au lieu d'un par touche.
+
+function useBrouillonChamp(valeurAmont, versTexte) {
+  const [texte, setTexte] = useState(() => versTexte(valeurAmont));
+  const focus = useRef(false);
+  const rendu = useRef(versTexte(valeurAmont));
+  // Hors focus, le champ suit la donnée : une valeur changée ailleurs (un
+  // recalcul, un autre poste) doit s'afficher. Pendant la frappe, jamais.
+  useEffect(() => {
+    const v = versTexte(valeurAmont);
+    rendu.current = v;
+    if (!focus.current) setTexte(v);
+  }, [valeurAmont]);
+  return { texte, setTexte, focus, rendu };
+}
+
+// Un petit « ✓ » après l'enregistrement : puisqu'il ne part plus à chaque
+// touche, il faut dire qu'il est parti. Sinon on retape, croyant avoir raté.
+function useClignotant() {
+  const [vu, setVu] = useState(false);
+  const t = useRef(null);
+  useEffect(() => () => clearTimeout(t.current), []);
+  return [vu, () => { setVu(true); clearTimeout(t.current); t.current = setTimeout(() => setVu(false), 1400); }];
+}
+
+// Une année à deux chiffres, ou l'an 6, n'est pas une date : c'est une frappe
+// en cours. On ne l'enregistre pas, et on ne la laisse pas non plus en place.
+function dateComplete(v) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v || "")) return false;
+  const an = Number(v.slice(0, 4));
+  if (an < 1900 || an > 2200) return false;
+  const d = new Date(v + "T12:00:00");
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
+function ChampDate({ valeur, onValider, className, min, max, title, disabled, "aria-label": ariaLabel }) {
+  const { texte, setTexte, focus, rendu } = useBrouillonChamp(valeur || "", v => v || "");
+  const [vu, clignoter] = useClignotant();
+
+  function valider(brut) {
+    const v = (brut === undefined ? texte : brut) || "";
+    if (v !== texte) setTexte(v);
+    if (v === rendu.current) return;
+    // Frappe abandonnée en cours de route : on remet ce qui était là.
+    if (v !== "" && !dateComplete(v)) { setTexte(rendu.current); return; }
+    onValider(v === "" ? null : v);
+    clignoter();
+  }
+
+  return (
+    <span className="relative inline-flex items-center">
+      <input type="date" value={texte} min={min} max={max} title={title} disabled={disabled} aria-label={ariaLabel}
+        onFocus={() => { focus.current = true; }}
+        onChange={e => setTexte(e.target.value)}
+        onBlur={e => { focus.current = false; valider(e.target.value); }}
+        onKeyDown={e => {
+          if (e.key === "Enter") { e.preventDefault(); valider(e.currentTarget.value); }
+          if (e.key === "Escape") { setTexte(rendu.current); e.currentTarget.blur(); }
+        }}
+        className={className} />
+      {vu && <CheckCircle2 size={13} className="text-emerald-600 ml-1 shrink-0" aria-label="enregistré" />}
+    </span>
+  );
+}
+
+function ChampNombre({ valeur, onValider, className, placeholder, title, disabled, "aria-label": ariaLabel }) {
+  // Le brouillon reste une CHAÎNE : « 31, » et « 0. » sont des étapes
+  // légitimes de la frappe qu'un Number() écraserait aussitôt. Et le champ est
+  // en texte, pas en « number » : c'est la seule façon d'accepter la virgule.
+  const { texte, setTexte, focus, rendu } = useBrouillonChamp(valeur,
+    v => (v === null || v === undefined || v === "") ? "" : String(v));
+  const [vu, clignoter] = useClignotant();
+
+  function valider(saisi) {
+    const source = saisi === undefined ? texte : saisi;
+    if (source !== texte) setTexte(source);
+    const brut = (source || "").trim().replace(",", ".");
+    if (brut === "") {
+      if (rendu.current === "") return;
+      onValider(null); clignoter(); return;
+    }
+    const n = Number(brut);
+    if (!Number.isFinite(n)) { setTexte(rendu.current); return; }
+    if (String(n) === rendu.current) { setTexte(rendu.current); return; }
+    onValider(n);
+    clignoter();
+  }
+
+  return (
+    <span className="relative inline-flex items-center">
+      <input type="text" inputMode="decimal" value={texte} placeholder={placeholder} title={title}
+        disabled={disabled} aria-label={ariaLabel}
+        onFocus={e => { focus.current = true; e.target.select(); }}
+        onChange={e => setTexte(e.target.value.replace(/[^\d.,\-]/g, ""))}
+        onBlur={e => { focus.current = false; valider(e.target.value); }}
+        onKeyDown={e => {
+          if (e.key === "Enter") { e.preventDefault(); valider(e.currentTarget.value); }
+          if (e.key === "Escape") { setTexte(rendu.current); e.currentTarget.blur(); }
+        }}
+        className={className} />
+      {vu && <CheckCircle2 size={13} className="text-emerald-600 ml-1 shrink-0" aria-label="enregistré" />}
+    </span>
+  );
+}
+
 function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefaut = false, expediteur, telephone }) {
   const bo = backOfficeDe(dossier);
   const alerte = alerteBackOffice(dossier);
@@ -7837,8 +7960,8 @@ function SuiviBackOffice({ dossier, onUpdate, onUploadPiece, busy, ouvertParDefa
           <span className={alerteRouge && !coche ? "text-red-700 font-semibold" : coche ? "fa-navy" : "text-gray-600"}>{libelle}</span>
         </label>
         {coche && (
-          <input type="date" value={date}
-            onChange={e => e.target.value && (onDate ? onDate(e.target.value) : maj({ [champ]: e.target.value }))}
+          <ChampDate valeur={date} aria-label={`Date — ${libelle}`}
+            onValider={v => v && (onDate ? onDate(v) : maj({ [champ]: v }))}
             className="text-xs border border-gray-200 rounded-lg px-1.5 py-0.5 w-[118px] focus:outline-none focus:ring-2 focus:ring-teal-500" />
         )}
       </div>
@@ -8269,8 +8392,8 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs, dossiers }) {
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5 flex-wrap">
               Cotisation du client
-              <input type="number" onFocus={selectionTotale} min="0" step="0.01" value={dossier.cotisationMensuelle ?? ""}
-                onChange={e => onUpdate(dossier.id, { cotisationMensuelle: e.target.value === "" ? null : Number(e.target.value) })}
+              <ChampNombre valeur={dossier.cotisationMensuelle ?? null} aria-label="Cotisation du client, en euros par mois"
+                onValider={v => onUpdate(dossier.id, { cotisationMensuelle: v })}
                 placeholder="€ / mois" className={petitChamp} />
               € / mois
               {/* La moyenne maison, en un clic. Proposée, jamais écrite d'office :
@@ -8287,15 +8410,15 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs, dossiers }) {
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
               Commission 1<sup>re</sup> année
-              <input type="number" onFocus={selectionTotale} min="0" max="100" step="1" value={dossier.tauxCommissionAssureur ?? ""}
-                onChange={e => onUpdate(dossier.id, { tauxCommissionAssureur: e.target.value === "" ? null : Number(e.target.value) })}
+              <ChampNombre valeur={dossier.tauxCommissionAssureur ?? null} aria-label="Commission la première année, en pourcentage"
+                onValider={v => onUpdate(dossier.id, { tauxCommissionAssureur: v })}
                 placeholder="%" className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-16 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
               % HT
             </label>
             <label className="text-xs text-gray-600 flex items-center gap-1.5">
               puis années suivantes
-              <input type="number" onFocus={selectionTotale} min="0" max="100" step="1" value={dossier.tauxCommissionSuivantes ?? ""}
-                onChange={e => onUpdate(dossier.id, { tauxCommissionSuivantes: e.target.value === "" ? null : Number(e.target.value) })}
+              <ChampNombre valeur={dossier.tauxCommissionSuivantes ?? null} aria-label="Commission les années suivantes, en pourcentage"
+                onValider={v => onUpdate(dossier.id, { tauxCommissionSuivantes: v })}
                 placeholder="idem" className="text-xs border border-gray-300 rounded-lg px-2 py-1 w-16 text-center focus:outline-none focus:ring-2 focus:ring-teal-500" />
               % HT
               {tauxAnnee1(dossier) > 0 && (
@@ -8339,8 +8462,8 @@ function RecurrenceDossier({ dossier, onUpdate, assureurs, dossiers }) {
             ) : (
               <label className="text-xs text-gray-500 flex items-center gap-1.5">
                 Résilié le
-                <input type="date" value=""
-                  onChange={e => e.target.value && onUpdate(dossier.id, { resilieLe: e.target.value })}
+                <ChampDate valeur="" aria-label="Date de résiliation"
+                  onValider={v => v && onUpdate(dossier.id, { resilieLe: v })}
                   className="text-xs border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
                 <span className="text-gray-400">(laisser vide tant que le contrat court)</span>
               </label>
@@ -8402,8 +8525,8 @@ function EcheancierDossier({ dossier, onUpdate }) {
 
             <label className="text-xs text-gray-500 flex items-center gap-1.5">
               Date d'effet
-              <input type="date" value={dossier.dateEffet || ""}
-                onChange={e => majParametres({ dateEffet: e.target.value })} className={petitChamp} />
+              <ChampDate valeur={dossier.dateEffet || ""} aria-label="Date d'effet"
+                onValider={v => majParametres({ dateEffet: v })} className={petitChamp} />
             </label>
 
             {mode === "assureur" && (
@@ -8440,8 +8563,8 @@ function EcheancierDossier({ dossier, onUpdate }) {
               {echeances.map((e, i) => (
                 <div key={e.numero} className={`flex items-center gap-2 flex-wrap rounded-lg px-1 py-1 ${e.encaisseLe ? "bg-emerald-50" : ""}`}>
                   <span className="w-6 shrink-0 text-xs text-gray-500">{e.numero}</span>
-                  <input type="date" value={e.datePrevue || ""}
-                    onChange={ev => majEcheance(i, { datePrevue: ev.target.value, dateForcee: true })}
+                  <ChampDate valeur={e.datePrevue || ""} aria-label={`Date prévue de l'échéance ${e.numero}`}
+                    onValider={v => majEcheance(i, { datePrevue: v, dateForcee: true })}
                     className="w-32 shrink-0 text-xs border border-gray-300 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
                   <span className="w-24 shrink-0 text-right text-xs fa-navy font-medium">{fmtEuroPrecis(partsHono[i])}</span>
                   <span className="w-24 shrink-0 text-right text-xs text-gray-500">{fmtEuroPrecis(partsPart[i])}</span>
@@ -13151,9 +13274,9 @@ function ProductionDuMois({ data, commerciaux, onSetGoals, onSetPeriode, canEdit
         <span className="sm:ml-auto flex items-center flex-wrap gap-2 text-xs text-gray-500">
           {edition ? (
             <>
-              du <input type="date" value={brouillon.debut} onChange={e => e.target.value && maj({ debut: e.target.value })} className={champDate} />
+              du <ChampDate valeur={brouillon.debut} aria-label="Début de la période" onValider={v => v && maj({ debut: v })} className={champDate} />
               au {brouillon.duree === "perso"
-                ? <input type="date" value={brouillon.fin} min={brouillon.debut} onChange={e => e.target.value && maj({ fin: e.target.value })} className={champDate} />
+                ? <ChampDate valeur={brouillon.fin} min={brouillon.debut} aria-label="Fin de la période" onValider={v => v && maj({ fin: v })} className={champDate} />
                 : <strong className="fa-navy text-sm">{new Date(debutJour(brouillon.fin)).toLocaleDateString("fr-FR")}</strong>}
             </>
           ) : (
@@ -13430,11 +13553,11 @@ function ObjectifsCA({ data }) {
         <div className="flex items-center gap-2 flex-wrap fa-bg-offwhite border border-gray-200 rounded-xl px-3 py-2.5 mb-3">
           <label className="flex items-center gap-1.5 text-xs text-gray-500">
             Du
-            <input type="date" value={reg.debut} onChange={e => maj({ debut: e.target.value })} className={dateChamp} />
+            <ChampDate valeur={reg.debut} aria-label="Début de l'objectif" onValider={v => v && maj({ debut: v })} className={dateChamp} />
           </label>
           <label className="flex items-center gap-1.5 text-xs text-gray-500">
             au
-            <input type="date" value={reg.fin} onChange={e => maj({ fin: e.target.value })} className={dateChamp} />
+            <ChampDate valeur={reg.fin} aria-label="Fin de l'objectif" onValider={v => v && maj({ fin: v })} className={dateChamp} />
           </label>
           <span className={`text-xs ${per.valide ? "text-gray-500" : "text-red-700 font-semibold"}`}>
             {per.valide
@@ -16551,8 +16674,8 @@ function ReglagesSaison({ data, apercu, onApercu, onMaj, canEdit, busy }) {
   const champJour = (id, cle, valeur, libelle) => (
     <label className="flex-1 min-w-[8rem]">
       <span className="block text-[10px] uppercase tracking-wide text-gray-400 mb-1">{libelle}</span>
-      <input type="date" value={`2000-${valeur}`} disabled={!canEdit || busy}
-        onChange={e => { const v = (e.target.value || "").slice(5); if (jourValide(v)) majTheme(id, { [cle]: v }); }}
+      <ChampDate valeur={`2000-${valeur}`} disabled={!canEdit || busy} aria-label={libelle}
+        onValider={v => { const j = (v || "").slice(5); if (jourValide(j)) majTheme(id, { [cle]: j }); }}
         className="w-full border border-gray-300 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-50" />
     </label>
   );
@@ -18115,7 +18238,8 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                               <option value="">Mode de paiement…</option>
                                               {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
                                             </select>
-                                            <input type="date" value={d.paymentDate || ""} onChange={e => onUpdateDossierClient(d.id, { paymentDate: e.target.value })}
+                                            <ChampDate valeur={d.paymentDate || ""} aria-label="Date de paiement"
+                                              onValider={v => onUpdateDossierClient(d.id, { paymentDate: v })}
                                               className="text-xs border border-green-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-green-300" />
                                           </div>
                                         ) : d.bordereau ? (
