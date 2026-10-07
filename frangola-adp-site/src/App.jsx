@@ -18991,11 +18991,18 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                               ✎ Fiche à compléter
                             </span>
                           )}
-                          {p.parrainId && nomParrain(p.parrainId) && (
-                            <span className="text-xs font-semibold bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full">
-                              🤝 Filleul de {nomParrain(p.parrainId)}
-                            </span>
-                          )}
+                          {p.parrainId && (() => {
+                            // Le nom du parrain ouvre sa fiche : c'est le geste
+                            // qu'on a en tête en lisant le badge, et sans lui il
+                            // faut retenir le nom puis aller le rechercher.
+                            const parrain = (data.partners || []).find(x => x.id === p.parrainId);
+                            if (!parrain) return null;
+                            return (
+                              <span className="text-xs font-semibold bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded-full">
+                                🤝 Filleul de <LienPartenaire p={parrain} className="font-semibold text-teal-800" />
+                              </span>
+                            );
+                          })()}
                           <BadgeIntegration p={p} data={data} />
                           {p.active === false && <span className="text-xs font-semibold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactif</span>}
                           {p.active !== false && daysSinceLastDossier(p) > INACTIVITY_DAYS && (
