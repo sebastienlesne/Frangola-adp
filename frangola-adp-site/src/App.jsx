@@ -12,7 +12,41 @@ const STATUS_STEPS = ["Déposé", "En vérification", "Devis en cours", "Souscri
 const ADMIN_STATUS_OPTIONS = ["Déposé", "En vérification", "Devis en cours", "Souscrit", "KO", "Bordereau émis", "Payé"];
 // En dessous de ce montant, un honoraire doit être justifié.
 const HONORAIRES_SEUIL_MOTIF = 300;
-const MOTIFS_HONORAIRES_REDUITS = ["Remise famille", "Offert pour le partenaire"];
+const MOTIFS_HONORAIRES_REDUITS = ["Remise famille", "Offert pour le partenaire", "Remise pour collecte"];
+
+// Pourquoi on a rendu de l'argent sur un prix déjà fixé. Question différente
+// de celle des honoraires réduits, qui justifie un prix bas dès le départ :
+// deux champs séparés, sinon impossible de savoir un jour ce que les gestes
+// ont coûté sur l'année.
+//
+// Liste ouverte : les raisons d'un geste sont trop variées pour tenir dans
+// trois cases. « Autre » réclame alors une précision, sinon le motif ne dit
+// rien à celui qui relira le dossier dans six mois.
+const MOTIF_GESTE_AUTRE = "Autre (préciser)";
+const MOTIFS_GESTE = [
+  "Dossier traité en retard",
+  "Erreur de notre part",
+  "Alignement sur un concurrent",
+  "Dossier complexe",
+  "Fidélité du client",
+  MOTIF_GESTE_AUTRE,
+];
+
+// Ce qu'on affiche : le motif, ou la précision quand il a fallu en donner une.
+function libelleMotifGeste(d) {
+  if (!d || !d.motifGeste) return "";
+  if (d.motifGeste === MOTIF_GESTE_AUTRE) return (d.motifGesteLibre || "").trim() || MOTIF_GESTE_AUTRE;
+  return d.motifGeste;
+}
+
+// Un brouillon de saisie est complet quand le motif est choisi et, pour
+// « Autre », précisé. Même règle à l'écran et à l'enregistrement : une seule
+// fonction, pour qu'ils ne puissent pas diverger.
+function motifGesteComplet(motif, libre) {
+  if (!motif) return false;
+  if (motif === MOTIF_GESTE_AUTRE) return (libre || "").trim().length > 0;
+  return true;
+}
 const KO_REASONS = ["Refus banque / assureur", "Client a annulé", "Concurrent moins cher", "Sans nouvelles du client", "Autre"];
 const PAYMENT_METHODS = ["Virement", "Carte cadeau"];
 const STATUS_COLORS = {
@@ -9332,6 +9366,16 @@ function motifManquant(d) {
   return ca != null && ca !== "" && Number(ca) < HONORAIRES_SEUIL_MOTIF && !d?.motifHonorairesReduits;
 }
 
+// Un geste accordé sans raison écrite. Les dossiers enregistrés avant que ce
+// champ existe n'en ont pas : ils ne sont pas signalés, on ne va pas rouvrir
+// l'historique. La pastille n'apparaît que sur ce qui est saisi désormais.
+function motifGesteManquant(d) {
+  const geste = Number(d?.gesteCommercial) || 0;
+  if (geste <= 0) return false;
+  if (!d?.gesteSaisiLe) return false;
+  return !motifGesteComplet(d.motifGeste, d.motifGesteLibre);
+}
+
 // Honoraires réellement ENCAISSÉS depuis une date : on somme les échéances
 // reçues, pas les dossiers souscrits. Un dossier réglé en douze fois ne
 // compte que pour ce qui est tombé. Même lecture que l'encaissé du mois sur
@@ -17303,16 +17347,27 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
       brut = honorairesSimules(d);
       commission = retrocessionSelonRegle(partner, data.dossiers, Math.max(0, brut - geste));
     }
-    setFinanceDraft({ caAmount: brut ?? "", commissionAmount: commission, geste: geste ? String(geste) : "", motif: d.motifHonorairesReduits || "" });
+    setFinanceDraft({ caAmount: brut ?? "", commissionAmount: commission, geste: geste ? String(geste) : "",
+      motif: d.motifHonorairesReduits || "", motifGeste: d.motifGeste || "", motifGesteLibre: d.motifGesteLibre || "" });
   }
   async function saveFinance(id) {
     const brut = financeDraft.caAmount === "" ? null : Number(financeDraft.caAmount);
     const geste = Math.max(0, Number(financeDraft.geste) || 0);
     if (brut !== null && brut < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif) return;
+    if (geste > 0 && !motifGesteComplet(financeDraft.motifGeste, financeDraft.motifGesteLibre)) return;
+    const avecGeste = geste > 0;
     await onUpdateDossierClient(id, {
       caAmount: brut === null ? null : Math.max(0, Math.round((brut - geste) * 100) / 100),
       honorairesBruts: brut,
       gesteCommercial: geste || null,
+      // Le geste retiré, son motif part avec : laissé en place, il ferait
+      // croire à un geste qui n'existe plus.
+      motifGeste: avecGeste ? financeDraft.motifGeste : null,
+      motifGesteLibre: avecGeste && financeDraft.motifGeste === MOTIF_GESTE_AUTRE
+        ? (financeDraft.motifGesteLibre || "").trim() : null,
+      // Marque le geste comme saisi depuis que le motif existe : c'est ce qui
+      // distingue un dossier d'avant d'un dossier à compléter.
+      gesteSaisiLe: avecGeste ? (new Date().toISOString().slice(0, 10)) : null,
       motifHonorairesReduits: brut !== null && brut < HONORAIRES_SEUIL_MOTIF ? financeDraft.motif : null,
       commissionAmount: financeDraft.commissionAmount === "" ? null : Number(financeDraft.commissionAmount),
       // Validé à la main : à partir d'ici, plus aucune simulation ne vient
@@ -18355,7 +18410,14 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                             {d.honorairesAuto && <span className="text-[10px] font-semibold bg-teal-50 fa-teal-text border border-teal-200 px-1.5 py-0.5 rounded-full">repris de la simulation</span>}
                                             {motifManquant(d) && <span className="text-[10px] font-semibold bg-red-50 text-red-700 border border-red-300 px-1.5 py-0.5 rounded-full">motif à choisir</span>}
                                             {d.motifHonorairesReduits && <span className="text-[10px] font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-1.5 py-0.5 rounded-full">{d.motifHonorairesReduits}</span>}
-                                            {d.gesteCommercial > 0 && <span className="text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded-full">geste −{fmtEuro(d.gesteCommercial)}</span>}
+                                            {d.gesteCommercial > 0 && (
+                                              <span className="text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded-full"
+                                                title={libelleMotifGeste(d) || undefined}>
+                                                geste −{fmtEuro(d.gesteCommercial)}
+                                                {libelleMotifGeste(d) && <span className="font-normal"> · {libelleMotifGeste(d)}</span>}
+                                              </span>
+                                            )}
+                                            {motifGesteManquant(d) && <span className="text-[10px] font-semibold bg-red-50 text-red-700 border border-red-300 px-1.5 py-0.5 rounded-full">motif du geste à choisir</span>}
                                           </button>
                                         )}
                                       </div>
@@ -18418,6 +18480,31 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                               <div className="text-[11px] text-gray-400 mt-1">
                                                 Déduit du CA : CA généré retenu {fmtEuroPrecis(Math.max(0, (Number(financeDraft.caAmount) || 0) - (Number(financeDraft.geste) || 0)))}
                                               </div>
+                                              {/* Rendre de l'argent est une décision ; elle se justifie, comme un
+                                                  prix bas se justifie. Sans motif obligatoire, la case resterait
+                                                  vide et on ne saurait jamais ce que les gestes ont coûté. */}
+                                              {(Number(financeDraft.geste) || 0) > 0 && (() => {
+                                                const complet = motifGesteComplet(financeDraft.motifGeste, financeDraft.motifGesteLibre);
+                                                return (
+                                                  <div className="mt-2">
+                                                    <label className={`block text-xs mb-1 ${complet ? "text-gray-500" : "text-amber-800 font-semibold"}`}>
+                                                      Geste accordé : motif obligatoire
+                                                    </label>
+                                                    <select value={financeDraft.motifGeste}
+                                                      onChange={e => setFinanceDraft(f => ({ ...f, motifGeste: e.target.value }))}
+                                                      className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 ${financeDraft.motifGeste ? "border-gray-300" : "border-amber-300 bg-amber-50"}`}>
+                                                      <option value="">Choisir le motif…</option>
+                                                      {MOTIFS_GESTE.map(m => <option key={m} value={m}>{m}</option>)}
+                                                    </select>
+                                                    {financeDraft.motifGeste === MOTIF_GESTE_AUTRE && (
+                                                      <input value={financeDraft.motifGesteLibre}
+                                                        onChange={e => setFinanceDraft(f => ({ ...f, motifGesteLibre: e.target.value }))}
+                                                        placeholder="En deux mots…" maxLength={80}
+                                                        className={`mt-1.5 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 ${complet ? "border-gray-300" : "border-amber-300 bg-amber-50"}`} />
+                                                    )}
+                                                  </div>
+                                                );
+                                              })()}
                                             </div>
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between">
@@ -18468,10 +18555,23 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                             );
                                           })()}
                                           <div className="flex gap-2 mt-3">
-                                            <button onClick={() => saveFinance(d.id)}
-                                              disabled={financeDraft.caAmount !== "" && Number(financeDraft.caAmount) < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif}
-                                              title={financeDraft.caAmount !== "" && Number(financeDraft.caAmount) < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif ? "Choisis d'abord le motif des honoraires réduits" : ""}
-                                              className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed">Enregistrer</button>
+                                            {(() => {
+                                              const manqueHono = financeDraft.caAmount !== "" && Number(financeDraft.caAmount) < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif;
+                                              const manqueGeste = (Number(financeDraft.geste) || 0) > 0
+                                                && !motifGesteComplet(financeDraft.motifGeste, financeDraft.motifGesteLibre);
+                                              const frein = manqueHono
+                                                ? "Choisis d'abord le motif des honoraires réduits"
+                                                : manqueGeste
+                                                  ? (financeDraft.motifGeste === MOTIF_GESTE_AUTRE
+                                                      ? "Précise le motif du geste commercial"
+                                                      : "Choisis d'abord le motif du geste commercial")
+                                                  : "";
+                                              return (
+                                                <button onClick={() => saveFinance(d.id)}
+                                                  disabled={manqueHono || manqueGeste} title={frein}
+                                                  className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed">Enregistrer</button>
+                                              );
+                                            })()}
                                             <button onClick={() => setFinanceOpenId(null)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Fermer</button>
                                           </div>
                                         </div>
