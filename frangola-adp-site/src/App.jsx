@@ -12,7 +12,7 @@ const STATUS_STEPS = ["Déposé", "En vérification", "Devis en cours", "Souscri
 const ADMIN_STATUS_OPTIONS = ["Déposé", "En vérification", "Devis en cours", "Souscrit", "KO", "Bordereau émis", "Payé"];
 // En dessous de ce montant, un honoraire doit être justifié.
 const HONORAIRES_SEUIL_MOTIF = 300;
-const MOTIFS_HONORAIRES_REDUITS = ["Remise famille", "Offert pour le partenaire", "Remise pour collecte"];
+const MOTIFS_HONORAIRES_REDUITS = ["Remise famille", "Offert pour le partenaire"];
 
 // Pourquoi on a rendu de l'argent sur un prix déjà fixé. Question différente
 // de celle des honoraires réduits, qui justifie un prix bas dès le départ :
@@ -23,14 +23,47 @@ const MOTIFS_HONORAIRES_REDUITS = ["Remise famille", "Offert pour le partenaire"
 // trois cases. « Autre » réclame alors une précision, sinon le motif ne dit
 // rien à celui qui relira le dossier dans six mois.
 const MOTIF_GESTE_AUTRE = "Autre (préciser)";
+// Une remise que le partenaire a lui-même demandée, c'est lui qui la paie :
+// elle sort de sa rétrocession, pas de la poche de Frangola.
+const MOTIF_GESTE_PARTENAIRE = "Remise demandée par le partenaire";
 const MOTIFS_GESTE = [
-  "Dossier traité en retard",
   "Erreur de notre part",
-  "Alignement sur un concurrent",
-  "Dossier complexe",
-  "Fidélité du client",
+  "Alignement sur concurrence",
+  "Remise client multi-équipé",
+  "Remise ami",
+  "Remise pour collecte",
+  MOTIF_GESTE_PARTENAIRE,
   MOTIF_GESTE_AUTRE,
 ];
+
+function gesteSurRetrocession(motif) { return motif === MOTIF_GESTE_PARTENAIRE; }
+function cent(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+// Où tombe le geste, selon son motif.
+//
+// Par défaut Frangola l'absorbe : le client paie moins, le partenaire touche
+// autant, la marge encaisse la différence.
+//
+// Quand c'est le partenaire qui a demandé la remise, elle est prélevée sur sa
+// rétrocession : le client paie moins, le partenaire touche moins, et le CA
+// réel de Frangola ne bouge pas. Elle ne peut donc pas dépasser ce qu'on lui
+// doit — on ne reprend pas un euro qu'on n'a pas à verser.
+function repartirGeste(brut, geste, retroBase, motif) {
+  const b = Math.max(0, Number(brut) || 0);
+  const g = Math.max(0, Number(geste) || 0);
+  const r = Math.max(0, Number(retroBase) || 0);
+  const parLePartenaire = gesteSurRetrocession(motif) && g > 0;
+  // Un centime de tolérance : 100,005 ne doit pas se lire comme un dépassement.
+  const depasse = parLePartenaire && g > r + 0.005;
+  return {
+    caAmount: cent(Math.max(0, b - g)),
+    retrocession: parLePartenaire ? cent(Math.max(0, r - g)) : cent(r),
+    plafond: parLePartenaire ? cent(r) : null,
+    depasse,
+    excedent: depasse ? cent(g - r) : 0,
+    aCharge: parLePartenaire ? "partenaire" : "frangola",
+  };
+}
 
 // Ce qu'on affiche : le motif, ou la précision quand il a fallu en donner une.
 function libelleMotifGeste(d) {
@@ -17347,6 +17380,12 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
       brut = honorairesSimules(d);
       commission = retrocessionSelonRegle(partner, data.dossiers, Math.max(0, brut - geste));
     }
+    // La rétrocession rangée est déjà amputée de la remise quand le partenaire
+    // l'a financée : on remonte à celle d'avant, sinon la déduction
+    // s'appliquerait une seconde fois à chaque réouverture.
+    if (gesteSurRetrocession(d.motifGeste) && geste > 0 && commission !== "" && commission != null) {
+      commission = cent(Number(commission) + geste);
+    }
     setFinanceDraft({ caAmount: brut ?? "", commissionAmount: commission, geste: geste ? String(geste) : "",
       motif: d.motifHonorairesReduits || "", motifGeste: d.motifGeste || "", motifGesteLibre: d.motifGesteLibre || "" });
   }
@@ -17356,8 +17395,13 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
     if (brut !== null && brut < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif) return;
     if (geste > 0 && !motifGesteComplet(financeDraft.motifGeste, financeDraft.motifGesteLibre)) return;
     const avecGeste = geste > 0;
+    const retroBase = financeDraft.commissionAmount === "" ? null : Number(financeDraft.commissionAmount);
+    const part = repartirGeste(brut, geste, retroBase || 0, financeDraft.motifGeste);
+    // Une remise que le partenaire n'a pas les moyens de financer ne
+    // s'enregistre pas : elle créerait une rétrocession négative.
+    if (part.depasse) return;
     await onUpdateDossierClient(id, {
-      caAmount: brut === null ? null : Math.max(0, Math.round((brut - geste) * 100) / 100),
+      caAmount: brut === null ? null : part.caAmount,
       honorairesBruts: brut,
       gesteCommercial: geste || null,
       // Le geste retiré, son motif part avec : laissé en place, il ferait
@@ -17369,7 +17413,7 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
       // distingue un dossier d'avant d'un dossier à compléter.
       gesteSaisiLe: avecGeste ? (new Date().toISOString().slice(0, 10)) : null,
       motifHonorairesReduits: brut !== null && brut < HONORAIRES_SEUIL_MOTIF ? financeDraft.motif : null,
-      commissionAmount: financeDraft.commissionAmount === "" ? null : Number(financeDraft.commissionAmount),
+      commissionAmount: retroBase === null ? null : part.retrocession,
       // Validé à la main : à partir d'ici, plus aucune simulation ne vient
       // réécrire ce montant par-dessus.
       honorairesAuto: null,
@@ -18468,6 +18512,9 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                                     className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 ${financeDraft.motif ? "border-gray-300" : "border-red-300 bg-red-50"}`}>
                                                     <option value="">Choisir le motif…</option>
                                                     {MOTIFS_HONORAIRES_REDUITS.map(m => <option key={m} value={m}>{m}</option>)}
+                                                    {financeDraft.motif && !MOTIFS_HONORAIRES_REDUITS.includes(financeDraft.motif) && (
+                                                      <option value={financeDraft.motif}>{financeDraft.motif} (ancien motif)</option>
+                                                    )}
                                                   </select>
                                                 </div>
                                               )}
@@ -18506,16 +18553,26 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                                 );
                                               })()}
                                             </div>
+                                            {(() => {
+                                              const surRetro = gesteSurRetrocession(financeDraft.motifGeste) && (Number(financeDraft.geste) || 0) > 0;
+                                              const part = repartirGeste(financeDraft.caAmount, financeDraft.geste,
+                                                financeDraft.commissionAmount, financeDraft.motifGeste);
+                                              return (
                                             <div>
                                               <label className="block text-xs text-gray-500 mb-1 flex items-center justify-between">
-                                                Rétrocession partenaire (€)
+                                                {surRetro ? "Rétrocession avant remise (€)" : "Rétrocession partenaire (€)"}
                                                 {/* Un seul bouton, qui applique la règle réelle du partenaire :
-                                                    son forfait, ou le taux qu'on lui applique sur ses dossiers. */}
+                                                    son forfait, ou le taux qu'on lui applique sur ses dossiers.
+                                                    Quand c'est lui qui finance la remise, sa règle s'applique aux
+                                                    honoraires d'avant : sinon il la paierait deux fois, une fois
+                                                    sur l'assiette et une fois sur la déduction. */}
                                                 <button type="button"
                                                   onClick={() => setFinanceDraft(f => ({
                                                     ...f,
                                                     commissionAmount: String(retrocessionSelonRegle(
-                                                      p, data.dossiers, Math.max(0, (Number(f.caAmount) || 0) - (Number(f.geste) || 0)))),
+                                                      p, data.dossiers, gesteSurRetrocession(f.motifGeste)
+                                                        ? Math.max(0, Number(f.caAmount) || 0)
+                                                        : Math.max(0, (Number(f.caAmount) || 0) - (Number(f.geste) || 0)))),
                                                   }))}
                                                   title="Appliquer sa règle de rémunération"
                                                   className="fa-teal-text hover:underline font-normal normal-case">
@@ -18524,14 +18581,30 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                               </label>
                                               <input type="number" onFocus={selectionTotale} value={financeDraft.commissionAmount}
                                                 onChange={e => setFinanceDraft(f => ({ ...f, commissionAmount: e.target.value }))}
-                                                placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                                                placeholder="0" className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 ${part.depasse ? "border-red-300 bg-red-50" : "border-gray-300"}`} />
+                                              {surRetro && (
+                                                part.depasse ? (
+                                                  <div className="text-[11px] text-red-700 font-semibold mt-1">
+                                                    La remise dépasse sa rétrocession de {fmtEuroPrecis(part.excedent)} — elle ne peut pas
+                                                    aller au-delà de {fmtEuroPrecis(part.plafond)}.
+                                                  </div>
+                                                ) : (
+                                                  <div className="text-[11px] text-amber-800 mt-1">
+                                                    − remise demandée {fmtEuroPrecis(Number(financeDraft.geste) || 0)} → <strong>versé au partenaire {fmtEuroPrecis(part.retrocession)}</strong>
+                                                  </div>
+                                                )
+                                              )}
                                             </div>
+                                              );
+                                            })()}
                                           </div>
                                           {financeDraft.caAmount !== "" && financeDraft.commissionAmount !== "" && (() => {
                                             const brutSaisi = Number(financeDraft.caAmount) || 0;
                                             const geste = Number(financeDraft.geste) || 0;
-                                            const ca = Math.max(0, brutSaisi - geste);
-                                            const commission = Number(financeDraft.commissionAmount) || 0;
+                                            const repart = repartirGeste(brutSaisi, geste, financeDraft.commissionAmount, financeDraft.motifGeste);
+                                            const surRetro = repart.aCharge === "partenaire";
+                                            const ca = repart.caAmount;
+                                            const commission = repart.retrocession;
                                             const caReel = ca - commission;
                                             const mandataireCut = caReel / 2;
                                             const margeNette = caReel - mandataireCut;
@@ -18539,6 +18612,12 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                               <div className="mt-3 pt-3 border-t border-gray-200 space-y-1 text-xs text-gray-600">
                                                 {geste > 0 && (
                                                   <div className="flex justify-between"><span>CA généré après geste commercial ({fmtEuro(brutSaisi)} − {fmtEuro(geste)})</span><span className="font-semibold fa-navy">{fmtEuro(ca)}</span></div>
+                                                )}
+                                                {surRetro && (
+                                                  <div className="flex justify-between text-amber-800">
+                                                    <span>Remise financée par le partenaire — rétrocession ramenée à</span>
+                                                    <span className="font-semibold">{fmtEuro(commission)}</span>
+                                                  </div>
                                                 )}
                                                 <div className="flex justify-between"><span>CA réel Frangola (après apporteur)</span><span className="font-semibold fa-navy">{fmtEuro(caReel)}</span></div>
                                                 {(() => {
@@ -18559,16 +18638,20 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
                                               const manqueHono = financeDraft.caAmount !== "" && Number(financeDraft.caAmount) < HONORAIRES_SEUIL_MOTIF && !financeDraft.motif;
                                               const manqueGeste = (Number(financeDraft.geste) || 0) > 0
                                                 && !motifGesteComplet(financeDraft.motifGeste, financeDraft.motifGesteLibre);
+                                              const tropGrande = repartirGeste(financeDraft.caAmount, financeDraft.geste,
+                                                financeDraft.commissionAmount, financeDraft.motifGeste).depasse;
                                               const frein = manqueHono
                                                 ? "Choisis d'abord le motif des honoraires réduits"
                                                 : manqueGeste
                                                   ? (financeDraft.motifGeste === MOTIF_GESTE_AUTRE
                                                       ? "Précise le motif du geste commercial"
                                                       : "Choisis d'abord le motif du geste commercial")
-                                                  : "";
+                                                  : tropGrande
+                                                    ? "La remise dépasse la rétrocession du partenaire"
+                                                    : "";
                                               return (
                                                 <button onClick={() => saveFinance(d.id)}
-                                                  disabled={manqueHono || manqueGeste} title={frein}
+                                                  disabled={manqueHono || manqueGeste || tropGrande} title={frein}
                                                   className="fa-bg-teal text-xs font-medium px-3 py-1.5 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed">Enregistrer</button>
                                               );
                                             })()}
