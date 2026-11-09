@@ -236,6 +236,59 @@ function oublierAppareil() {
 // Adresse de la fonction serveur qui crée ou réinitialise un accès.
 const URL_ACTIVATION = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/activer-compte`;
 
+// ─── Les alertes ────────────────────────────────────────────────────────
+// Être prévenu sans ouvrir l'application. Le travail se fait côté Supabase,
+// par une tâche qui passe toutes les dix minutes ; ici on ne règle que ce
+// qu'elle doit surveiller, pour qui, et à quelles heures elle se tait.
+const EVENEMENTS_ALERTE = [
+  ["dossier", "Nouveau dossier déposé", "Environ un par jour au rythme de ton objectif"],
+  ["refus", "Refus de la banque", "Rare, mais c'est là qu'il faut réagir vite"],
+  ["partenaire", "Nouveau partenaire inscrit", "Y compris les filleuls déclarés par un parrain"],
+  ["piece", "Pièce déposée sur un dossier en cours", "Le plus bavard des quatre — à n'activer qu'en cas de besoin"],
+];
+
+const ALERTES_DEFAUT = {
+  actif: true,
+  evenements: { dossier: true, refus: false, partenaire: false, piece: false },
+  destinataires: { gerant: true, nelson: false },
+  nuit: { actif: true, debut: "21:00", fin: "07:00" },
+};
+
+function reglagesAlertes(settings) {
+  const b = (settings && settings.alertes) || {};
+  return {
+    actif: b.actif !== false,
+    evenements: { ...ALERTES_DEFAUT.evenements, ...(b.evenements || {}) },
+    destinataires: { ...ALERTES_DEFAUT.destinataires, ...(b.destinataires || {}) },
+    nuit: { ...ALERTES_DEFAUT.nuit, ...(b.nuit || {}) },
+  };
+}
+
+function heureValide(hhmm) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(hhmm || ""); }
+
+// La plage de silence enjambe minuit (21 h → 7 h) : la comparer à plat la
+// laisserait fermée toute la journée et ouverte toute la nuit, à l'envers.
+function dansLeSilence(nuit, maintenant = new Date()) {
+  if (!nuit || nuit.actif === false) return false;
+  if (!heureValide(nuit.debut) || !heureValide(nuit.fin) || nuit.debut === nuit.fin) return false;
+  const enMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+  const d = enMin(nuit.debut), f = enMin(nuit.fin);
+  const m = maintenant.getHours() * 60 + maintenant.getMinutes();
+  return d < f ? (m >= d && m < f) : (m >= d || m < f);
+}
+
+// Ce qu'on dit du dernier passage. Une tâche programmée qui s'est tue depuis
+// une heure n'a pas « rien à signaler » : elle est en panne, et c'est pire.
+function santeAlertes(etat, maintenant = Date.now()) {
+  if (!etat || !etat.dernierPassage) return { etat: "jamais", libelle: "jamais exécutée" };
+  const minutes = Math.round((maintenant - etat.dernierPassage) / 60000);
+  if (etat.incident) return { etat: "incident", minutes, libelle: `${etat.incident.nb} alerte${etat.incident.nb > 1 ? "s" : ""} n'${etat.incident.nb > 1 ? "ont" : "a"} pas pu partir` };
+  if (minutes > 45) return { etat: "muette", minutes, libelle: `aucun passage depuis ${minutes} minutes` };
+  return { etat: "ok", minutes, libelle: minutes < 1 ? "à l'instant" : `il y a ${minutes} minute${minutes > 1 ? "s" : ""}` };
+}
+
+const URL_ALERTES = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/alertes`;
+
 async function appelerActivation(corps) {
   const reponse = await fetch(URL_ACTIVATION, {
     method: "POST",
@@ -251,6 +304,25 @@ async function appelerActivation(corps) {
   if (!reponse.ok) throw new Error(resultat.error || "Activation impossible. Réessayez dans un instant.");
   return resultat;
 }
+// Ce que l'adresse demande : ?recherche=<nom> ouvre l'écran Dossiers sur ce
+// nom. C'est ce qui rend cliquable le bouton des mails d'alerte. Lu une fois
+// au démarrage, puis effacé de la barre d'adresse — sinon un rafraîchissement
+// des semaines plus tard rouvrirait la même recherche sans qu'on comprenne.
+function demandeDeLAdresse() {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    const recherche = (p.get("recherche") || "").trim().slice(0, 80);
+    if (!recherche) return null;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("recherche");
+    url.searchParams.delete("tab");
+    url.searchParams.delete("vue");
+    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    return { recherche };
+  } catch (e) { return null; }
+}
+const DEMANDE_ADRESSE = typeof window !== "undefined" ? demandeDeLAdresse() : null;
+
 function getStoredTab(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
 }
@@ -3274,6 +3346,57 @@ export default function App() {
   // Le réglage partagé : il voyage dans les données, puisqu'il décide de ce
   // que voient les partenaires. Les deux interrupteurs locaux (aperçu, refus)
   // restent, eux, dans le navigateur.
+  // L'état de la tâche d'alerte vit dans sa propre clé : elle l'écrit, nous
+  // la lisons. Jamais l'inverse — sinon un enregistrement de l'application
+  // écraserait un repère et des alertes repartiraient en double.
+  const [etatAlertes, setEtatAlertes] = useState(null);
+  useEffect(() => {
+    let vivant = true;
+    const relire = async () => {
+      try {
+        const res = await storage.get("adp:alertes-etat", true);
+        if (vivant && res && res.value) setEtatAlertes(JSON.parse(res.value));
+      } catch (e) { /* absente tant que la tâche n'a jamais tourné */ }
+    };
+    relire();
+    const t = setInterval(relire, 120000);
+    return () => { vivant = false; clearInterval(t); };
+  }, []);
+
+  // Fusion en profondeur sur un seul niveau : « evenements » et
+  // « destinataires » sont des objets, les remplacer en bloc effacerait les
+  // cases qu'on ne touche pas.
+  async function majAlertes(patch) {
+    await mutateData(base => {
+      const avant = reglagesAlertes(base.settings);
+      const suite = { ...avant };
+      for (const [cle, val] of Object.entries(patch)) {
+        suite[cle] = (val && typeof val === "object" && !Array.isArray(val))
+          ? { ...(avant[cle] || {}), ...val }
+          : val;
+      }
+      return { ...base, settings: { ...base.settings, alertes: suite } };
+    });
+  }
+
+  // L'essai passe par la fonction Edge : la clé d'envoi ne doit jamais
+  // descendre dans le navigateur.
+  async function testerAlertes() {
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      const r = await fetch(URL_ALERTES, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${sess?.session?.access_token || import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          "apikey": import.meta.env.VITE_SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ action: "test" }),
+      });
+      return r.ok;
+    } catch (e) { return false; }
+  }
+
   async function majSaison(patch) {
     await mutateData(base => {
       const avant = reglagesSaison(base.settings);
@@ -4133,6 +4256,7 @@ export default function App() {
         return (
         <AdminDashboard
           saison={saison} apercuSaison={apercuSaison} onApercuSaison={majApercuSaison} onMajSaison={majSaison}
+          etatAlertes={etatAlertes} onMajAlertes={majAlertes} onTesterAlertes={testerAlertes}
           data={data}
           modeDemo={modeDemo}
           onBasculerDemo={basculerDemo}
@@ -4209,6 +4333,7 @@ export default function App() {
       {view === "adminDash" && (
         <AdminDashboard
           saison={saison} apercuSaison={apercuSaison} onApercuSaison={majApercuSaison} onMajSaison={majSaison}
+          etatAlertes={etatAlertes} onMajAlertes={majAlertes} onTesterAlertes={testerAlertes}
           data={data}
           modeDemo={modeDemo}
           onBasculerDemo={basculerDemo}
@@ -16784,6 +16909,181 @@ function libelleJour(mmjj) {
   return `${j === 1 ? "1er" : j} ${MOIS_FR[m - 1]}`;
 }
 
+
+function ReglagesAlertes({ data, etat, onMaj, onTest, canEdit, busy }) {
+  const reg = reglagesAlertes(data.settings);
+  const sante = santeAlertes(etat);
+  const [essai, setEssai] = useState(null);
+  const silence = dansLeSilence(reg.nuit);
+
+  async function lancerEssai() {
+    setEssai("envoi");
+    const ok = await onTest();
+    setEssai(ok ? "ok" : "ko");
+  }
+
+  const bascule = (chemin, valeur) => onMaj({ [chemin]: valeur });
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
+        <h3 className="font-display font-semibold fa-navy flex items-center gap-2">
+          <Bell size={18} className="fa-teal-text" /> Alertes
+        </h3>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={reg.actif} disabled={!canEdit || busy}
+            onChange={e => bascule("actif", e.target.checked)} className="rounded border-gray-300 w-4 h-4" />
+          <span className="font-medium fa-navy">Activées</span>
+        </label>
+      </div>
+      <p className="text-sm text-gray-600 mb-4">
+        Être prévenu par e-mail sans ouvrir l'application. Une tâche vérifie toutes les dix minutes
+        s'il est arrivé quelque chose.
+      </p>
+
+      {/* L'état de la tâche. Un système d'alerte en panne qui ne le dit pas
+          est pire que pas d'alerte du tout : on croirait qu'il ne se passe rien. */}
+      <div className={`rounded-xl px-4 py-3 mb-4 text-sm border ${
+        sante.etat === "incident" ? "bg-red-50 border-red-300 text-red-800"
+        : sante.etat === "muette" ? "bg-amber-50 border-amber-300 text-amber-900"
+        : sante.etat === "jamais" ? "bg-gray-50 border-gray-200 text-gray-600"
+        : "fa-bg-offwhite border-gray-200"}`}>
+        {sante.etat === "incident" ? (
+          <>
+            <strong>{sante.libelle}</strong> depuis le {fmtDate(etat.incident.depuis)}.
+            {etat.incident.message && <span className="block text-xs mt-1 opacity-80">{etat.incident.message}</span>}
+            <span className="block text-xs mt-1">Vérifie les secrets d'envoi côté Supabase, puis relance un essai.</span>
+          </>
+        ) : sante.etat === "muette" ? (
+          <>La tâche ne s'est pas manifestée depuis <strong>{sante.minutes} minutes</strong>. Elle devrait passer toutes les dix minutes.</>
+        ) : sante.etat === "jamais" ? (
+          <>La tâche n'a encore jamais tourné. Tant que la programmation n'est pas en place côté Supabase, aucune alerte ne part.</>
+        ) : (
+          <>Dernière vérification {sante.libelle}
+            {etat && etat.envoyeesAujourdhui > 0 && <> · {etat.envoyeesAujourdhui} alerte{etat.envoyeesAujourdhui > 1 ? "s" : ""} envoyée{etat.envoyeesAujourdhui > 1 ? "s" : ""} aujourd'hui</>}
+            {etat && (etat.enAttente || []).length > 0 && <> · {etat.enAttente.length} en attente du matin</>}
+          </>
+        )}
+      </div>
+
+      <div className="border border-gray-200 rounded-xl p-3.5 mb-3">
+        <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Ce qui déclenche une alerte</span>
+        <div className="mt-2 space-y-0.5">
+          {EVENEMENTS_ALERTE.map(([cle, nom, sous]) => (
+            <label key={cle} className="flex items-start gap-2.5 py-2 border-b border-gray-100 last:border-b-0 cursor-pointer">
+              <input type="checkbox" checked={!!reg.evenements[cle]} disabled={!canEdit || busy || !reg.actif}
+                onChange={e => onMaj({ evenements: { [cle]: e.target.checked } })}
+                className="rounded border-gray-300 w-4 h-4 mt-0.5" />
+              <span>
+                <span className="block text-sm font-bold fa-navy">{nom}</span>
+                <span className="block text-xs text-gray-600">{sous}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="border border-gray-200 rounded-xl p-3.5 mb-3">
+        <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Qui les reçoit</span>
+        <div className="mt-2 space-y-0.5">
+          <label className="flex items-start gap-2.5 py-2 border-b border-gray-100 cursor-pointer">
+            <input type="checkbox" checked={reg.destinataires.gerant} disabled={!canEdit || busy || !reg.actif}
+              onChange={e => onMaj({ destinataires: { gerant: e.target.checked } })}
+              className="rounded border-gray-300 w-4 h-4 mt-0.5" />
+            <span>
+              <span className="block text-sm font-bold fa-navy">{NOM_GERANT}</span>
+              <span className="block text-xs text-gray-600">
+                {(data?.settings?.admin?.email || "").trim() || "Aucune adresse sur le compte d'administration — rien ne partira"}
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2.5 py-2 cursor-pointer">
+            <input type="checkbox" checked={reg.destinataires.nelson} disabled={!canEdit || busy || !reg.actif}
+              onChange={e => onMaj({ destinataires: { nelson: e.target.checked } })}
+              className="rounded border-gray-300 w-4 h-4 mt-0.5" />
+            <span>
+              <span className="block text-sm font-bold fa-navy">Nelson</span>
+              <span className="block text-xs text-gray-600">Seulement les dossiers de ses propres partenaires</span>
+            </span>
+          </label>
+        </div>
+        <p className="text-xs text-gray-600 mt-2">
+          Les alertes nomment des clients et leurs téléphones : elles ne partent qu'à des adresses Frangola,
+          jamais à un partenaire.
+        </p>
+      </div>
+
+      <div className="border border-gray-200 rounded-xl p-3.5">
+        <label className="flex items-start gap-2.5 cursor-pointer">
+          <input type="checkbox" checked={reg.nuit.actif} disabled={!canEdit || busy || !reg.actif}
+            onChange={e => onMaj({ nuit: { actif: e.target.checked } })}
+            className="rounded border-gray-300 w-4 h-4 mt-0.5" />
+          <span>
+            <span className="block text-sm font-bold fa-navy">
+              Silence la nuit{silence && reg.nuit.actif && reg.actif && <span className="ml-2 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-2 py-0.5">en cours</span>}
+            </span>
+            <span className="block text-xs text-gray-600">
+              Les alertes de la nuit sont gardées et envoyées en une fois le matin, jamais perdues.
+            </span>
+          </span>
+        </label>
+        {reg.nuit.actif && (
+          <div className="flex items-center gap-2 mt-3 flex-wrap">
+            <label className="text-xs text-gray-600" htmlFor="alerte-nuit-debut">de</label>
+            <ChampHeure id="alerte-nuit-debut" valeur={reg.nuit.debut} disabled={!canEdit || busy || !reg.actif}
+              onValider={v => onMaj({ nuit: { debut: v } })} />
+            <label className="text-xs text-gray-600" htmlFor="alerte-nuit-fin">à</label>
+            <ChampHeure id="alerte-nuit-fin" valeur={reg.nuit.fin} disabled={!canEdit || busy || !reg.actif}
+              onValider={v => onMaj({ nuit: { fin: v } })} />
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap mt-4 pt-4 border-t border-gray-100">
+        <span className="flex-1 min-w-[12rem]">
+          <span className="block text-sm font-bold fa-navy">Vérifier que ça marche</span>
+          <span className="block text-xs text-gray-600">Envoie un mail d'essai tout de suite, avec un faux dossier</span>
+        </span>
+        <button onClick={lancerEssai} disabled={!canEdit || busy || essai === "envoi"}
+          className="fa-tap text-sm font-bold fa-navy fa-bg-gold px-4 py-2.5 rounded-lg transition disabled:opacity-50">
+          {essai === "envoi" ? "Envoi…" : "Envoyer un essai"}
+        </button>
+      </div>
+      {essai === "ok" && <p className="text-xs text-emerald-700 font-semibold mt-2">Parti. S'il n'arrive pas, regarde dans les indésirables.</p>}
+      {essai === "ko" && <p className="text-xs text-red-700 font-semibold mt-2">L'envoi a échoué — les secrets ne sont probablement pas en place côté Supabase.</p>}
+    </div>
+  );
+}
+
+// Une heure se saisit comme une date : la frappe reste locale, et rien ne
+// part tant qu'elle n'est pas complète et plausible.
+function ChampHeure({ id, valeur, onValider, disabled }) {
+  const { texte, setTexte, focus, rendu } = useBrouillonChamp(valeur || "", v => v || "");
+  const [vu, clignoter] = useClignotant();
+  function valider(brut) {
+    const v = (brut === undefined ? texte : brut) || "";
+    if (v !== texte) setTexte(v);
+    if (v === rendu.current) return;
+    if (!heureValide(v)) { setTexte(rendu.current); return; }
+    onValider(v);
+    clignoter();
+  }
+  return (
+    <span className="relative inline-flex items-center">
+      <input type="time" id={id} value={texte} disabled={disabled}
+        onFocus={() => { focus.current = true; }}
+        onChange={e => setTexte(e.target.value)}
+        onBlur={e => { focus.current = false; valider(e.target.value); }}
+        onKeyDown={e => {
+          if (e.key === "Enter") { e.preventDefault(); valider(e.currentTarget.value); }
+          if (e.key === "Escape") { setTexte(rendu.current); e.currentTarget.blur(); }
+        }}
+        className="border border-gray-300 rounded-lg px-2.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-50" />
+      {vu && <CheckCircle2 size={13} className="text-emerald-600 ml-1 shrink-0" aria-label="enregistré" />}
+    </span>
+  );
+}
+
 function ReglagesSaison({ data, apercu, onApercu, onMaj, canEdit, busy }) {
   const reg = reglagesSaison(data.settings);
   // Ce que les dates désignent vraiment, indépendamment de l'aperçu local :
@@ -16892,7 +17192,7 @@ function ReglagesSaison({ data, apercu, onApercu, onMaj, canEdit, busy }) {
   );
 }
 
-function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, onMajSaison, data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, onFusionnerPartenaires, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onRattacherParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
+function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, onMajSaison, etatAlertes, onMajAlertes, onTesterAlertes, data, modeDemo, onBasculerDemo, currentAdmin, isFullAdmin, viewerLabel, viewerTelephone, onSetViewerTelephone, onUpdateAdmin, onSetAssureurs, onSetBanques, onUploadContratType, onVirementPartenaire, onAnnulerVirement, onAjouterChallenge, onMajChallenge, onSupprimerChallenge, onMajBienvenue, onMajInscritBienvenue, onRelancerPartenaire, onFusionnerReseaux, onRefuserFusionReseaux, onLogout, onAddPartner, onUpdatePartner, onUploadPartnerContract, onRemovePartnerContract, onDeletePartner, onRestorePartner, onEffacerPartenaire, onFusionnerPartenaires, estEffacable, onUpdateStatus, onUpdateDossierClient, onUploadPieceBackOffice, onDeleteDossier, onUpdateDossierNotes, onReaffecterDossier, onUpdateDossierSimulation, onUpdateDossierPartnerMessage, onUploadBordereau, onAdminUploadDoc, onRemoveDoc, onSwapDocs, onAddExtraDoc, onRemoveExtraDoc, onAddMandataire, onUpdateMandataire, onDeleteMandataire, onResetMandataireTotp, onSetChallengeGoals, onSetPeriodeProduction, onExporterSauvegarde, onRestaurerSauvegarde, onVerifierSauvegarde, onTraiterParrainage, onRattacherParrainage, onTraiterParrainagesEnLot, onRetirerFilleul, onAnnulerParrainage, onSetFactureStatut, onAddVersementParrainage, onMajVersementParrainage, onSupprimerVersementParrainage, onApercuPartner, onSaisiePartner, onRestoreMandataire, onUploadReseauLogo, onRemoveReseauLogo, busy }) {
   const COMMERCIAUX = ["Sébastien", ...data.mandataires.filter(m => !m.deleted).map(m => m.name)];
   const parrainagesEnAttente = (data.parrainages || []).filter(x => x.statut === "en_attente").length;
   const facturesEnAttente = data.partners.reduce((s, p) => s + (p.factures || []).filter(f => f.statut === "Déposée").length, 0);
@@ -16903,6 +17203,8 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
   // « stats » a été éclaté en plusieurs écrans : un navigateur qui avait gardé
   // l'ancienne valeur atterrirait sur une page vide.
   const [tab, setTabRaw] = useState(() => {
+    // Un lien d'alerte l'emporte sur le dernier écran visité.
+    if (DEMANDE_ADRESSE) return "dossiers";
     const garde = getStoredTab("adp:adminTab", "accueil");
     const correspondances = { stats: "analyses" };
     const cible = correspondances[garde] || garde;
@@ -16970,6 +17272,7 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
     { id: "banques", label: "Banques prêteuses", defaut: "banques", fullAdmin: true, rendu: () => <BanquesPanel data={data} onSet={onSetBanques} canEdit={isFullAdmin} busy={busy} /> },
     { id: "rythmeReseau", label: "Démarrage et rythme du réseau", defaut: "analyses", rendu: () => <RythmeReseau data={data} commerciaux={COMMERCIAUX} /> },
     { id: "backoffice", label: "Suivi back-office", defaut: "backoffice", rendu: () => <BackOfficeOnglet data={data} onUpdate={onUpdateDossierClient} onUploadPiece={onUploadPieceBackOffice} busy={busy} expediteur={viewerLabel} telephone={viewerTelephone} /> },
+    { id: "alertes", label: "Alertes", defaut: "journal", fullAdmin: true, rendu: () => <ReglagesAlertes data={data} etat={etatAlertes} onMaj={onMajAlertes} onTest={onTesterAlertes} canEdit={isFullAdmin} busy={busy} /> },
     { id: "saison", label: "Thème saisonnier", defaut: "journal", fullAdmin: true, rendu: () => <ReglagesSaison data={data} apercu={apercuSaison} onApercu={onApercuSaison} onMaj={onMajSaison} canEdit={isFullAdmin} busy={busy} /> },
     { id: "sauvegardes", label: "Sauvegarde et restauration", defaut: "journal", fullAdmin: true, rendu: () => <SauvegardesPanel onExporter={onExporterSauvegarde} onRestaurer={onRestaurerSauvegarde} onVerifier={onVerifierSauvegarde} busy={busy} /> },
     { id: "connexions", label: "Dernières connexions", defaut: "journal", rendu: () => <BlocConnexions data={data} /> },
@@ -17095,7 +17398,7 @@ function AdminDashboard({ saison: saisonGlobale, apercuSaison, onApercuSaison, o
   const [newMandataireColor, setNewMandataireColor] = useState("#545454");
   const [newMandataireRole, setNewMandataireRole] = useState("standard");
   const [createdMandataire, setCreatedMandataire] = useState(null);
-  const [dossierSearch, setDossierSearch] = useState("");
+  const [dossierSearch, setDossierSearch] = useState(() => (DEMANDE_ADRESSE && DEMANDE_ADRESSE.recherche) || "");
   const [dossierFilter, setDossierFilter] = useState("tous");
   const [commercialFilter, setCommercialFilter] = useState("tous");
   // Dès qu'il y a du texte, l'écran Dossiers passe en mode recherche.
