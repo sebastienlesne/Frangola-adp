@@ -16942,7 +16942,7 @@ function ReglagesAlertes({ data, etat, onMaj, onTest, canEdit, busy }) {
     if (e.statut === 401) return "La fonction a refusé la demande. Vérifie que « Verify JWT » est bien sur OFF, et que l'adresse du compte d'administration est exactement celle avec laquelle tu es connecté.";
     if (e.statut === 400) return "Aucun destinataire : coche au moins une case dans « Qui les reçoit », et vérifie que le compte d'administration a bien une adresse mail.";
     if (e.statut === 404) return "Fonction introuvable à cette adresse. Le nom déployé doit être « alertes », en minuscules.";
-    if (e.statut === 502) return "La fonction a bien reçu la demande, mais Gmail a refusé l'envoi. C'est un secret SMTP : le plus souvent des espaces laissés dans le mot de passe d'application.";
+    if (e.statut === 502) return "La fonction a bien reçu la demande, mais l'envoi ne s'est pas terminé. La cause exacte est écrite en dessous — c'est elle qui compte, pas une supposition.";
     return "La fonction a répondu une erreur.";
   }
 
