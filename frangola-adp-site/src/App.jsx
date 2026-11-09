@@ -3393,8 +3393,16 @@ export default function App() {
         },
         body: JSON.stringify({ action: "test" }),
       });
-      return r.ok;
-    } catch (e) { return false; }
+      if (r.ok) return { ok: true };
+      // La vraie cause vaut mieux qu'une supposition : une fonction absente,
+      // un secret manquant et un refus de Gmail n'appellent pas le même geste.
+      const corps = await r.json().catch(() => null);
+      return { ok: false, statut: r.status, cause: (corps && corps.error) || "" };
+    } catch (e) {
+      // Ici le navigateur a bloqué avant l'envoi : fonction non déployée,
+      // URL fausse, ou en-têtes CORS absents côté fonction.
+      return { ok: false, statut: 0, cause: String(e?.message || e) };
+    }
   }
 
   async function majSaison(patch) {
@@ -16916,10 +16924,26 @@ function ReglagesAlertes({ data, etat, onMaj, onTest, canEdit, busy }) {
   const [essai, setEssai] = useState(null);
   const silence = dansLeSilence(reg.nuit);
 
+  const [echec, setEchec] = useState(null);
+
   async function lancerEssai() {
-    setEssai("envoi");
-    const ok = await onTest();
-    setEssai(ok ? "ok" : "ko");
+    setEssai("envoi"); setEchec(null);
+    const r = await onTest();
+    const bon = r === true || (r && r.ok);
+    setEssai(bon ? "ok" : "ko");
+    if (!bon && r && typeof r === "object") setEchec(r);
+  }
+
+  // Chaque échec a sa cause et son geste. Dire « vérifie les secrets » à
+  // quelqu'un dont la fonction n'est pas déployée lui fait perdre une heure.
+  function diagnostic(e) {
+    if (!e) return null;
+    if (e.statut === 0) return "Le navigateur n'a pas pu joindre la fonction. Soit elle n'est pas déployée sous le nom « alertes », soit sa dernière version ne répond pas aux appels venant du site.";
+    if (e.statut === 401) return "La fonction a refusé la demande. Vérifie que « Verify JWT » est bien sur OFF, et que l'adresse du compte d'administration est exactement celle avec laquelle tu es connecté.";
+    if (e.statut === 400) return "Aucun destinataire : coche au moins une case dans « Qui les reçoit », et vérifie que le compte d'administration a bien une adresse mail.";
+    if (e.statut === 404) return "Fonction introuvable à cette adresse. Le nom déployé doit être « alertes », en minuscules.";
+    if (e.statut === 502) return "La fonction a bien reçu la demande, mais Gmail a refusé l'envoi. C'est un secret SMTP : le plus souvent des espaces laissés dans le mot de passe d'application.";
+    return "La fonction a répondu une erreur.";
   }
 
   const bascule = (chemin, valeur) => onMaj({ [chemin]: valeur });
@@ -17050,7 +17074,16 @@ function ReglagesAlertes({ data, etat, onMaj, onTest, canEdit, busy }) {
         </button>
       </div>
       {essai === "ok" && <p className="text-xs text-emerald-700 font-semibold mt-2">Parti. S'il n'arrive pas, regarde dans les indésirables.</p>}
-      {essai === "ko" && <p className="text-xs text-red-700 font-semibold mt-2">L'envoi a échoué — les secrets ne sont probablement pas en place côté Supabase.</p>}
+      {essai === "ko" && (
+        <div className="mt-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2">
+          <p className="text-xs text-red-800 font-semibold">
+            L'envoi a échoué{echec && echec.statut ? ` (code ${echec.statut})` : ""}. {diagnostic(echec)}
+          </p>
+          {echec && echec.cause && (
+            <p className="text-[11px] text-red-700 mt-1 break-words opacity-80">{echec.cause}</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
